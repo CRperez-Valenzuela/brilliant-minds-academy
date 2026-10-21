@@ -1,0 +1,6 @@
+Mira, yo necesito, verdad, gestionar mejor la parte administrativa, como así pues, yo  necesito que los padres paguen, y bueno, no sé, una aplicación, una página, lo que  sea, una verga, de que ellos lleguen, pagaron y subieron la captura por allí, el pago por allí, como tal, ok, y yo después entonces confirmo eso, este, saber quien, tener como  un sistema de que estudiantes están activos, están fuera de la academia, han pagado, no  han pagado, todo eso, o sea, llevarse el control pues, como tal. 
+
+integraciopn con Banca amiga para verificar pagos realizados
+boton de pago o link a apartado del portal con pasarela de pago fintech, datos pago movil, cambio del día a BCV, 
+
+Gestor académico, necesita una base de datos, clientes con los pagos, estudiantes para un futuro manejo de ellos. personal y su pagos para llevar contabilidad. Por el momento el core base es llevar la facturación, monitoreo y notificación de próximo pago y morosos. verificación de pagos. 
