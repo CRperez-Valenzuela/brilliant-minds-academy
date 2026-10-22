@@ -23,6 +23,8 @@ function crearApp() {
 
   // Frontends estáticos (sin datos sensibles; la seguridad vive en /api/*)
   const pub = path.join(__dirname, 'public');
+  // Recursos con hash generados por Vite (frontend/ → public/assets): inmutables, caché larga.
+  app.use('/assets', express.static(path.join(pub, 'assets'), { immutable: true, maxAge: '1y', index: false }));
   app.use('/admin', express.static(path.join(pub, 'admin')));
   app.use('/admisiones', express.static(path.join(pub, 'admisiones')));
   app.get('/portal/:token', (_req, res) => res.sendFile(path.join(pub, 'portal', 'index.html')));

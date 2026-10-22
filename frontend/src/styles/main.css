@@ -1,0 +1,27 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    @apply bg-slate-100 text-slate-900 antialiased;
+  }
+
+  body {
+    @apply min-h-screen bg-gradient-to-br from-slate-100 via-slate-50 to-slate-200;
+  }
+
+  /* Foco visible para teclado en TODO control interactivo (contraste 3:1 mínimo sobre fondos claros). */
+  :focus-visible {
+    @apply outline-none ring-2 ring-slate-900 ring-offset-2 ring-offset-white;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}

@@ -1,0 +1,3158 @@
+From 8d4811ac47b581dd93230b5378b56fba47ad1ea7 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 21 Oct 2026 22:10:23 -0400
+Subject: [PATCH] feat(frontend): interfaces transaccionales Vite + TypeScript
+ + Tailwind
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Proyecto frontend/ con AdminDashboard, Admisiones públicas y Portal del
+representante (TypeScript estricto, sin any), cliente API tipado, sanitización
+XSS por plantilla, Candado Premium y build hacia public/. app.js sirve /assets.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01S9aThi2RUfSdngj9etfPHe
+---
+ CAMBIOS_BMA_FRONTEND.md        |  78 +++
+ app.js                         |   2 +
+ frontend/admin/index.html      |  15 +
+ frontend/admisiones/index.html |  15 +
+ frontend/index.html            |  19 +
+ frontend/package.json          |  24 +
+ frontend/portal/index.html     |  16 +
+ frontend/postcss.config.js     |   6 +
+ frontend/src/admin.ts          | 841 +++++++++++++++++++++++++++++++++
+ frontend/src/admisiones.ts     | 583 +++++++++++++++++++++++
+ frontend/src/api/bmaClient.ts  | 261 ++++++++++
+ frontend/src/css.d.ts          |   2 +
+ frontend/src/lib/format.ts     |  55 +++
+ frontend/src/lib/html.ts       |  66 +++
+ frontend/src/lib/icons.ts      |  34 ++
+ frontend/src/lib/ui.ts         | 198 ++++++++
+ frontend/src/portal.ts         | 268 +++++++++++
+ frontend/src/styles/main.css   |  27 ++
+ frontend/src/types/index.ts    | 332 +++++++++++++
+ frontend/tailwind.config.js    |   8 +
+ frontend/tsconfig.json         |  35 ++
+ frontend/vite.config.ts        |  55 +++
+ package.json                   |   5 +-
+ 23 files changed, 2944 insertions(+), 1 deletion(-)
+ create mode 100644 CAMBIOS_BMA_FRONTEND.md
+ create mode 100644 frontend/admin/index.html
+ create mode 100644 frontend/admisiones/index.html
+ create mode 100644 frontend/index.html
+ create mode 100644 frontend/package.json
+ create mode 100644 frontend/portal/index.html
+ create mode 100644 frontend/postcss.config.js
+ create mode 100644 frontend/src/admin.ts
+ create mode 100644 frontend/src/admisiones.ts
+ create mode 100644 frontend/src/api/bmaClient.ts
+ create mode 100644 frontend/src/css.d.ts
+ create mode 100644 frontend/src/lib/format.ts
+ create mode 100644 frontend/src/lib/html.ts
+ create mode 100644 frontend/src/lib/icons.ts
+ create mode 100644 frontend/src/lib/ui.ts
+ create mode 100644 frontend/src/portal.ts
+ create mode 100644 frontend/src/styles/main.css
+ create mode 100644 frontend/src/types/index.ts
+ create mode 100644 frontend/tailwind.config.js
+ create mode 100644 frontend/tsconfig.json
+ create mode 100644 frontend/vite.config.ts
+
+diff --git a/CAMBIOS_BMA_FRONTEND.md b/CAMBIOS_BMA_FRONTEND.md
+new file mode 100644
+index 0000000..ea0a662
+--- /dev/null
++++ b/CAMBIOS_BMA_FRONTEND.md
+@@ -0,0 +1,78 @@
++# CAMBIOS_BMA_FRONTEND — Interfaces transaccionales (Vite + TypeScript + Tailwind CSS)
++
++**Proyecto:** Brilliant Minds Academy · Core Base (US$750) · **Rama:** `development` · **Agente:** Ingeniero Frontend Senior, Astra Digital Solutions
++
++Se creó el proyecto `frontend/` con las tres interfaces (AdminDashboard, Admisiones públicas, Portal del representante), tipadas en modo estricto y maquetadas con Tailwind (esqueleto neutro Slate). El build escribe directamente en `public/`, la carpeta que ya sirve Express.
++
++## Verificación realizada (y sus límites)
++
++| Verificación | Resultado |
++|---|---|
++| `tsc` 6.0.3 con `strict` + `noUncheckedIndexedAccess` + `exactOptionalPropertyTypes` + `noUnusedLocals/Parameters`, sobre `src/**` | 0 errores |
++| Uso de `any` en `src/` | 0 apariciones |
++| Código compilado con `tsc` y ejecutado en **Chromium real** contra una API simulada (17 casos) | 17/17 |
++| `npm test` del backend (sin cambios de lógica) | 54/54 (34 de integración omitidos sin `PG_TEST_PORT`, igual que antes) |
++
++Los 17 casos de navegador cubren: costo USD + Bs; validación de los 3 archivos (ausentes, >5 MB, formato, campo borrado del DOM); `FormData` multipart real; bloqueo de envío si la tasa BCV cambió; errores 422 asociados a campos; token del portal tomado de la URL y **sin** el Bearer del panel; POST JSON de referencia; login, Bearer inyectado desde `sessionStorage`, KPIs y barras; sidebar persistente tras recargar; Candado Premium (clases `absolute inset-0 backdrop-blur-md bg-white/80`, precio y aviso); aprobar / rechazar (sin nota no hay petición; con nota se envía `{nota}`); XSS (cargas `<img onerror>` en nombres, referencias, conceptos y cuentas **no se ejecutan** y se ven como texto; enlace `javascript:` de WhatsApp se neutraliza); 401 → vuelve al login.
++
++**Lo que NO se pudo comprobar en este entorno** (el registro de npm está bloqueado):
++- `vite build` y la compilación de Tailwind **no se ejecutaron**: `vite`, `tailwindcss`, `postcss` y `autoprefixer` no están instalados. Las pruebas de navegador corrieron sin hoja de estilos, así que verifican comportamiento, **no el aspecto visual**. Los selectores de Tailwind de las variantes (`group-data-[collapsed=true]/sb:…`, `aria-pressed:`, `min-h-96`) siguen la sintaxis de Tailwind 3.4, pero conviene revisarlos con los ojos tras `npm run frontend:build`.
++- Contraste, tamaños táctiles y responsive se diseñaron con valores seguros (slate-900 sobre blanco, objetivos de 40 px, `sm:`/`xl:`), pero no se midieron en pantalla.
++- `app.js` no se pudo arrancar aquí (Express no está instalado); la ruta nueva es una línea estándar de `express.static` con sintaxis verificada.
++
++## Archivos creados
++
++| Archivo | Contenido |
++|---|---|
++| `frontend/package.json` | Scripts `dev`, `typecheck`, `build` (`tsc --noEmit && vite build`); devDependencies: vite 5, tailwindcss 3.4, postcss, autoprefixer, typescript 5.6, @types/node. |
++| `frontend/tsconfig.json` | Estricto: `strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noImplicitReturns`, `noUnused*`, `verbatimModuleSyntax`, `useUnknownInCatchVariables`. |
++| `frontend/tailwind.config.js` | `content: ["./index.html", "./src/**/*.{ts,js}"]` (exacto, según el prompt). |
++| `frontend/postcss.config.js` | `tailwindcss` + `autoprefixer`. |
++| `frontend/vite.config.ts` | Multi-página (`admin`, `admisiones`, `portal`), `outDir: ../public`, `emptyOutDir: true`; en `vite dev` replica `/admin`, `/admisiones`, `/portal/:token` y hace proxy de `/api` a `localhost:3000`. |
++| `frontend/index.html` | Índice solo para `vite dev` (no entra al build). |
++| `frontend/{admin,admisiones,portal}/index.html` | Cascarones mínimos (`<div id="app">` + módulo); toda la interfaz se renderiza desde TypeScript. |
++| `frontend/src/types/index.ts` | `Usuario`, `Estudiante`, `Cuota`, `PagoReferencia` (exactos al prompt) + sobres de la API, errores, config de admisiones, portal, tablero, auditoría, módulos premium y estado de la UI. Todo `readonly`. |
++| `frontend/src/api/bmaClient.ts` | `fetch` envolvente: Bearer desde `sessionStorage`, `{ok,data}`/`{ok:false,error}` → excepciones tipadas `BmaApiError` (con `camposInvalidos()` y `moduloPremium()`), `BmaSesionExpiradaError` (401), `BmaRedError` (sin conexión / tiempo agotado / no-JSON); tiempo límite; `pagina()` y `descargar()`. |
++| `frontend/src/lib/html.ts` | `esc()` (sanitizador XSS) y etiqueta `html` que lo aplica a **cada** valor interpolado: un dato dinámico no puede llegar al DOM sin escapar. `urlSegura()` para `href`. |
++| `frontend/src/lib/{icons,format,ui}.ts` | Iconos SVG puros; formato USD/Bs/fechas (hoy = Caracas); componentes de UI (etiquetas, avisos, toasts, modales `<dialog>` con foco atrapado, acceso tipado al DOM). |
++| `frontend/src/styles/main.css` | Capas de Tailwind, foco visible global, respeto de `prefers-reduced-motion`. |
++| `frontend/src/css.d.ts` | Declaración de módulos `*.css`. |
++| `frontend/src/admisiones.ts` | Planilla pública (ver abajo). |
++| `frontend/src/portal.ts` | Portal del representante. |
++| `frontend/src/admin.ts` | AdminDashboard. |
++| `CAMBIOS_BMA_FRONTEND.md` | Este resumen. |
++
++## Archivos modificados
++
++| Archivo | Cambio |
++|---|---|
++| `app.js` | Nueva línea: `app.use('/assets', express.static(public/assets, { immutable, maxAge: '1y' }))` para los recursos con hash de Vite. Las rutas `/admin`, `/admisiones` y `/portal/:token` no cambian. |
++| `package.json` (raíz) | Scripts `frontend:install`, `frontend:build`, `frontend:dev`. |
++
++> `public/` (admin, admisiones, portal heredados) **sigue intacto** hasta que se ejecute el build; al ejecutarlo, `emptyOutDir` lo sustituye por la salida de Vite. No hay nada más en `public/` que se pierda.
++
++## Cómo se cumple cada punto del prompt
++
++- **Admisiones:** `GET /api/public/admisiones/config` → muestra US$ y su equivalente en Bs. con la tasa BCV y la hora de consulta (con segundos). Se refresca cada 30 s, al volver a la pestaña y **justo antes de enviar**: si la tasa cambió, se actualiza el monto, se avisa y no se envía hasta que el representante lo vea. La validación de archivos comprueba que los 3 `<input type="file">` existan en el DOM, tengan archivo, no estén vacíos, pesen ≤ 5 MB y sean JPG/PNG (carnet) o JPG/PNG/PDF; recién entonces se construye el `FormData`. Las reglas de texto replican las del backend (cédula, teléfono E.164 de 10–15 dígitos, referencia `^[A-Za-z0-9-]{4,40}$`).
++- **Admin:** sidebar colapsable con estado en `localStorage` (clave `bma.sidebar.colapsado`; en móvil arranca colapsado). Colapsado: textos con `sr-only` (siguen disponibles para lectores de pantalla), iconos visibles y tooltip flotante al pasar el ratón o enfocar con teclado. 4 tarjetas KPI de `GET /api/facturacion/tablero` (refresco automático cada 30 s, selector de período); barras diarias con `div` cuya altura se asigna tras montar. Bandeja de auditoría con filtros por estado y paginación; **rechazar abre un modal con nota obligatoria** (máx. 300). Candado Premium: el clic en un módulo bloqueado se intercepta (`preventDefault` + `stopPropagation`) y se inyecta la capa `absolute inset-0 backdrop-blur-md bg-white/80` con precio en USD, descripción y «Módulo Premium Deshabilitado»; también se activa si el servidor responde 403 `MODULO_PREMIUM_DESHABILITADO`.
++- **Portal:** token de `/portal/:token` (en desarrollo también `?token=`); no usa el Bearer del panel; banner según estado de cuenta (al día, moroso, en validación, fuera de la academia); cuotas con monto en Bs. calculado por el backend a la tasa BCV (aritmética en BigInt) y total pendiente sumado en centavos; formulario por cuota para declarar la referencia.
++- **Diseño:** superficies `bg-white/90` o `/95` (≥ 86 %). Excepciones deliberadas: la capa del Candado (`/80`, lo pide el prompt), el telón oscuro de los diálogos (`/60`) y tintes `/30` en bordes y anillos de etiquetas. Espaciado solo en la escala 1·2·3·4·6·8·12. Foco visible global. Todos los iconos son SVG en línea.
++
++## Hallazgos del bucle de revisión (corregidos antes de entregar)
++
++1. **Contrato:** `GET /api/auth/me` devuelve `{ usuario }`, no el usuario plano; el cliente lo trataba como plano. Corregido (`RespuestaMe`).
++2. **Plantillas:** un `false` interpolado se imprimía vacío, de modo que `aria-expanded` y `data-collapsed` quedaban sin valor al expandir el menú. Ahora los booleanos se imprimen como `true`/`false`. Lo detectó la prueba de navegador.
++3. **Ruido:** `/favicon.ico` generaba un 404 JSON en consola; se añadió un icono vacío en las páginas.
++
++## Pasos para tu entorno
++
++1. `npm run frontend:install` (instala vite, tailwindcss, postcss, autoprefixer, typescript).
++2. `npm run frontend:build` → escribe en `public/` (`/admin`, `/admisiones`, `/portal`, `/assets`). Para desarrollar: `npm run frontend:dev` (Vite en :5173 con proxy a la API en :3000; en el portal usa `/portal/?token=…`).
++3. `npm start` y abrir `/admisiones`, `/admin`, `/portal/<token>`.
++
++## Riesgos y decisiones abiertas
++
++- **«Tasa del segundo exacto»:** el servidor cachea la tasa BCV hasta 5 minutos; el frontend muestra la tasa vigente en el servidor y la reconfirma antes de enviar, pero la cifra definitiva en Bs. la fija el backend al registrar el pago.
++- **Sin CSP:** `middlewares/seguridad.js` no define Content-Security-Policy. El frontend no usa scripts ni estilos en línea (las alturas de las barras se asignan por DOM), por lo que añadir una CSP estricta (`default-src 'self'`) es viable como siguiente paso.
++- **Marca:** el diseño es neutro a propósito; al definirse la identidad bastará con ampliar `theme.extend` en `tailwind.config.js` y sustituir las clases `slate-900` de los botones primarios.
++- **Pendientes de la migración anterior** (sin cambios): el `push` de los commits locales sigue bloqueado por permisos del repositorio; riesgo de sobrescritura del representante en el formulario público (decisión de negocio); se recomienda eliminar el código heredado `src/` y `sql/` (Clínica).
+diff --git a/app.js b/app.js
+index 16275f3..959d600 100644
+--- a/app.js
++++ b/app.js
+@@ -23,6 +23,8 @@ function crearApp() {
+ 
+   // Frontends estáticos (sin datos sensibles; la seguridad vive en /api/*)
+   const pub = path.join(__dirname, 'public');
++  // Recursos con hash generados por Vite (frontend/ → public/assets): inmutables, caché larga.
++  app.use('/assets', express.static(path.join(pub, 'assets'), { immutable: true, maxAge: '1y', index: false }));
+   app.use('/admin', express.static(path.join(pub, 'admin')));
+   app.use('/admisiones', express.static(path.join(pub, 'admisiones')));
+   app.get('/portal/:token', (_req, res) => res.sendFile(path.join(pub, 'portal', 'index.html')));
+diff --git a/frontend/admin/index.html b/frontend/admin/index.html
+new file mode 100644
+index 0000000..dcb7d7e
+--- /dev/null
++++ b/frontend/admin/index.html
+@@ -0,0 +1,15 @@
++<!doctype html>
++<html lang="es">
++  <head>
++    <meta charset="utf-8" />
++    <meta name="viewport" content="width=device-width,initial-scale=1" />
++    <meta name="robots" content="noindex,nofollow" />
++    <link rel="icon" href="data:," />
++    <title>Panel administrativo · Brilliant Minds Academy</title>
++  </head>
++  <body>
++    <div id="app"></div>
++    <noscript>El panel necesita JavaScript habilitado para funcionar.</noscript>
++    <script type="module" src="/src/admin.ts"></script>
++  </body>
++</html>
+diff --git a/frontend/admisiones/index.html b/frontend/admisiones/index.html
+new file mode 100644
+index 0000000..245821c
+--- /dev/null
++++ b/frontend/admisiones/index.html
+@@ -0,0 +1,15 @@
++<!doctype html>
++<html lang="es">
++  <head>
++    <meta charset="utf-8" />
++    <meta name="viewport" content="width=device-width,initial-scale=1" />
++    <meta name="description" content="Planilla de inscripción de nuevos estudiantes · Brilliant Minds Academy" />
++    <link rel="icon" href="data:," />
++    <title>Inscripción · Brilliant Minds Academy</title>
++  </head>
++  <body>
++    <div id="app"></div>
++    <noscript>Esta planilla necesita JavaScript habilitado para funcionar.</noscript>
++    <script type="module" src="/src/admisiones.ts"></script>
++  </body>
++</html>
+diff --git a/frontend/index.html b/frontend/index.html
+new file mode 100644
+index 0000000..27ca036
+--- /dev/null
++++ b/frontend/index.html
+@@ -0,0 +1,19 @@
++<!doctype html>
++<html lang="es">
++  <head>
++    <meta charset="utf-8" />
++    <meta name="viewport" content="width=device-width,initial-scale=1" />
++    <title>BMA · Índice de desarrollo</title>
++  </head>
++  <body>
++    <!-- Solo para `vite dev`: no forma parte del build (ver build.rollupOptions.input). -->
++    <main style="font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 32rem">
++      <h1>Brilliant Minds Academy · interfaces</h1>
++      <ul>
++        <li><a href="/admisiones/">Admisiones públicas</a></li>
++        <li><a href="/admin/">Panel administrativo</a></li>
++        <li><a href="/portal/?token=TOKEN_DE_PRUEBA">Portal del representante (pasa ?token=… en desarrollo)</a></li>
++      </ul>
++    </main>
++  </body>
++</html>
+diff --git a/frontend/package.json b/frontend/package.json
+new file mode 100644
+index 0000000..3b48a41
+--- /dev/null
++++ b/frontend/package.json
+@@ -0,0 +1,24 @@
++{
++  "name": "bma-frontend",
++  "version": "1.0.0",
++  "private": true,
++  "type": "module",
++  "description": "Interfaces transaccionales de Brilliant Minds Academy (Vite + TypeScript + Tailwind CSS) · Astra Digital Solutions",
++  "engines": {
++    "node": ">=20"
++  },
++  "scripts": {
++    "dev": "vite",
++    "typecheck": "tsc --noEmit",
++    "build": "tsc --noEmit && vite build",
++    "preview": "vite preview"
++  },
++  "devDependencies": {
++    "@types/node": "^22.9.0",
++    "autoprefixer": "^10.4.20",
++    "postcss": "^8.4.47",
++    "tailwindcss": "^3.4.14",
++    "typescript": "^5.6.3",
++    "vite": "^5.4.10"
++  }
++}
+diff --git a/frontend/portal/index.html b/frontend/portal/index.html
+new file mode 100644
+index 0000000..9d14472
+--- /dev/null
++++ b/frontend/portal/index.html
+@@ -0,0 +1,16 @@
++<!doctype html>
++<html lang="es">
++  <head>
++    <meta charset="utf-8" />
++    <meta name="viewport" content="width=device-width,initial-scale=1" />
++    <meta name="robots" content="noindex,nofollow" />
++    <meta name="referrer" content="no-referrer" />
++    <link rel="icon" href="data:," />
++    <title>Portal del representante · Brilliant Minds Academy</title>
++  </head>
++  <body>
++    <div id="app"></div>
++    <noscript>Este portal necesita JavaScript habilitado para funcionar.</noscript>
++    <script type="module" src="/src/portal.ts"></script>
++  </body>
++</html>
+diff --git a/frontend/postcss.config.js b/frontend/postcss.config.js
+new file mode 100644
+index 0000000..2aa7205
+--- /dev/null
++++ b/frontend/postcss.config.js
+@@ -0,0 +1,6 @@
++export default {
++  plugins: {
++    tailwindcss: {},
++    autoprefixer: {},
++  },
++};
+diff --git a/frontend/src/admin.ts b/frontend/src/admin.ts
+new file mode 100644
+index 0000000..ef92bee
+--- /dev/null
++++ b/frontend/src/admin.ts
+@@ -0,0 +1,841 @@
++/**
++ * AdminDashboard central.
++ *  - ControlSidebar colapsable (estado persistido en localStorage; colapsado: solo iconos + tooltips flotantes).
++ *  - TODO string dinámico pasa por `esc()` a través de la etiqueta `html` (ver lib/html.ts).
++ *  - Tablero financiero en tiempo real (4 tarjetas KPI + barras de recaudación diaria con <div> dinámicos).
++ *  - Bandeja de auditoría: aprobar / rechazar (el rechazo exige nota de justificación en un modal).
++ *  - Candado Premium: los módulos de Fase 2 deshabilitados interceptan el clic y muestran una capa de cristal.
++ */
++import './styles/main.css';
++import { bma, BmaApiError, BmaRedError, BmaSesionExpiradaError, mensajeDeError, sesion } from './api/bmaClient';
++import { html, montar, raw, urlSegura, type HtmlSeguro } from './lib/html';
++import { icono, type NombreIcono } from './lib/icons';
++import { bs, diasDelPeriodo, fechaCorta, fechaHora, horaConSegundos, nombreMetodo, periodoActual, tasa as formatoTasa, usd } from './lib/format';
++import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiquetaEstado, notificar, obtener, todos } from './lib/ui';
++import type {
++  AlertaWhatsapp,
++  BalanceContable,
++  CodigoModuloPremium,
++  DetalleModuloPremium,
++  EstadoPagoReferencia,
++  EstudianteListado,
++  FiltroEstudiantes,
++  ModuloPremium,
++  Paginacion,
++  ReferenciaAuditoria,
++  RespuestaLogin,
++  RespuestaMe,
++  ResultadoRevision,
++  TableroFacturacion,
++  TipoAlertaWhatsapp,
++  Usuario,
++  VistaAdmin,
++} from './types/index';
++
++// ───────────────────────── Constantes ─────────────────────────
++
++export const AVISO_PREMIUM = 'Módulo Premium Deshabilitado';
++const CLAVE_SIDEBAR = 'bma.sidebar.colapsado';
++const REFRESCO_TABLERO_MS = 30_000;
++const LIMITE_PAGINA = 25;
++const MAX_NOTA = 300;
++
++interface DefVista {
++  readonly id: VistaAdmin;
++  readonly titulo: string;
++  readonly icono: NombreIcono;
++  readonly soloAdmin: boolean;
++}
++
++const VISTAS: readonly DefVista[] = [
++  { id: 'dashboard', titulo: 'Dashboard', icono: 'home', soloAdmin: false },
++  { id: 'estudiantes', titulo: 'Estudiantes', icono: 'users', soloAdmin: false },
++  { id: 'auditoria', titulo: 'Auditoría de referencias', icono: 'inbox', soloAdmin: false },
++  { id: 'contabilidad', titulo: 'Contabilidad', icono: 'book', soloAdmin: true },
++];
++
++const ICONO_MODULO: Readonly<Record<CodigoModuloPremium, NombreIcono>> = {
++  IA_ATENCION: 'bot',
++  WHATSAPP_AUTOMATICO: 'chat',
++  BANCAMIGA: 'wallet',
++  APP_MOVIL: 'phone',
++  FACHADA_WEB: 'globe',
++};
++
++const FILTROS_ESTUDIANTES: readonly FiltroEstudiantes[] = ['', 'Activo', 'Moroso', 'Fuera de la Academia', 'Pendiente por Validación Administrativa'];
++const FILTROS_AUDITORIA: readonly EstadoPagoReferencia[] = ['Por Validar', 'Aprobada', 'Rechazada'];
++
++// ───────────────────────── Estado ─────────────────────────
++
++interface EstadoAdmin {
++  readonly usuario: Usuario | null;
++  readonly modulos: readonly ModuloPremium[];
++  readonly vista: string; // VistaAdmin o `premium:<CODIGO>`
++  readonly colapsado: boolean;
++  readonly periodo: string;
++  readonly filtroEstudiantes: FiltroEstudiantes;
++  readonly paginaEstudiantes: number;
++  readonly filtroAuditoria: EstadoPagoReferencia;
++  readonly paginaAuditoria: number;
++}
++
++let estado: EstadoAdmin = {
++  usuario: null,
++  modulos: [],
++  vista: 'dashboard',
++  colapsado: false,
++  periodo: periodoActual(),
++  filtroEstudiantes: '',
++  paginaEstudiantes: 1,
++  filtroAuditoria: 'Por Validar',
++  paginaAuditoria: 1,
++};
++
++function actualizar(parcial: Partial<EstadoAdmin>): void {
++  estado = { ...estado, ...parcial };
++}
++
++interface Contexto {
++  readonly zona: HTMLElement;
++  readonly vigente: () => boolean;
++}
++
++let ticketVista = 0;
++let temporizadorTablero: number | null = null;
++
++// ───────────────────────── Persistencia del sidebar ─────────────────────────
++
++export function leerColapsado(): boolean {
++  try {
++    const v = localStorage.getItem(CLAVE_SIDEBAR);
++    if (v === '1') return true;
++    if (v === '0') return false;
++  } catch {
++    /* almacenamiento bloqueado: se usa el valor por defecto */
++  }
++  return window.matchMedia('(max-width: 767px)').matches; // en móvil arranca colapsado
++}
++
++function guardarColapsado(valor: boolean): void {
++  try {
++    localStorage.setItem(CLAVE_SIDEBAR, valor ? '1' : '0');
++  } catch {
++    /* sin almacenamiento: el estado vive solo en esta página */
++  }
++}
++
++// ───────────────────────── Guardas ─────────────────────────
++
++export function esUsuario(v: unknown): v is Usuario {
++  if (typeof v !== 'object' || v === null) return false;
++  const o = v as Readonly<Record<string, unknown>>;
++  return typeof o['id'] === 'number' && typeof o['nombre'] === 'string' && typeof o['email'] === 'string' && (o['rol'] === 'admin' || o['rol'] === 'secretaria');
++}
++
++function usuarioGuardado(): Usuario | null {
++  const crudo = sesion.usuarioCrudo();
++  if (!crudo) return null;
++  try {
++    const v: unknown = JSON.parse(crudo);
++    return esUsuario(v) ? v : null;
++  } catch {
++    return null;
++  }
++}
++
++const esAdmin = (): boolean => estado.usuario?.rol === 'admin';
++
++// ───────────────────────── Login ─────────────────────────
++
++function mostrarLogin(mensaje?: string): void {
++  detenerTablero();
++  ticketVista += 1;
++  document.body.className = 'text-slate-900';
++  montar(
++    obtener('#app', HTMLElement),
++    html`<main class="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 px-4 py-12">
++      <div class="flex items-center gap-4">
++        <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-900 text-white">${icono('school', 'h-6 w-6')}</span>
++        <div>
++          <h1 class="${CLS.titulo}">Brilliant Minds Academy</h1>
++          <p class="${CLS.subtitulo}">Panel administrativo</p>
++        </div>
++      </div>
++      <form id="login" novalidate class="${CLS.tarjetaCristal} flex flex-col gap-4 p-6" aria-label="Iniciar sesión">
++        <div id="login-aviso">${mensaje ? aviso('warn', mensaje) : null}</div>
++        <div>
++          <label for="login-email" class="${CLS.etiqueta}">Correo</label>
++          <input id="login-email" name="email" type="email" required autocomplete="username" class="${CLS.input}">
++        </div>
++        <div>
++          <label for="login-password" class="${CLS.etiqueta}">Contraseña</label>
++          <input id="login-password" name="password" type="password" required autocomplete="current-password" class="${CLS.input}">
++        </div>
++        <button type="submit" class="${boton(CLS.btnPrimario, 'w-full')}"><span>Entrar</span></button>
++      </form>
++    </main>`,
++  );
++  const form = obtener('#login', HTMLFormElement);
++  form.addEventListener('submit', (ev) => {
++    ev.preventDefault();
++    void alIniciarSesion(form);
++  });
++  obtener('#login-email', HTMLInputElement).focus();
++}
++
++async function alIniciarSesion(form: HTMLFormElement): Promise<void> {
++  const email = obtener('#login-email', HTMLInputElement).value.trim();
++  const password = obtener('#login-password', HTMLInputElement).value;
++  const zona = obtener('#login-aviso', HTMLElement);
++  if (!email || !password) {
++    montar(zona, aviso('bad', 'Escribe tu correo y tu contraseña.'));
++    return;
++  }
++  try {
++    const r = await conBotonOcupado(obtener('button[type="submit"]', HTMLButtonElement, form), () =>
++      bma.post<RespuestaLogin>('/auth/login', { email, password }, { sinAuth: true }),
++    );
++    sesion.guardar(r.token, JSON.stringify(r.usuario));
++    await arrancar();
++  } catch (e: unknown) {
++    montar(zona, aviso('bad', mensajeDeError(e)));
++  }
++}
++
++function cerrarSesion(mensaje?: string): void {
++  sesion.cerrar();
++  actualizar({ usuario: null, modulos: [], vista: 'dashboard' });
++  mostrarLogin(mensaje);
++}
++
++// ───────────────────────── Shell (sidebar + contenido) ─────────────────────────
++
++function itemNav(opciones: { readonly id: string; readonly titulo: string; readonly icono: NombreIcono; readonly tooltip: string; readonly bloqueado: boolean }): HtmlSeguro {
++  const { id, titulo, tooltip, bloqueado } = opciones;
++  return html`<button type="button" data-nav="${id}" data-bloqueado="${bloqueado}"
++    class="group/item relative flex h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 aria-[current=page]:bg-slate-900 aria-[current=page]:text-white group-data-[collapsed=true]/sb:justify-center group-data-[collapsed=true]/sb:px-0">
++    ${icono(opciones.icono)}
++    <span class="min-w-0 flex-1 truncate group-data-[collapsed=true]/sb:sr-only">${titulo}</span>
++    ${bloqueado ? html`<span class="text-slate-500 group-data-[collapsed=true]/sb:absolute group-data-[collapsed=true]/sb:right-2 group-data-[collapsed=true]/sb:top-1">${icono('lock', 'h-4 w-4 group-data-[collapsed=true]/sb:h-3 group-data-[collapsed=true]/sb:w-3')}</span>` : null}
++    <span role="tooltip" class="pointer-events-none absolute left-full top-1/2 z-40 ml-2 hidden -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-lg group-data-[collapsed=true]/sb:group-hover/item:block group-data-[collapsed=true]/sb:group-focus-visible/item:block">${tooltip}</span>
++  </button>`;
++}
++
++function shellHtml(): HtmlSeguro {
++  const u = estado.usuario;
++  const vistas = VISTAS.filter((v) => !v.soloAdmin || esAdmin());
++  return html`<div id="shell" data-collapsed="${estado.colapsado}" class="group/sb flex min-h-screen">
++    <aside id="barra-lateral" aria-label="Navegación principal"
++      class="sticky top-0 z-30 flex h-screen w-64 shrink-0 flex-col border-r border-slate-200 bg-white/95 backdrop-blur transition-[width] duration-200 group-data-[collapsed=true]/sb:w-20">
++      <div class="flex h-16 items-center gap-3 border-b border-slate-200 px-4 group-data-[collapsed=true]/sb:justify-center">
++        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-white">${icono('school')}</span>
++        <span class="truncate text-sm font-bold text-slate-900 group-data-[collapsed=true]/sb:sr-only">BMA · Administración</span>
++      </div>
++      <nav class="flex flex-1 flex-col gap-1 p-3" aria-label="Secciones">
++        ${vistas.map((v) => itemNav({ id: v.id, titulo: v.titulo, icono: v.icono, tooltip: v.titulo, bloqueado: false }))}
++        <p class="mt-6 px-3 text-xs font-semibold uppercase tracking-wide text-slate-600 group-data-[collapsed=true]/sb:sr-only">Módulos Premium</p>
++        <hr class="my-2 hidden border-slate-200 group-data-[collapsed=true]/sb:block">
++        ${estado.modulos.map((m) => itemNav({ id: `premium:${m.codigo}`, titulo: m.nombre, icono: ICONO_MODULO[m.codigo] ?? 'chat', tooltip: m.bloqueado ? `${m.nombre} · ${m.tooltip}` : m.nombre, bloqueado: m.bloqueado }))}
++      </nav>
++      <div class="flex flex-col gap-1 border-t border-slate-200 p-3">
++        <div class="flex items-center gap-3 px-3 py-2 group-data-[collapsed=true]/sb:justify-center group-data-[collapsed=true]/sb:px-0">
++          <span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-slate-200 text-xs font-bold text-slate-800" aria-hidden="true">${(u?.nombre ?? '?').trim().slice(0, 1).toUpperCase()}</span>
++          <span class="min-w-0 group-data-[collapsed=true]/sb:sr-only"><span class="block truncate text-sm font-semibold text-slate-900">${u?.nombre}</span><span class="block truncate text-xs text-slate-600">${u?.rol}</span></span>
++        </div>
++        <button type="button" id="salir" class="group/item relative flex h-10 w-full items-center gap-3 rounded-lg px-3 text-sm font-medium text-slate-700 hover:bg-slate-100 group-data-[collapsed=true]/sb:justify-center group-data-[collapsed=true]/sb:px-0">
++          ${icono('logout')}<span class="truncate group-data-[collapsed=true]/sb:sr-only">Salir</span>
++          <span role="tooltip" class="pointer-events-none absolute left-full top-1/2 z-40 ml-2 hidden -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-lg group-data-[collapsed=true]/sb:group-hover/item:block group-data-[collapsed=true]/sb:group-focus-visible/item:block">Salir</span>
++        </button>
++        <button type="button" id="alternar-sidebar" aria-controls="barra-lateral" aria-expanded="${!estado.colapsado}" aria-label="${estado.colapsado ? 'Expandir menú lateral' : 'Contraer menú lateral'}"
++          class="group/item relative flex h-10 w-full items-center gap-3 rounded-lg px-3 text-sm font-medium text-slate-700 hover:bg-slate-100 group-data-[collapsed=true]/sb:justify-center group-data-[collapsed=true]/sb:px-0">
++          ${icono('menu')}<span class="truncate group-data-[collapsed=true]/sb:sr-only">Contraer menú</span>
++          <span role="tooltip" class="pointer-events-none absolute left-full top-1/2 z-40 ml-2 hidden -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-lg group-data-[collapsed=true]/sb:group-hover/item:block group-data-[collapsed=true]/sb:group-focus-visible/item:block">Expandir menú</span>
++        </button>
++      </div>
++    </aside>
++    <main id="contenido" tabindex="-1" class="min-w-0 flex-1 p-4 sm:p-8"></main>
++  </div>`;
++}
++
++function alternarSidebar(): void {
++  const colapsado = !estado.colapsado;
++  actualizar({ colapsado });
++  guardarColapsado(colapsado);
++  const shell = obtener('#shell', HTMLElement);
++  shell.dataset['collapsed'] = String(colapsado);
++  const boton_ = obtener('#alternar-sidebar', HTMLButtonElement);
++  boton_.setAttribute('aria-expanded', String(!colapsado));
++  boton_.setAttribute('aria-label', colapsado ? 'Expandir menú lateral' : 'Contraer menú lateral');
++}
++
++function marcarNavegacion(id: string): void {
++  for (const b of todos('[data-nav]', HTMLElement)) {
++    if (b.dataset['nav'] === id) b.setAttribute('aria-current', 'page');
++    else b.removeAttribute('aria-current');
++  }
++}
++
++async function arrancar(): Promise<void> {
++  if (!sesion.token()) {
++    mostrarLogin();
++    return;
++  }
++  let usuario = usuarioGuardado();
++  try {
++    if (!usuario) usuario = (await bma.get<RespuestaMe>('/auth/me')).usuario;
++    const modulos = await bma.get<readonly ModuloPremium[]>('/premium/modulos').catch((e: unknown) => {
++      if (e instanceof BmaSesionExpiradaError) throw e;
++      return [] as readonly ModuloPremium[]; // sin catálogo no hay candados, pero el panel sigue operativo
++    });
++    actualizar({ usuario, modulos, colapsado: leerColapsado() });
++  } catch (e: unknown) {
++    cerrarSesion(e instanceof BmaSesionExpiradaError ? 'Tu sesión expiró. Inicia sesión de nuevo.' : mensajeDeError(e));
++    return;
++  }
++
++  document.body.className = 'text-slate-900';
++  montar(obtener('#app', HTMLElement), shellHtml());
++  const shell = obtener('#shell', HTMLElement);
++  shell.addEventListener('click', (ev) => {
++    const objetivo = ev.target instanceof Element ? ev.target : null;
++    const nav = objetivo?.closest('[data-nav]');
++    if (!(nav instanceof HTMLElement)) return;
++    const id = nav.dataset['nav'] ?? '';
++    const modulo = estado.modulos.find((m) => `premium:${m.codigo}` === id);
++    if (modulo?.bloqueado) {
++      // Candado Premium: se intercepta el evento de navegación y se inyecta la capa de cristal sobre la sección.
++      ev.preventDefault();
++      ev.stopPropagation();
++    }
++    void navegar(id);
++  });
++  obtener('#salir', HTMLButtonElement).addEventListener('click', () => cerrarSesion());
++  obtener('#alternar-sidebar', HTMLButtonElement).addEventListener('click', alternarSidebar);
++  const vistaInicial = estado.vista.startsWith('premium:') || VISTAS.some((v) => v.id === estado.vista) ? estado.vista : 'dashboard';
++  await navegar(vistaInicial);
++}
++
++// ───────────────────────── Navegación ─────────────────────────
++
++function detenerTablero(): void {
++  if (temporizadorTablero !== null) {
++    window.clearInterval(temporizadorTablero);
++    temporizadorTablero = null;
++  }
++}
++
++async function navegar(id: string): Promise<void> {
++  detenerTablero();
++  ticketVista += 1;
++  const mio = ticketVista;
++  actualizar({ vista: id });
++  marcarNavegacion(id);
++  const zona = obtener('#contenido', HTMLElement);
++  const ctx: Contexto = { zona, vigente: () => mio === ticketVista };
++  montar(zona, html`<div class="h-32 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando"></div>`);
++  try {
++    if (id.startsWith('premium:')) vistaPremium(ctx, id.slice('premium:'.length));
++    else if (id === 'estudiantes') await vistaEstudiantes(ctx);
++    else if (id === 'auditoria') await vistaAuditoria(ctx);
++    else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
++    else await vistaDashboard(ctx);
++  } catch (e: unknown) {
++    manejarError(e, ctx);
++  }
++}
++
++function manejarError(e: unknown, ctx: Contexto): void {
++  if (!ctx.vigente()) return;
++  if (e instanceof BmaSesionExpiradaError) {
++    cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.');
++    return;
++  }
++  if (e instanceof BmaApiError) {
++    const premium = e.moduloPremium();
++    if (premium) {
++      pintarCandadoDesdeServidor(ctx.zona, premium);
++      return;
++    }
++  }
++  montar(
++    ctx.zona,
++    html`<div class="mx-auto max-w-2xl pt-8">${aviso('bad', mensajeDeError(e), e instanceof BmaRedError ? 'Sin conexión' : 'No se pudo cargar la sección')}
++      <button type="button" data-reintentar class="${boton(CLS.btnSecundario, 'mt-4')}">${icono('refresh', 'h-4 w-4')}<span>Reintentar</span></button></div>`,
++  );
++  buscar('[data-reintentar]', HTMLButtonElement, ctx.zona)?.addEventListener('click', () => void navegar(estado.vista));
++}
++
++function encabezado(titulo: string, subtitulo: string, acciones: HtmlSeguro | null = null): HtmlSeguro {
++  return html`<header class="mb-6 flex flex-wrap items-end justify-between gap-4">
++    <div><h1 class="${CLS.titulo}">${titulo}</h1><p class="${CLS.subtitulo}">${subtitulo}</p></div>
++    ${acciones}
++  </header>`;
++}
++
++function paginacionHtml(p: Paginacion): HtmlSeguro {
++  const paginas = Math.max(1, Math.ceil(p.total / Math.max(1, p.limite)));
++  return html`<nav class="mt-4 flex flex-wrap items-center justify-between gap-4 text-sm" aria-label="Paginación">
++    <span class="text-slate-600">Página ${p.pagina} de ${paginas} · ${p.total} registro(s)</span>
++    <span class="flex gap-2">
++      <button type="button" data-pag="-1" class="${boton(CLS.btnSecundario, CLS.btnPeq)}" ${p.pagina <= 1 ? raw('disabled') : null}>Anterior</button>
++      <button type="button" data-pag="1" class="${boton(CLS.btnSecundario, CLS.btnPeq)}" ${p.pagina >= paginas ? raw('disabled') : null}>Siguiente</button>
++    </span>
++  </nav>`;
++}
++
++function enlazarPaginacion(zona: HTMLElement, alCambiar: (delta: number) => void): void {
++  for (const b of todos('[data-pag]', HTMLButtonElement, zona)) {
++    b.addEventListener('click', () => alCambiar(Number(b.dataset['pag'])));
++  }
++}
++
++// ───────────────────────── Dashboard ─────────────────────────
++
++interface TarjetaKpi {
++  readonly titulo: string;
++  readonly valor: string;
++  readonly detalle: string;
++  readonly icono: NombreIcono;
++  readonly tono: 'normal' | 'malo';
++}
++
++function tarjetaKpi(k: TarjetaKpi): HtmlSeguro {
++  return html`<article class="${CLS.tarjeta} p-6">
++    <div class="flex items-center justify-between gap-4">
++      <h3 class="text-sm font-medium text-slate-600">${k.titulo}</h3>
++      <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-700">${icono(k.icono, 'h-4 w-4')}</span>
++    </div>
++    <p class="mt-3 text-2xl font-bold ${k.tono === 'malo' ? 'text-red-800' : 'text-slate-900'}" data-kpi>${k.valor}</p>
++    <p class="mt-1 text-xs text-slate-600">${k.detalle}</p>
++  </article>`;
++}
++
++/** Barras de recaudación diaria: una <div> por día del período; su altura se asigna después de montar (ver `aplicarAlturas`). */
++export function barrasHtml(d: TableroFacturacion): HtmlSeguro {
++  const dias = diasDelPeriodo(d.periodo);
++  const porDia = new Map<number, number>();
++  for (const x of d.cobrado_por_dia) porDia.set(Number(x.dia.slice(8, 10)), x.monto_usd);
++  const maximo = Math.max(0, ...porDia.values());
++  const columnas = Array.from({ length: dias }, (_, i) => {
++    const dia = i + 1;
++    const monto = porDia.get(dia) ?? 0;
++    const pct = maximo > 0 ? Math.max(monto > 0 ? 4 : 0, Math.round((monto / maximo) * 100)) : 0;
++    return html`<li class="group/barra relative flex h-full min-w-0 flex-1 flex-col justify-end" title="Día ${dia}: ${usd(monto)}">
++      <div data-alto="${pct}" class="w-full rounded-t ${monto > 0 ? 'bg-slate-800 group-hover/barra:bg-slate-600' : 'bg-slate-200'} ${monto > 0 ? '' : 'h-px'}"></div>
++      <span class="sr-only">Día ${dia}: ${usd(monto)}</span>
++    </li>`;
++  });
++  const etiquetas = Array.from({ length: dias }, (_, i) => html`<span class="min-w-0 flex-1 text-center text-xs text-slate-600">${(i + 1) % 5 === 0 || i === 0 ? i + 1 : ''}</span>`);
++  return html`<div role="group" aria-label="Cobrado por día en ${d.periodo}">
++    <ul class="flex h-48 items-end gap-1 border-b border-slate-200">${columnas}</ul>
++    <div class="mt-1 flex gap-1" aria-hidden="true">${etiquetas}</div>
++  </div>`;
++}
++
++function aplicarAlturas(raiz: ParentNode): void {
++  for (const barra of todos('[data-alto]', HTMLElement, raiz)) {
++    const pct = Number(barra.dataset['alto']);
++    if (Number.isFinite(pct) && pct > 0) barra.style.height = `${Math.min(100, pct)}%`;
++  }
++}
++
++function tableroHtml(d: TableroFacturacion): HtmlSeguro {
++  const kpis: readonly TarjetaKpi[] = [
++    { titulo: 'Cobrado', valor: usd(d.cobrado.monto_usd), detalle: `${d.cobrado.cantidad} pago(s) aprobados`, icono: 'wallet', tono: 'normal' },
++    { titulo: 'Saldos vencidos', valor: usd(d.saldos_vencidos.monto_usd), detalle: `${d.saldos_vencidos.cantidad} cuota(s) vencida(s)`, icono: 'alert', tono: 'malo' },
++    { titulo: 'Cuentas pendientes del mes', valor: usd(d.cuentas_pendientes.monto_usd), detalle: `${d.cuentas_pendientes.cantidad} cuota(s) por cobrar`, icono: 'book', tono: 'normal' },
++    { titulo: 'Referencias por validar', valor: String(d.referencias_por_validar), detalle: 'en la bandeja de auditoría', icono: 'inbox', tono: 'normal' },
++  ];
++  const e = d.estudiantes;
++  return html`
++    <section aria-label="Indicadores del mes" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">${kpis.map(tarjetaKpi)}</section>
++    <section aria-label="Estudiantes por estado" class="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
++      ${[
++        ['Activos', e.activos],
++        ['Morosos', e.morosos],
++        ['Fuera de la Academia', e.fuera_de_la_academia],
++        ['Pendientes de validación', e.pendientes_validacion],
++      ].map(([titulo, n]) => html`<div class="${CLS.tarjeta} flex items-center justify-between gap-4 px-6 py-4"><span class="text-sm text-slate-700">${titulo}</span><strong class="text-lg text-slate-900">${n}</strong></div>`)}
++    </section>
++    <section class="${CLS.tarjeta} mt-6 p-6" aria-labelledby="t-barras">
++      <div class="mb-4 flex flex-wrap items-baseline justify-between gap-2">
++        <h2 id="t-barras" class="text-base font-bold text-slate-900">Recaudación diaria</h2>
++        <p class="text-sm text-slate-600">Facturado del mes: <strong class="text-slate-900">${usd(d.facturado_mes_usd)}</strong></p>
++      </div>
++      ${barrasHtml(d)}
++    </section>`;
++}
++
++async function cargarTablero(ctx: Contexto, silencioso: boolean): Promise<void> {
++  const destino = obtener('#tablero', HTMLElement, ctx.zona);
++  if (!silencioso) montar(destino, html`<div class="h-48 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando tablero"></div>`);
++  try {
++    const datos = await bma.get<TableroFacturacion>('/facturacion/tablero', { periodo: estado.periodo });
++    if (!ctx.vigente()) return;
++    montar(destino, tableroHtml(datos));
++    aplicarAlturas(destino);
++    const reloj = buscar('#actualizado', HTMLElement, ctx.zona);
++    if (reloj) reloj.textContent = `Actualizado a las ${horaConSegundos(new Date())}`;
++  } catch (e: unknown) {
++    if (!ctx.vigente()) return;
++    if (silencioso && !(e instanceof BmaSesionExpiradaError)) return; // un fallo puntual no borra lo que ya se ve
++    manejarError(e, ctx);
++  }
++}
++
++async function vistaDashboard(ctx: Contexto): Promise<void> {
++  montar(
++    ctx.zona,
++    html`${encabezado(
++      'Dashboard',
++      'Tablero financiero en tiempo real',
++      html`<div class="flex flex-wrap items-end gap-4">
++        <div><label for="periodo" class="${CLS.etiqueta}">Período</label><input id="periodo" type="month" value="${estado.periodo}" max="${periodoActual()}" class="${CLS.input}"></div>
++        <p id="actualizado" class="pb-2 text-xs text-slate-600" aria-live="off"></p>
++      </div>`,
++    )}<div id="tablero"></div>`,
++  );
++  obtener('#periodo', HTMLInputElement, ctx.zona).addEventListener('change', (ev) => {
++    const v = ev.target instanceof HTMLInputElement ? ev.target.value : '';
++    if (/^\d{4}-\d{2}$/.test(v)) {
++      actualizar({ periodo: v });
++      void cargarTablero(ctx, false);
++    }
++  });
++  await cargarTablero(ctx, true);
++  temporizadorTablero = window.setInterval(() => {
++    if (!ctx.vigente()) {
++      detenerTablero();
++      return;
++    }
++    if (!document.hidden) void cargarTablero(ctx, true);
++  }, REFRESCO_TABLERO_MS);
++}
++
++// ───────────────────────── Estudiantes + alertas WhatsApp ─────────────────────────
++
++function filaEstudiante(s: EstudianteListado): HtmlSeguro {
++  return html`<tr>
++    <td class="${CLS.td}"><span class="font-medium text-slate-900">${s.apellidos}, ${s.nombres}</span></td>
++    <td class="${CLS.td}">${s.grado_solicitado}</td>
++    <td class="${CLS.td}">${s.representante}</td>
++    <td class="${CLS.td}">${etiquetaEstado(s.estado_dinamico)}</td>
++    <td class="${CLS.td} whitespace-nowrap">${usd(s.deuda_vencida_usd)}</td>
++    <td class="${CLS.td}"><div class="flex flex-wrap gap-2">
++      <button type="button" data-alerta="preventiva" data-id="${s.id}" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">Preventiva</button>
++      <button type="button" data-alerta="morosidad" data-id="${s.id}" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">Morosidad</button>
++    </div></td>
++  </tr>`;
++}
++
++async function vistaEstudiantes(ctx: Contexto): Promise<void> {
++  const r = await bma.pagina<EstudianteListado>('/estudiantes', { estado: estado.filtroEstudiantes, pagina: estado.paginaEstudiantes, limite: LIMITE_PAGINA });
++  if (!ctx.vigente()) return;
++  montar(
++    ctx.zona,
++    html`${encabezado('Estudiantes', `${r.paginacion.total} resultado(s)`)}
++    <div class="mb-4 flex flex-wrap gap-2" role="group" aria-label="Filtrar por estado">
++      ${FILTROS_ESTUDIANTES.map((f) => html`<button type="button" data-filtro="${f}" aria-pressed="${f === estado.filtroEstudiantes}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'aria-pressed:border-slate-900 aria-pressed:bg-slate-900 aria-pressed:text-white')}">${f === '' ? 'Todos' : f}</button>`)}
++    </div>
++    <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white/90 backdrop-blur">
++      <table class="${CLS.tabla}">
++        <caption class="sr-only">Listado de estudiantes</caption>
++        <thead><tr><th scope="col" class="${CLS.th}">Estudiante</th><th scope="col" class="${CLS.th}">Grado</th><th scope="col" class="${CLS.th}">Representante</th><th scope="col" class="${CLS.th}">Estado</th><th scope="col" class="${CLS.th}">Deuda vencida</th><th scope="col" class="${CLS.th}">Alertas WhatsApp</th></tr></thead>
++        <tbody>${r.datos.length === 0 ? html`<tr><td colspan="6" class="${CLS.td}">Sin resultados.</td></tr>` : r.datos.map(filaEstudiante)}</tbody>
++      </table>
++    </div>
++    ${paginacionHtml(r.paginacion)}`,
++  );
++  for (const b of todos('[data-filtro]', HTMLButtonElement, ctx.zona)) {
++    b.addEventListener('click', () => {
++      const valor = b.dataset['filtro'] ?? '';
++      const filtro = FILTROS_ESTUDIANTES.find((f) => f === valor) ?? '';
++      actualizar({ filtroEstudiantes: filtro, paginaEstudiantes: 1 });
++      void navegar('estudiantes');
++    });
++  }
++  enlazarPaginacion(ctx.zona, (delta) => {
++    actualizar({ paginaEstudiantes: Math.max(1, estado.paginaEstudiantes + delta) });
++    void navegar('estudiantes');
++  });
++  for (const b of todos('[data-alerta]', HTMLButtonElement, ctx.zona)) {
++    b.addEventListener('click', () => {
++      const tipo: TipoAlertaWhatsapp = b.dataset['alerta'] === 'morosidad' ? 'morosidad' : 'preventiva';
++      void abrirAlerta(tipo, Number(b.dataset['id']), b);
++    });
++  }
++}
++
++async function abrirAlerta(tipo: TipoAlertaWhatsapp, estudianteId: number, disparador: HTMLButtonElement): Promise<void> {
++  try {
++    const r = await conBotonOcupado(disparador, () => bma.post<AlertaWhatsapp>(`/notificaciones/whatsapp/${tipo}/${estudianteId}`));
++    const m = abrirModal({
++      titulo: tipo === 'morosidad' ? 'Alerta de morosidad' : 'Alerta preventiva',
++      ancho: 'lg',
++      cuerpo: html`<p class="text-sm text-slate-600">${usd(r.monto_usd)} · ${bs(r.monto_bs)} · tasa BCV ${formatoTasa(r.tasa_bcv)}</p>
++        <pre class="mt-4 whitespace-pre-wrap break-words rounded-lg border border-slate-200 bg-slate-50 p-4 text-sm text-slate-800">${r.mensaje}</pre>
++        <div id="alerta-resultado" class="mt-4"></div>
++        <div class="mt-4 flex flex-wrap justify-end gap-2">
++          <a href="${urlSegura(r.enlace_whatsapp, ['https://wa.me/'])}" target="_blank" rel="noopener noreferrer" class="${boton(CLS.btnPrimario)}">Abrir en WhatsApp</a>
++          <button type="button" id="alerta-enviar" class="${boton(CLS.btnSecundario)}">Enviar por API</button>
++        </div>`,
++    });
++    const enviar = obtener('#alerta-enviar', HTMLButtonElement, m.dialogo);
++    enviar.addEventListener('click', () => {
++      const salida = obtener('#alerta-resultado', HTMLElement, m.dialogo);
++      void conBotonOcupado(enviar, () => bma.post<AlertaWhatsapp>(`/notificaciones/whatsapp/${tipo}/${estudianteId}`, {}, { consulta: { enviar: true } }))
++        .then(() => montar(salida, aviso('ok', 'Mensaje enviado por la API de WhatsApp.')))
++        .catch((e: unknown) => montar(salida, aviso('bad', mensajeDeError(e))));
++    });
++  } catch (e: unknown) {
++    if (e instanceof BmaSesionExpiradaError) cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.');
++    else notificar('bad', mensajeDeError(e));
++  }
++}
++
++// ───────────────────────── Auditoría de referencias ─────────────────────────
++
++function filaAuditoria(p: ReferenciaAuditoria): HtmlSeguro {
++  const pendiente = p.estado === 'Por Validar';
++  return html`<tr>
++    <td class="${CLS.td} whitespace-nowrap">${fechaHora(p.declarado_en)}</td>
++    <td class="${CLS.td}"><span class="font-medium text-slate-900">${p.estudiante}</span><br><span class="text-xs text-slate-600">${p.concepto} · vence ${fechaCorta(p.fecha_vencimiento)}</span></td>
++    <td class="${CLS.td}"><strong class="break-all">${p.referencia}</strong><br><span class="text-xs text-slate-600">${p.representante}</span></td>
++    <td class="${CLS.td}">${nombreMetodo(p.metodo_pago)}</td>
++    <td class="${CLS.td} whitespace-nowrap">${usd(p.monto_usd)}<br><span class="text-xs text-slate-600">${bs(p.monto_bs)}</span></td>
++    <td class="${CLS.td}">${pendiente
++      ? html`<div class="flex flex-wrap gap-2">
++          <button type="button" data-aprobar="${p.id}" class="${boton(CLS.btnOk, CLS.btnPeq)}">${icono('check', 'h-4 w-4')}<span>Aprobar</span></button>
++          <button type="button" data-rechazar="${p.id}" class="${boton(CLS.btnPeligro, CLS.btnPeq)}">${icono('x', 'h-4 w-4')}<span>Rechazar</span></button>
++        </div>`
++      : html`${etiquetaEstado(p.estado)}${p.nota_revision ? html`<p class="mt-1 max-w-xs break-words text-xs text-slate-600">${p.nota_revision}</p>` : null}`}</td>
++  </tr>`;
++}
++
++async function vistaAuditoria(ctx: Contexto): Promise<void> {
++  const r = await bma.pagina<ReferenciaAuditoria>('/facturacion/auditoria', { estado: estado.filtroAuditoria, pagina: estado.paginaAuditoria, limite: LIMITE_PAGINA });
++  if (!ctx.vigente()) return;
++  const exportar = esAdmin()
++    ? html`<button type="button" id="exportar" class="${boton(CLS.btnSecundario)}">${icono('down', 'h-4 w-4')}<span>Exportar histórico (.xlsx)</span></button>`
++    : null;
++  montar(
++    ctx.zona,
++    html`${encabezado('Bandeja de auditoría', `${r.paginacion.total} referencia(s) · ${estado.filtroAuditoria}`, exportar)}
++    <div id="auditoria-aviso" class="mb-4"></div>
++    <div class="mb-4 flex flex-wrap gap-2" role="group" aria-label="Filtrar por estado de la referencia">
++      ${FILTROS_AUDITORIA.map((f) => html`<button type="button" data-filtro="${f}" aria-pressed="${f === estado.filtroAuditoria}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'aria-pressed:border-slate-900 aria-pressed:bg-slate-900 aria-pressed:text-white')}">${f}</button>`)}
++    </div>
++    <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white/90 backdrop-blur">
++      <table class="${CLS.tabla}">
++        <caption class="sr-only">Referencias de pago declaradas</caption>
++        <thead><tr><th scope="col" class="${CLS.th}">Declarada</th><th scope="col" class="${CLS.th}">Estudiante</th><th scope="col" class="${CLS.th}">Referencia</th><th scope="col" class="${CLS.th}">Método</th><th scope="col" class="${CLS.th}">Monto</th><th scope="col" class="${CLS.th}">Acción</th></tr></thead>
++        <tbody>${r.datos.length === 0 ? html`<tr><td colspan="6" class="${CLS.td}">Bandeja vacía.</td></tr>` : r.datos.map(filaAuditoria)}</tbody>
++      </table>
++    </div>
++    ${paginacionHtml(r.paginacion)}`,
++  );
++  const aviso_ = obtener('#auditoria-aviso', HTMLElement, ctx.zona);
++  for (const b of todos('[data-filtro]', HTMLButtonElement, ctx.zona)) {
++    b.addEventListener('click', () => {
++      const valor = b.dataset['filtro'] ?? '';
++      const filtro = FILTROS_AUDITORIA.find((f) => f === valor) ?? 'Por Validar';
++      actualizar({ filtroAuditoria: filtro, paginaAuditoria: 1 });
++      void navegar('auditoria');
++    });
++  }
++  enlazarPaginacion(ctx.zona, (delta) => {
++    actualizar({ paginaAuditoria: Math.max(1, estado.paginaAuditoria + delta) });
++    void navegar('auditoria');
++  });
++  const porId = new Map(r.datos.map((p) => [p.id, p] as const));
++  for (const b of todos('[data-aprobar]', HTMLButtonElement, ctx.zona)) {
++    b.addEventListener('click', () => void aprobar(Number(b.dataset['aprobar']), b, aviso_));
++  }
++  for (const b of todos('[data-rechazar]', HTMLButtonElement, ctx.zona)) {
++    b.addEventListener('click', () => {
++      const p = porId.get(Number(b.dataset['rechazar']));
++      if (p) modalRechazo(p);
++    });
++  }
++  buscar('#exportar', HTMLButtonElement, ctx.zona)?.addEventListener('click', (ev) => {
++    const el = ev.currentTarget instanceof HTMLButtonElement ? ev.currentTarget : null;
++    if (el) void exportar_(el, '/exportaciones/facturacion.xlsx', 'facturacion.xlsx', aviso_);
++  });
++}
++
++async function exportar_(disparador: HTMLButtonElement, ruta: string, nombre: string, salida: HTMLElement): Promise<void> {
++  try {
++    await conBotonOcupado(disparador, () => bma.descargar(ruta, nombre));
++  } catch (e: unknown) {
++    if (e instanceof BmaSesionExpiradaError) cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.');
++    else montar(salida, aviso('bad', mensajeDeError(e)));
++  }
++}
++
++function resumenRevision(r: ResultadoRevision, accion: string): string {
++  return `${accion} · estatus de pago del alumno: ${r.estatus_pago} · deuda vencida ${usd(r.deuda_vencida_usd)}.`;
++}
++
++async function aprobar(id: number, disparador: HTMLButtonElement, salida: HTMLElement): Promise<void> {
++  try {
++    const r = await conBotonOcupado(disparador, () => bma.post<ResultadoRevision>(`/facturacion/auditoria/${id}/aprobar`, {}));
++    notificar('ok', resumenRevision(r, 'Referencia aprobada'));
++    await navegar('auditoria');
++  } catch (e: unknown) {
++    if (e instanceof BmaSesionExpiradaError) cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.');
++    else montar(salida, aviso('bad', mensajeDeError(e)));
++  }
++}
++
++/** Modal de rechazo: la nota de justificación es OBLIGATORIA (1 a 300 caracteres). */
++function modalRechazo(p: ReferenciaAuditoria): void {
++  const m = abrirModal({
++    titulo: 'Rechazar referencia',
++    cuerpo: html`<form id="form-rechazo" novalidate class="flex flex-col gap-4">
++      <p class="text-sm text-slate-700">Referencia <strong class="break-all">${p.referencia}</strong> · ${p.estudiante} · ${usd(p.monto_usd)}</p>
++      <div>
++        <label for="nota-rechazo" class="${CLS.etiqueta}">Motivo del rechazo <span class="text-red-800" aria-hidden="true">*</span></label>
++        <textarea id="nota-rechazo" name="nota" rows="4" maxlength="${MAX_NOTA}" required aria-describedby="nota-ayuda nota-error" class="${CLS.input}"></textarea>
++        <p id="nota-ayuda" class="${CLS.ayuda}">Se guarda en el historial y se usa para avisar al representante. <span id="nota-contador">0/${MAX_NOTA}</span></p>
++        <p id="nota-error" class="${CLS.errorCampo}" role="alert" hidden></p>
++      </div>
++      <div id="rechazo-aviso"></div>
++      <div class="flex justify-end gap-2">
++        <button type="button" data-cancelar class="${boton(CLS.btnSecundario)}">Cancelar</button>
++        <button type="submit" class="${boton(CLS.btnPeligro)}">${icono('x', 'h-4 w-4')}<span>Rechazar referencia</span></button>
++      </div>
++    </form>`,
++  });
++  const form = obtener('#form-rechazo', HTMLFormElement, m.dialogo);
++  const campo = obtener('#nota-rechazo', HTMLTextAreaElement, m.dialogo);
++  const error = obtener('#nota-error', HTMLElement, m.dialogo);
++  const contador = obtener('#nota-contador', HTMLElement, m.dialogo);
++  campo.addEventListener('input', () => {
++    contador.textContent = `${campo.value.length}/${MAX_NOTA}`;
++    if (campo.value.trim() !== '') {
++      error.hidden = true;
++      campo.removeAttribute('aria-invalid');
++    }
++  });
++  obtener('[data-cancelar]', HTMLButtonElement, m.dialogo).addEventListener('click', m.cerrar);
++  form.addEventListener('submit', (ev) => {
++    ev.preventDefault();
++    const nota = campo.value.trim();
++    if (nota === '') {
++      error.textContent = 'Debes escribir el motivo del rechazo para continuar.';
++      error.hidden = false;
++      campo.setAttribute('aria-invalid', 'true');
++      campo.focus();
++      return;
++    }
++    const enviar = obtener('button[type="submit"]', HTMLButtonElement, form);
++    void conBotonOcupado(enviar, () => bma.post<ResultadoRevision>(`/facturacion/auditoria/${p.id}/rechazar`, { nota }))
++      .then(async (r) => {
++        m.cerrar();
++        notificar('ok', resumenRevision(r, 'Referencia rechazada'));
++        await navegar('auditoria');
++      })
++      .catch((e: unknown) => {
++        if (e instanceof BmaSesionExpiradaError) {
++          m.cerrar();
++          cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.');
++          return;
++        }
++        montar(obtener('#rechazo-aviso', HTMLElement, m.dialogo), aviso('bad', mensajeDeError(e)));
++      });
++  });
++  campo.focus();
++}
++
++// ───────────────────────── Contabilidad ─────────────────────────
++
++async function vistaContabilidad(ctx: Contexto): Promise<void> {
++  const b = await bma.get<BalanceContable>('/contabilidad/balance', { periodo: estado.periodo });
++  if (!ctx.vigente()) return;
++  montar(
++    ctx.zona,
++    html`${encabezado('Contabilidad', `Balance neto del período ${b.periodo}`, html`<div class="flex flex-wrap items-end gap-4">
++      <div><label for="periodo-conta" class="${CLS.etiqueta}">Período</label><input id="periodo-conta" type="month" value="${estado.periodo}" max="${periodoActual()}" class="${CLS.input}"></div>
++      <button type="button" id="exportar" class="${boton(CLS.btnPrimario)}">${icono('down', 'h-4 w-4')}<span>Exportar nómina, egresos y personal (.xlsx)</span></button>
++    </div>`)}
++    <div id="conta-aviso" class="mb-4"></div>
++    <section class="grid gap-4 sm:grid-cols-3" aria-label="Balance">
++      ${tarjetaKpi({ titulo: 'Ingresos', valor: usd(b.ingresos_usd), detalle: 'Referencias aprobadas del período', icono: 'wallet', tono: 'normal' })}
++      ${tarjetaKpi({ titulo: 'Egresos', valor: usd(b.egresos_usd), detalle: 'Egresos y nómina pagada', icono: 'book', tono: 'normal' })}
++      ${tarjetaKpi({ titulo: 'Neto', valor: usd(b.neto_usd), detalle: 'Ingresos − egresos', icono: 'check', tono: b.neto_usd < 0 ? 'malo' : 'normal' })}
++    </section>`,
++  );
++  obtener('#periodo-conta', HTMLInputElement, ctx.zona).addEventListener('change', (ev) => {
++    const v = ev.target instanceof HTMLInputElement ? ev.target.value : '';
++    if (/^\d{4}-\d{2}$/.test(v)) {
++      actualizar({ periodo: v });
++      void navegar('contabilidad');
++    }
++  });
++  const salida = obtener('#conta-aviso', HTMLElement, ctx.zona);
++  obtener('#exportar', HTMLButtonElement, ctx.zona).addEventListener('click', (ev) => {
++    const el = ev.currentTarget instanceof HTMLButtonElement ? ev.currentTarget : null;
++    if (el) void exportar_(el, '/exportaciones/contabilidad.xlsx', 'contabilidad.xlsx', salida);
++  });
++}
++
++// ───────────────────────── Módulos Premium + Candado ─────────────────────────
++
++interface DatosCandado {
++  readonly nombre: string;
++  readonly descripcion: string;
++  readonly precio_usd: number;
++}
++
++function vistaFantasma(): HtmlSeguro {
++  const fila = html`<div class="flex items-center gap-4 border-b border-slate-100 py-4"><div class="h-8 w-8 rounded-full bg-slate-200"></div><div class="h-4 flex-1 rounded bg-slate-200"></div><div class="h-4 w-24 rounded bg-slate-200"></div></div>`;
++  return html`<div aria-hidden="true" class="pointer-events-none select-none p-6">
++    <div class="mb-4 h-6 w-1/3 rounded bg-slate-300"></div>${fila}${fila}${fila}${fila}${fila}
++  </div>`;
++}
++
++/** Capa absoluta de cristal (`backdrop-blur-md bg-white/80`) sobre la sección bloqueada. */
++function capaCandado(d: DatosCandado): HtmlSeguro {
++  return html`<div data-candado class="absolute inset-0 z-10 flex items-center justify-center bg-white/80 p-6 backdrop-blur-md">
++    <div role="region" aria-label="${AVISO_PREMIUM}" class="${CLS.tarjetaCristal} w-full max-w-md p-8 text-center">
++      <span class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 text-white">${icono('lock', 'h-6 w-6')}</span>
++      <h2 class="mt-4 text-lg font-bold text-slate-900">${AVISO_PREMIUM}</h2>
++      <p class="mt-1 text-sm font-semibold text-slate-800">${d.nombre}</p>
++      <p class="mt-2 text-sm text-slate-700">${d.descripcion}</p>
++      <p class="mt-4 text-2xl font-bold text-slate-900">${usd(d.precio_usd)}</p>
++      <p class="mt-1 text-xs text-slate-600">Pago único · solicítalo a Astra Digital Solutions</p>
++    </div>
++  </div>`;
++}
++
++function seccionBloqueada(d: DatosCandado): HtmlSeguro {
++  return html`${encabezado(d.nombre, d.descripcion)}
++    <div class="${CLS.tarjeta} relative min-h-96 overflow-hidden">${vistaFantasma()}${capaCandado(d)}</div>`;
++}
++
++function vistaPremium(ctx: Contexto, codigo: string): void {
++  const m = estado.modulos.find((x) => x.codigo === codigo);
++  if (!m) {
++    montar(ctx.zona, aviso('bad', 'Módulo no encontrado.'));
++    return;
++  }
++  if (m.bloqueado) {
++    montar(ctx.zona, seccionBloqueada(m));
++    return;
++  }
++  montar(
++    ctx.zona,
++    html`${encabezado(m.nombre, m.descripcion)}
++    <div class="${CLS.tarjeta} p-6">${aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}</div>`,
++  );
++}
++
++/** Si el servidor responde 403 MODULO_PREMIUM_DESHABILITADO para cualquier sección, se muestra el mismo candado. */
++function pintarCandadoDesdeServidor(zona: HTMLElement, d: DetalleModuloPremium): void {
++  const m = estado.modulos.find((x) => x.codigo === d.modulo);
++  montar(zona, seccionBloqueada({ nombre: d.nombre, descripcion: m?.descripcion ?? 'Este módulo forma parte de la Fase 2 del sistema.', precio_usd: d.precio_usd }));
++}
++
++// ───────────────────────── Arranque ─────────────────────────
++
++void arrancar();
+diff --git a/frontend/src/admisiones.ts b/frontend/src/admisiones.ts
+new file mode 100644
+index 0000000..1c95a92
+--- /dev/null
++++ b/frontend/src/admisiones.ts
+@@ -0,0 +1,583 @@
++/**
++ * Planilla pública de admisiones.
++ *  - Costo de la matrícula en USD y su equivalente en Bs. a la tasa BCV vigente (se vuelve a consultar cada 30 s,
++ *    al volver a la pestaña y justo antes de enviar; si la tasa cambió se avisa y se exige reenviar con el monto nuevo).
++ *  - Validación en TypeScript: los 3 archivos obligatorios deben existir en el DOM, estar seleccionados y pesar ≤ 5 MB
++ *    ANTES de construir el FormData transaccional.
++ */
++import './styles/main.css';
++import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
++import { html, montar, raw, type HtmlSeguro } from './lib/html';
++import { icono } from './lib/icons';
++import { bs, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
++import { CLS, aviso, boton, buscar, conBotonOcupado, obtener, todos } from './lib/ui';
++import type {
++  CampoArchivoAdmision,
++  ConfigAdmisiones,
++  MetodoPago,
++  RespuestaAdmision,
++  SolicitudAdmisionTexto,
++  TipoSangre,
++} from './types/index';
++
++// ───────────────────────── Constantes y definiciones ─────────────────────────
++
++export const MAX_BYTES_ARCHIVO = 5 * 1024 * 1024;
++const INTERVALO_TASA_MS = 30_000;
++const METODOS: readonly MetodoPago[] = ['ZELLE', 'BINANCE', 'PAYPAL', 'PAGO_MOVIL'];
++const TIPOS_SANGRE: readonly TipoSangre[] = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
++const RE_CEDULA = /^[A-Za-z0-9.-]{4,20}$/;
++const RE_REFERENCIA = /^[A-Za-z0-9-]{4,40}$/;
++const RE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
++
++type NombreTexto = keyof SolicitudAdmisionTexto;
++type TipoControl = 'text' | 'date' | 'email' | 'tel' | 'select';
++
++interface DefCampo {
++  readonly nombre: NombreTexto;
++  readonly etiqueta: string;
++  readonly tipo: TipoControl;
++  readonly requerido: boolean;
++  readonly maximo?: number;
++  readonly autocompletar?: string;
++  readonly ayuda?: string;
++  readonly opciones?: readonly { readonly valor: string; readonly texto: string }[];
++  readonly porDefecto?: string;
++}
++
++interface DefSeccion {
++  readonly id: string;
++  readonly titulo: string;
++  readonly campos: readonly DefCampo[];
++}
++
++const SECCIONES: readonly DefSeccion[] = [
++  {
++    id: 'estudiante',
++    titulo: 'Datos del estudiante',
++    campos: [
++      { nombre: 'alumno_nombres', etiqueta: 'Nombres', tipo: 'text', requerido: true, maximo: 100 },
++      { nombre: 'alumno_apellidos', etiqueta: 'Apellidos', tipo: 'text', requerido: true, maximo: 100 },
++      { nombre: 'alumno_fecha_nacimiento', etiqueta: 'Fecha de nacimiento', tipo: 'date', requerido: true, autocompletar: 'bday' },
++      { nombre: 'alumno_cedula', etiqueta: 'Cédula del estudiante', tipo: 'text', requerido: false, maximo: 20, ayuda: 'Solo si tiene.' },
++      { nombre: 'grado_solicitado', etiqueta: 'Grado a cursar', tipo: 'text', requerido: true, maximo: 60 },
++      { nombre: 'colegio_procedencia', etiqueta: 'Colegio de procedencia', tipo: 'text', requerido: false, maximo: 150 },
++      { nombre: 'ultimo_grado_aprobado', etiqueta: 'Último grado aprobado', tipo: 'text', requerido: false, maximo: 60 },
++    ],
++  },
++  {
++    id: 'medicos',
++    titulo: 'Datos médicos y contacto de emergencia',
++    campos: [
++      {
++        nombre: 'tipo_sangre',
++        etiqueta: 'Tipo de sangre',
++        tipo: 'select',
++        requerido: false,
++        opciones: [{ valor: '', texto: 'No sé / prefiero no indicarlo' }, ...TIPOS_SANGRE.map((t) => ({ valor: t, texto: t }))],
++      },
++      { nombre: 'alergias', etiqueta: 'Alergias', tipo: 'text', requerido: false, maximo: 500 },
++      { nombre: 'condiciones_medicas', etiqueta: 'Condiciones médicas', tipo: 'text', requerido: false, maximo: 500 },
++      { nombre: 'medicamentos', etiqueta: 'Medicamentos', tipo: 'text', requerido: false, maximo: 500 },
++      { nombre: 'emergencia_nombre', etiqueta: 'Contacto de emergencia', tipo: 'text', requerido: false, maximo: 150 },
++      { nombre: 'emergencia_telefono', etiqueta: 'Teléfono de emergencia', tipo: 'tel', requerido: false, ayuda: 'Con código de país, p. ej. +58 414 1234567.' },
++    ],
++  },
++  {
++    id: 'representante',
++    titulo: 'Datos del representante',
++    campos: [
++      { nombre: 'representante_nombres', etiqueta: 'Nombres', tipo: 'text', requerido: true, maximo: 100, autocompletar: 'given-name' },
++      { nombre: 'representante_apellidos', etiqueta: 'Apellidos', tipo: 'text', requerido: true, maximo: 100, autocompletar: 'family-name' },
++      { nombre: 'representante_cedula', etiqueta: 'Cédula', tipo: 'text', requerido: true, maximo: 20, ayuda: 'Letras, números, puntos o guiones (4 a 20).' },
++      { nombre: 'representante_email', etiqueta: 'Correo electrónico', tipo: 'email', requerido: false, maximo: 160, autocompletar: 'email' },
++      { nombre: 'telefono_codigo', etiqueta: 'Código de país', tipo: 'tel', requerido: true, maximo: 6, porDefecto: '+58' },
++      { nombre: 'telefono_numero', etiqueta: 'Teléfono (WhatsApp)', tipo: 'tel', requerido: true, maximo: 20, autocompletar: 'tel-national', ayuda: 'Recibirás los avisos de cobro por este número.' },
++    ],
++  },
++  {
++    id: 'pago',
++    titulo: 'Pago de la matrícula',
++    campos: [
++      {
++        nombre: 'metodo_pago',
++        etiqueta: 'Método de pago utilizado',
++        tipo: 'select',
++        requerido: true,
++        opciones: METODOS.map((m) => ({ valor: m, texto: nombreMetodo(m) })),
++      },
++      { nombre: 'referencia_bancaria', etiqueta: 'Número de referencia', tipo: 'text', requerido: true, maximo: 40, ayuda: 'De 4 a 40 caracteres: letras, números o guiones, sin espacios.' },
++    ],
++  },
++];
++
++const CAMPOS: readonly DefCampo[] = SECCIONES.flatMap((s) => s.campos);
++
++interface DefArchivo {
++  readonly campo: CampoArchivoAdmision;
++  readonly etiqueta: string;
++  readonly mimes: readonly string[];
++  readonly extensiones: readonly string[];
++  readonly accept: string;
++  readonly formatos: string;
++}
++
++const ARCHIVOS: readonly DefArchivo[] = [
++  { campo: 'foto_carnet', etiqueta: 'Foto carnet', mimes: ['image/jpeg', 'image/png'], extensiones: ['jpg', 'jpeg', 'png'], accept: 'image/jpeg,image/png', formatos: 'JPG o PNG' },
++  { campo: 'cedula_identidad', etiqueta: 'Cédula de identidad', mimes: ['image/jpeg', 'image/png', 'application/pdf'], extensiones: ['jpg', 'jpeg', 'png', 'pdf'], accept: 'image/jpeg,image/png,application/pdf', formatos: 'JPG, PNG o PDF' },
++  { campo: 'acta_nacimiento', etiqueta: 'Acta de nacimiento', mimes: ['image/jpeg', 'image/png', 'application/pdf'], extensiones: ['jpg', 'jpeg', 'png', 'pdf'], accept: 'image/jpeg,image/png,application/pdf', formatos: 'JPG, PNG o PDF' },
++];
++
++// ───────────────────────── Validación (pura, exportada para pruebas) ─────────────────────────
++
++export interface ErrorValidacion {
++  readonly campo: string;
++  readonly mensaje: string;
++}
++
++export interface InspeccionArchivos {
++  readonly errores: readonly ErrorValidacion[];
++  readonly archivos: ReadonlyMap<CampoArchivoAdmision, File>;
++}
++
++export function formatoTamano(bytes: number): string {
++  return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(2)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`;
++}
++
++function extensionDe(nombre: string): string {
++  const i = nombre.lastIndexOf('.');
++  return i < 0 ? '' : nombre.slice(i + 1).toLowerCase();
++}
++
++/** Valida UN archivo contra su definición: presencia, tamaño ≤ 5 MB, no vacío y formato permitido. */
++export function validarArchivo(def: DefArchivo, archivo: File | undefined): ErrorValidacion | null {
++  if (!archivo) return { campo: def.campo, mensaje: `Adjunta: ${def.etiqueta}.` };
++  if (archivo.size === 0) return { campo: def.campo, mensaje: `${def.etiqueta}: el archivo está vacío.` };
++  if (archivo.size > MAX_BYTES_ARCHIVO) {
++    return { campo: def.campo, mensaje: `${def.etiqueta}: pesa ${formatoTamano(archivo.size)} y el máximo es 5 MB.` };
++  }
++  const formatoValido = archivo.type ? def.mimes.includes(archivo.type) : def.extensiones.includes(extensionDe(archivo.name));
++  if (!formatoValido) return { campo: def.campo, mensaje: `${def.etiqueta}: formato no permitido (usa ${def.formatos}).` };
++  return null;
++}
++
++/** Comprueba que los 3 `<input type="file">` EXISTEN en el DOM del formulario y valida cada archivo seleccionado. */
++export function inspeccionarArchivos(formulario: HTMLFormElement): InspeccionArchivos {
++  const errores: ErrorValidacion[] = [];
++  const archivos = new Map<CampoArchivoAdmision, File>();
++  for (const def of ARCHIVOS) {
++    const control = formulario.elements.namedItem(def.campo);
++    if (!(control instanceof HTMLInputElement) || control.type !== 'file') {
++      errores.push({ campo: def.campo, mensaje: `Falta el campo «${def.etiqueta}» en la página. Recárgala e inténtalo de nuevo.` });
++      continue;
++    }
++    const archivo = control.files?.[0];
++    const problema = validarArchivo(def, archivo);
++    if (problema) errores.push(problema);
++    else if (archivo) archivos.set(def.campo, archivo);
++  }
++  return { errores, archivos };
++}
++
++/** Misma normalización que el backend (utils/telefono.js): devuelve solo dígitos E.164 o null si no es válido. */
++export function normalizarTelefono(...partes: readonly string[]): string | null {
++  let d = partes.join('').replace(/\D+/g, '');
++  if (d.startsWith('00')) d = d.slice(2);
++  if (d.length === 11 && d.startsWith('0')) d = `58${d.slice(1)}`;
++  if (/^580\d{10}$/.test(d)) d = `58${d.slice(3)}`;
++  return d.length >= 10 && d.length <= 15 ? d : null;
++}
++
++function esFechaPasadaValida(valor: string, hoy: string): boolean {
++  if (!/^\d{4}-\d{2}-\d{2}$/.test(valor)) return false;
++  const [a, m, d] = valor.split('-').map(Number);
++  if (a === undefined || m === undefined || d === undefined) return false;
++  const fecha = new Date(Date.UTC(a, m - 1, d));
++  const coincide = fecha.getUTCFullYear() === a && fecha.getUTCMonth() === m - 1 && fecha.getUTCDate() === d;
++  return coincide && valor >= '1990-01-01' && valor <= hoy;
++}
++
++export function validarTextos(v: SolicitudAdmisionTexto, hoy: string = hoyCaracas()): readonly ErrorValidacion[] {
++  const errores: ErrorValidacion[] = [];
++  const agregar = (campo: string, mensaje: string): void => {
++    errores.push({ campo, mensaje });
++  };
++  for (const def of CAMPOS) {
++    const valor = v[def.nombre];
++    if (valor === '') {
++      if (def.requerido) agregar(def.nombre, `${def.etiqueta}: es obligatorio.`);
++      continue;
++    }
++    if (def.maximo !== undefined && valor.length > def.maximo) agregar(def.nombre, `${def.etiqueta}: máximo ${def.maximo} caracteres.`);
++  }
++  const ya = (campo: string): boolean => errores.some((e) => e.campo === campo);
++
++  if (!ya('alumno_fecha_nacimiento') && !esFechaPasadaValida(v.alumno_fecha_nacimiento, hoy)) {
++    agregar('alumno_fecha_nacimiento', 'Fecha de nacimiento: indica una fecha válida (entre 1990 y hoy).');
++  }
++  if (v.alumno_cedula && !ya('alumno_cedula') && !RE_CEDULA.test(v.alumno_cedula)) agregar('alumno_cedula', 'Cédula del estudiante: solo letras, números, puntos y guiones (4 a 20).');
++  if (!ya('representante_cedula') && !RE_CEDULA.test(v.representante_cedula)) agregar('representante_cedula', 'Cédula del representante: solo letras, números, puntos y guiones (4 a 20).');
++  if (v.representante_email && !ya('representante_email') && !RE_EMAIL.test(v.representante_email)) agregar('representante_email', 'Correo electrónico: formato no válido.');
++  if (!ya('telefono_numero') && !ya('telefono_codigo') && normalizarTelefono(v.telefono_codigo, v.telefono_numero) === null) {
++    agregar('telefono_numero', 'Teléfono: debe tener entre 10 y 15 dígitos incluyendo el código de país.');
++  }
++  if (v.emergencia_telefono && !ya('emergencia_telefono') && normalizarTelefono(v.emergencia_telefono) === null) {
++    agregar('emergencia_telefono', 'Teléfono de emergencia: debe tener entre 10 y 15 dígitos incluyendo el código de país.');
++  }
++  if (!ya('referencia_bancaria') && !RE_REFERENCIA.test(v.referencia_bancaria)) {
++    agregar('referencia_bancaria', 'Número de referencia: de 4 a 40 caracteres (letras, números o guiones, sin espacios).');
++  }
++  return errores;
++}
++
++// ───────────────────────── Lectura del formulario ─────────────────────────
++
++function leerTexto(formulario: HTMLFormElement, nombre: NombreTexto): string {
++  const control = formulario.elements.namedItem(nombre);
++  if (control instanceof HTMLInputElement || control instanceof HTMLSelectElement || control instanceof HTMLTextAreaElement) return control.value.trim();
++  return '';
++}
++
++const esTipoSangre = (v: string): v is TipoSangre => (TIPOS_SANGRE as readonly string[]).includes(v);
++const esMetodoPago = (v: string): v is MetodoPago => (METODOS as readonly string[]).includes(v);
++
++export function leerTextos(formulario: HTMLFormElement): SolicitudAdmisionTexto {
++  const t = (n: NombreTexto): string => leerTexto(formulario, n);
++  const sangre = t('tipo_sangre');
++  const metodo = t('metodo_pago');
++  return {
++    alumno_nombres: t('alumno_nombres'),
++    alumno_apellidos: t('alumno_apellidos'),
++    alumno_cedula: t('alumno_cedula'),
++    alumno_fecha_nacimiento: t('alumno_fecha_nacimiento'),
++    grado_solicitado: t('grado_solicitado'),
++    colegio_procedencia: t('colegio_procedencia'),
++    ultimo_grado_aprobado: t('ultimo_grado_aprobado'),
++    tipo_sangre: esTipoSangre(sangre) ? sangre : '',
++    alergias: t('alergias'),
++    condiciones_medicas: t('condiciones_medicas'),
++    medicamentos: t('medicamentos'),
++    emergencia_nombre: t('emergencia_nombre'),
++    emergencia_telefono: t('emergencia_telefono'),
++    representante_nombres: t('representante_nombres'),
++    representante_apellidos: t('representante_apellidos'),
++    representante_cedula: t('representante_cedula'),
++    representante_email: t('representante_email'),
++    telefono_codigo: t('telefono_codigo'),
++    telefono_numero: t('telefono_numero'),
++    metodo_pago: esMetodoPago(metodo) ? metodo : 'ZELLE',
++    referencia_bancaria: t('referencia_bancaria'),
++  };
++}
++
++/** FormData transaccional: solo los campos del contrato (omite los opcionales vacíos) + los 3 archivos ya validados. */
++export function construirFormData(textos: SolicitudAdmisionTexto, archivos: ReadonlyMap<CampoArchivoAdmision, File>): FormData {
++  const datos = new FormData();
++  for (const def of CAMPOS) {
++    const valor = textos[def.nombre];
++    if (valor !== '' || def.requerido) datos.append(def.nombre, valor);
++  }
++  for (const def of ARCHIVOS) {
++    const archivo = archivos.get(def.campo);
++    if (!archivo) throw new Error(`Archivo obligatorio ausente: ${def.campo}`);
++    datos.append(def.campo, archivo, archivo.name);
++  }
++  return datos;
++}
++
++// ───────────────────────── Estado de la interfaz ─────────────────────────
++
++interface EstadoPantalla {
++  readonly config: ConfigAdmisiones | null;
++  readonly consultadoEn: Date | null;
++  readonly errorConfig: string | null;
++  readonly cargandoConfig: boolean;
++  readonly enviando: boolean;
++}
++
++let estado: EstadoPantalla = { config: null, consultadoEn: null, errorConfig: null, cargandoConfig: true, enviando: false };
++
++function actualizar(parcial: Partial<EstadoPantalla>): void {
++  estado = { ...estado, ...parcial };
++}
++
++// ───────────────────────── Plantillas ─────────────────────────
++
++function controlHtml(def: DefCampo): HtmlSeguro {
++  const id = `f-${def.nombre}`;
++  const descrito = `${def.ayuda ? `a-${def.nombre} ` : ''}e-${def.nombre}`;
++  const estrella = def.requerido ? html`<span class="text-red-800" aria-hidden="true"> *</span>` : null;
++  let control: HtmlSeguro;
++  if (def.tipo === 'select') {
++    control = html`<select id="${id}" name="${def.nombre}" class="${CLS.input}" aria-describedby="${descrito}" ${def.requerido ? raw('required') : null}>${(def.opciones ?? []).map((o) => html`<option value="${o.valor}">${o.texto}</option>`)}</select>`;
++  } else {
++    const extra = def.tipo === 'date' ? html` min="1990-01-01" max="${hoyCaracas()}"` : html`${def.maximo ? html` maxlength="${def.maximo}"` : null}`;
++    control = html`<input id="${id}" name="${def.nombre}" type="${def.tipo}" class="${CLS.input}" value="${def.porDefecto ?? ''}" autocomplete="${def.autocompletar ?? 'off'}" aria-describedby="${descrito}"${extra} ${def.requerido ? raw('required') : null}>`;
++  }
++  return html`<div>
++    <label for="${id}" class="${CLS.etiqueta}">${def.etiqueta}${estrella}</label>
++    ${control}
++    ${def.ayuda ? html`<p id="a-${def.nombre}" class="${CLS.ayuda}">${def.ayuda}</p>` : null}
++    <p id="e-${def.nombre}" class="${CLS.errorCampo}" hidden></p>
++  </div>`;
++}
++
++function archivoHtml(def: DefArchivo): HtmlSeguro {
++  const id = `f-${def.campo}`;
++  return html`<div>
++    <label for="${id}" class="${CLS.etiqueta}">${def.etiqueta}<span class="text-red-800" aria-hidden="true"> *</span></label>
++    <input id="${id}" name="${def.campo}" type="file" accept="${def.accept}" required aria-describedby="a-${def.campo} e-${def.campo}"
++      class="block w-full cursor-pointer rounded-lg border border-slate-300 bg-white text-sm text-slate-700 file:mr-4 file:cursor-pointer file:border-0 file:bg-slate-900 file:px-4 file:py-2 file:text-sm file:font-semibold file:text-white hover:file:bg-slate-700 aria-[invalid=true]:border-red-700">
++    <p id="a-${def.campo}" class="${CLS.ayuda}">${def.formatos} · máximo 5 MB.</p>
++    <p id="e-${def.campo}" class="${CLS.errorCampo}" hidden></p>
++  </div>`;
++}
++
++function seccionHtml(s: DefSeccion): HtmlSeguro {
++  const bloqueCuentas = s.id === 'pago' ? html`<div class="sm:col-span-2" id="cuentas-pago"></div>` : null;
++  return html`<section class="${CLS.tarjeta} p-6" aria-labelledby="t-${s.id}">
++    <h2 id="t-${s.id}" class="mb-4 text-base font-bold text-slate-900">${s.titulo}</h2>
++    <div class="grid gap-4 sm:grid-cols-2">${s.campos.map(controlHtml)}${bloqueCuentas}</div>
++  </section>`;
++}
++
++function esqueleto(): HtmlSeguro {
++  return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
++    <header class="flex items-center gap-4">
++      <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-900 text-white">${icono('school', 'h-6 w-6')}</span>
++      <div>
++        <h1 id="titulo-pagina" tabindex="-1" class="${CLS.titulo}">Inscripción de nuevos estudiantes</h1>
++        <p class="${CLS.subtitulo}">Brilliant Minds Academy · Planilla de admisión</p>
++      </div>
++    </header>
++
++    <section id="costo" class="${CLS.tarjetaCristal} p-6" aria-labelledby="t-costo"></section>
++
++    <div id="resumen-errores" tabindex="-1"></div>
++
++    <form id="planilla" novalidate class="flex flex-col gap-6" aria-label="Planilla de inscripción">
++      ${SECCIONES.slice(0, 3).map(seccionHtml)}
++      <section class="${CLS.tarjeta} p-6" aria-labelledby="t-documentos">
++        <h2 id="t-documentos" class="mb-4 text-base font-bold text-slate-900">Documentos obligatorios</h2>
++        <div class="grid gap-4 sm:grid-cols-2">${ARCHIVOS.map(archivoHtml)}</div>
++      </section>
++      ${seccionHtml(SECCIONES[3] ?? { id: 'pago', titulo: 'Pago', campos: [] })}
++      <button id="enviar" type="submit" class="${boton(CLS.btnPrimario, 'w-full py-3 text-base')}">${icono('upload', 'h-5 w-5')}<span>Enviar inscripción</span></button>
++      <p class="text-center text-xs text-slate-600">Los campos con <span aria-hidden="true">*</span><span class="sr-only">asterisco</span> son obligatorios.</p>
++    </form>
++  </div>`;
++}
++
++function costoHtml(): HtmlSeguro {
++  const { config, consultadoEn, errorConfig, cargandoConfig } = estado;
++  const titulo = html`<h2 id="t-costo" class="text-base font-bold text-slate-900">Matrícula inicial</h2>`;
++  if (!config) {
++    if (cargandoConfig) {
++      return html`${titulo}<div class="mt-4 h-12 animate-pulse rounded-lg bg-slate-200" role="status" aria-label="Cargando costo de la matrícula"></div>`;
++    }
++    return html`${titulo}<div class="mt-4">${aviso('bad', errorConfig ?? 'No se pudo cargar el costo de la matrícula.')}</div>
++      <button type="button" id="reintentar" class="${boton(CLS.btnSecundario, 'mt-4')}">${icono('refresh', 'h-4 w-4')}<span>Reintentar</span></button>`;
++  }
++  const cuentas =
++    config.cuentas.length === 0
++      ? html`<p class="${CLS.ayuda}">Consulta los datos de pago con la administración.</p>`
++      : html`<ul class="mt-2 grid gap-2 sm:grid-cols-2">${config.cuentas.map(
++          (c) => html`<li class="rounded-lg border border-slate-200 bg-white/95 p-3 text-sm"><p class="font-semibold text-slate-900">${nombreMetodo(c.metodo)}</p><p class="break-words text-slate-700">${c.detalle}</p><p class="text-xs text-slate-600">Titular: ${c.titular}</p></li>`,
++        )}</ul>`;
++  return html`${titulo}
++    <div class="mt-4 flex flex-wrap items-end gap-x-6 gap-y-2">
++      <p class="text-3xl font-bold text-slate-900" data-usd>${usd(config.matricula_usd)}</p>
++      <p class="pb-1 text-xl font-semibold text-slate-700" data-bs>≈ ${bs(config.matricula_bs)}</p>
++    </div>
++    <p class="mt-2 flex flex-wrap items-center gap-2 text-sm text-slate-600">
++      <span>Tasa BCV: <strong class="text-slate-900" data-tasa>${formatoTasa(config.tasa_bcv)}</strong> Bs. por US$</span>
++      ${consultadoEn ? html`<span>· consultada a las <time data-hora>${horaConSegundos(consultadoEn)}</time></span>` : null}
++      <button type="button" id="actualizar-tasa" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">${icono('refresh', 'h-4 w-4')}<span>Actualizar</span></button>
++    </p>
++    ${config.tasa_desactualizada ? html`<div class="mt-4">${aviso('warn', 'El BCV no respondió en este momento: se muestra la última tasa disponible. El monto exacto se confirma al enviar.')}</div>` : null}
++    <h3 class="mt-6 text-sm font-semibold text-slate-900">Cuentas para pagar</h3>${cuentas}`;
++}
++
++function pintarCosto(): void {
++  const zona = obtener('#costo', HTMLElement);
++  montar(zona, costoHtml());
++  buscar('#reintentar', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
++  buscar('#actualizar-tasa', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
++}
++
++// ───────────────────────── Carga de la tasa BCV ─────────────────────────
++
++/** Devuelve true si la consulta tuvo éxito. */
++async function refrescarConfig(silencioso: boolean): Promise<boolean> {
++  if (!silencioso) {
++    actualizar({ cargandoConfig: true, errorConfig: null });
++    if (!estado.config) pintarCosto();
++  }
++  try {
++    const config = await bma.get<ConfigAdmisiones>('/public/admisiones/config', undefined, { sinAuth: true });
++    actualizar({ config, consultadoEn: new Date(), errorConfig: null, cargandoConfig: false });
++    pintarCosto();
++    return true;
++  } catch (e: unknown) {
++    actualizar({ cargandoConfig: false, errorConfig: estado.config ? null : mensajeDeError(e) });
++    if (!silencioso || !estado.config) pintarCosto();
++    return false;
++  }
++}
++
++// ───────────────────────── Errores en pantalla ─────────────────────────
++
++const ALIAS_CAMPO: Readonly<Record<string, string>> = { telefono: 'telefono_numero' };
++
++function limpiarErrores(): void {
++  montar(obtener('#resumen-errores', HTMLElement), html``);
++  for (const p of todos('[id^="e-"]', HTMLElement)) {
++    p.hidden = true;
++    p.textContent = '';
++  }
++  for (const c of todos('[aria-invalid="true"]', HTMLElement)) c.removeAttribute('aria-invalid');
++}
++
++function marcarCampo(campo: string, mensaje: string): boolean {
++  const nombre = ALIAS_CAMPO[campo] ?? campo;
++  const texto = buscar(`#e-${CSS.escape(nombre)}`, HTMLElement);
++  const control = buscar(`#f-${CSS.escape(nombre)}`, HTMLElement);
++  if (!texto || !control) return false;
++  texto.textContent = mensaje;
++  texto.hidden = false;
++  control.setAttribute('aria-invalid', 'true');
++  return true;
++}
++
++function mostrarErrores(errores: readonly ErrorValidacion[], titulo = 'Revisa la planilla antes de enviarla'): void {
++  for (const e of errores) marcarCampo(e.campo, e.mensaje);
++  const zona = obtener('#resumen-errores', HTMLElement);
++  montar(zona, aviso('bad', html`<ul class="list-disc pl-4">${errores.map((e) => html`<li>${e.mensaje}</li>`)}</ul>`, titulo));
++  const primero = errores.map((e) => buscar(`#f-${CSS.escape(ALIAS_CAMPO[e.campo] ?? e.campo)}`, HTMLElement)).find((c) => c !== null);
++  if (primero) primero.focus();
++  else zona.focus();
++  zona.scrollIntoView({ block: 'center', behavior: 'smooth' });
++}
++
++function mostrarExito(r: RespuestaAdmision): void {
++  const raiz = obtener('#planilla', HTMLElement);
++  limpiarErrores();
++  montar(
++    raiz,
++    html`<section class="${CLS.tarjetaCristal} p-6" role="status">
++      <div class="flex items-center gap-3">
++        <span class="flex h-10 w-10 items-center justify-center rounded-full bg-emerald-700 text-white">${icono('check', 'h-5 w-5')}</span>
++        <h2 id="exito" tabindex="-1" class="text-xl font-bold text-slate-900">¡Inscripción recibida!</h2>
++      </div>
++      <dl class="mt-6 grid gap-4 text-sm sm:grid-cols-2">
++        <div><dt class="text-slate-600">Estatus</dt><dd class="font-semibold text-slate-900">${r.estatus}</dd></div>
++        <div><dt class="text-slate-600">Método</dt><dd class="font-semibold text-slate-900">${nombreMetodo(r.metodo_pago)}</dd></div>
++        <div><dt class="text-slate-600">Referencia declarada</dt><dd class="break-all font-semibold text-slate-900">${r.referencia}</dd></div>
++        <div><dt class="text-slate-600">Monto de la matrícula</dt><dd class="font-semibold text-slate-900">${usd(r.monto_usd)} · ${bs(r.monto_bs)}</dd></div>
++        <div><dt class="text-slate-600">Tasa BCV aplicada</dt><dd class="font-semibold text-slate-900">${formatoTasa(r.tasa_bcv)} Bs. por US$${r.tasa_desactualizada ? ' (última disponible)' : ''}</dd></div>
++      </dl>
++      <p class="mt-6 text-sm text-slate-700">La administración validará tu pago en breve y te contactará por WhatsApp. Conserva el comprobante de tu transferencia.</p>
++    </section>`,
++  );
++  buscar('#exito', HTMLElement)?.focus();
++  window.scrollTo({ top: 0, behavior: 'smooth' });
++}
++
++// ───────────────────────── Envío ─────────────────────────
++
++async function alEnviar(formulario: HTMLFormElement): Promise<void> {
++  if (estado.enviando) return;
++  limpiarErrores();
++
++  const textos = leerTextos(formulario);
++  const inspeccion = inspeccionarArchivos(formulario);
++  const errores = [...validarTextos(textos), ...inspeccion.errores];
++  if (errores.length > 0) {
++    mostrarErrores(errores);
++    return;
++  }
++
++  const botonEnviar = obtener('#enviar', HTMLButtonElement);
++  actualizar({ enviando: true });
++  try {
++    await conBotonOcupado(botonEnviar, async () => {
++      // La tasa se confirma justo antes de enviar: si cambió, el representante debe ver el monto nuevo antes de continuar.
++      const tasaMostrada = estado.config?.tasa_bcv ?? null;
++      await refrescarConfig(true);
++      if (!estado.config) {
++        mostrarErrores([{ campo: '', mensaje: 'No se pudo confirmar el costo de la matrícula. Intenta de nuevo en unos segundos.' }], 'Sin conexión');
++        return;
++      }
++      if (tasaMostrada !== null && estado.config.tasa_bcv !== tasaMostrada) {
++        mostrarErrores(
++          [{ campo: '', mensaje: `La tasa BCV cambió a ${formatoTasa(estado.config.tasa_bcv)}. El monto en bolívares se actualizó a ${bs(estado.config.matricula_bs)}; revísalo y vuelve a enviar.` }],
++          'La tasa BCV se actualizó',
++        );
++        return;
++      }
++      const datos = construirFormData(textos, inspeccion.archivos);
++      const respuesta = await bma.post<RespuestaAdmision>('/public/admisiones', datos, { sinAuth: true, timeoutMs: 120_000 });
++      mostrarExito(respuesta);
++    });
++  } catch (e: unknown) {
++    if (e instanceof BmaApiError && e.camposInvalidos().length > 0) {
++      mostrarErrores(e.camposInvalidos().map((d) => ({ campo: d.campo, mensaje: d.mensaje })), e.message);
++    } else {
++      mostrarErrores([{ campo: '', mensaje: mensajeDeError(e) }], 'No se pudo enviar la inscripción');
++    }
++  } finally {
++    actualizar({ enviando: false });
++  }
++}
++
++// ───────────────────────── Arranque ─────────────────────────
++
++function mostrarArchivoElegido(control: HTMLInputElement): void {
++  const def = ARCHIVOS.find((a) => a.campo === control.name);
++  const texto = buscar(`#e-${CSS.escape(control.name)}`, HTMLElement);
++  if (!def || !texto) return;
++  const archivo = control.files?.[0];
++  if (!archivo) {
++    texto.hidden = true;
++    control.removeAttribute('aria-invalid');
++    return;
++  }
++  const problema = validarArchivo(def, archivo);
++  if (problema) {
++    texto.textContent = problema.mensaje;
++    texto.hidden = false;
++    control.setAttribute('aria-invalid', 'true');
++  } else {
++    control.removeAttribute('aria-invalid');
++    texto.hidden = true;
++    texto.textContent = '';
++    const ayuda = buscar(`#a-${CSS.escape(control.name)}`, HTMLElement);
++    if (ayuda) ayuda.textContent = `${archivo.name} · ${formatoTamano(archivo.size)} · listo.`;
++  }
++}
++
++function iniciar(): void {
++  const raiz = obtener('#app', HTMLElement);
++  document.body.className = 'text-slate-900';
++  montar(raiz, esqueleto());
++  pintarCosto();
++
++  const formulario = obtener('#planilla', HTMLFormElement);
++  formulario.addEventListener('submit', (ev) => {
++    ev.preventDefault();
++    void alEnviar(formulario);
++  });
++  for (const control of todos('input[type="file"]', HTMLInputElement, formulario)) {
++    control.addEventListener('change', () => mostrarArchivoElegido(control));
++  }
++
++  void refrescarConfig(false);
++  window.setInterval(() => {
++    if (!document.hidden && !estado.enviando) void refrescarConfig(true);
++  }, INTERVALO_TASA_MS);
++  document.addEventListener('visibilitychange', () => {
++    if (!document.hidden && !estado.enviando) void refrescarConfig(true);
++  });
++}
++
++iniciar();
+diff --git a/frontend/src/api/bmaClient.ts b/frontend/src/api/bmaClient.ts
+new file mode 100644
+index 0000000..9eb8c53
+--- /dev/null
++++ b/frontend/src/api/bmaClient.ts
+@@ -0,0 +1,261 @@
++/**
++ * Cliente HTTP unificado del backend BMA.
++ *  - Inyecta `Authorization: Bearer <token>` leyendo `sessionStorage` (salvo `sinAuth`).
++ *  - Mapea `{ ok: true, data }` → valor tipado y `{ ok: false, error }` → excepciones tipadas:
++ *      BmaApiError (el servidor respondió con error), BmaSesionExpiradaError (401),
++ *      BmaRedError (sin conexión / tiempo agotado / respuesta que no es JSON).
++ */
++import type {
++  CuerpoError,
++  DetalleCampo,
++  DetalleModuloPremium,
++  Paginacion,
++  RespuestaError,
++  RespuestaOk,
++} from '../types/index';
++
++const CLAVE_TOKEN = 'tok';
++const CLAVE_USUARIO = 'usr';
++const PREFIJO_API = '/api';
++const TIMEOUT_POR_DEFECTO_MS = 30_000;
++
++// ───────────────────────── Almacenamiento de sesión ─────────────────────────
++
++export function leerSesion(clave: string): string | null {
++  try {
++    return sessionStorage.getItem(clave);
++  } catch {
++    return null; // modo privado / almacenamiento bloqueado
++  }
++}
++
++function escribirSesion(clave: string, valor: string | null): void {
++  try {
++    if (valor === null) sessionStorage.removeItem(clave);
++    else sessionStorage.setItem(clave, valor);
++  } catch {
++    /* sin almacenamiento: la sesión vive solo en memoria de la página */
++  }
++}
++
++export const sesion = {
++  token: (): string | null => leerSesion(CLAVE_TOKEN),
++  usuarioCrudo: (): string | null => leerSesion(CLAVE_USUARIO),
++  guardar(token: string, usuarioJson: string): void {
++    escribirSesion(CLAVE_TOKEN, token);
++    escribirSesion(CLAVE_USUARIO, usuarioJson);
++  },
++  cerrar(): void {
++    escribirSesion(CLAVE_TOKEN, null);
++    escribirSesion(CLAVE_USUARIO, null);
++  },
++} as const;
++
++// ───────────────────────── Excepciones tipadas ─────────────────────────
++
++export class BmaApiError extends Error {
++  readonly estado: number;
++  readonly codigo: string;
++  readonly detalles: unknown;
++  readonly requestId: string | null;
++
++  constructor(estado: number, cuerpo: CuerpoError) {
++    super(cuerpo.mensaje);
++    this.name = 'BmaApiError';
++    this.estado = estado;
++    this.codigo = cuerpo.codigo ?? 'ERROR';
++    this.detalles = cuerpo.detalles;
++    this.requestId = cuerpo.requestId ?? null;
++  }
++
++  /** Errores por campo (códigos VALIDACION): `[{campo, mensaje}]`. */
++  camposInvalidos(): readonly DetalleCampo[] {
++    return Array.isArray(this.detalles) ? this.detalles.filter(esDetalleCampo) : [];
++  }
++
++  /** Datos del módulo cuando el servidor responde 403 MODULO_PREMIUM_DESHABILITADO. */
++  moduloPremium(): DetalleModuloPremium | null {
++    return this.codigo === 'MODULO_PREMIUM_DESHABILITADO' && esDetalleModuloPremium(this.detalles) ? this.detalles : null;
++  }
++}
++
++/** 401 en una ruta protegida: el token no existe, venció o fue revocado. */
++export class BmaSesionExpiradaError extends BmaApiError {
++  constructor(cuerpo: CuerpoError) {
++    super(401, cuerpo);
++    this.name = 'BmaSesionExpiradaError';
++  }
++}
++
++/** Fallo de transporte: sin red, tiempo agotado o cuerpo que no es JSON válido. */
++export class BmaRedError extends Error {
++  readonly causa: 'sin_conexion' | 'tiempo_agotado' | 'respuesta_invalida';
++
++  constructor(causa: BmaRedError['causa']) {
++    const mensajes: Readonly<Record<BmaRedError['causa'], string>> = {
++      sin_conexion: 'Sin conexión con el servidor. Revisa tu internet e intenta de nuevo.',
++      tiempo_agotado: 'El servidor tardó demasiado en responder. Intenta de nuevo.',
++      respuesta_invalida: 'El servidor devolvió una respuesta no válida.',
++    };
++    super(mensajes[causa]);
++    this.name = 'BmaRedError';
++    this.causa = causa;
++  }
++}
++
++export function esBmaApiError(e: unknown): e is BmaApiError {
++  return e instanceof BmaApiError;
++}
++
++/** Mensaje presentable para cualquier excepción capturada (`unknown` en strict). */
++export function mensajeDeError(e: unknown): string {
++  if (e instanceof BmaApiError || e instanceof BmaRedError) return e.message;
++  return 'Ocurrió un error inesperado. Intenta de nuevo.';
++}
++
++// ───────────────────────── Guardas de tipo ─────────────────────────
++
++function esObjeto(v: unknown): v is Readonly<Record<string, unknown>> {
++  return typeof v === 'object' && v !== null && !Array.isArray(v);
++}
++
++function esDetalleCampo(v: unknown): v is DetalleCampo {
++  return esObjeto(v) && typeof v['campo'] === 'string' && typeof v['mensaje'] === 'string';
++}
++
++function esDetalleModuloPremium(v: unknown): v is DetalleModuloPremium {
++  return esObjeto(v) && typeof v['modulo'] === 'string' && typeof v['nombre'] === 'string' && typeof v['precio_usd'] === 'number';
++}
++
++function esRespuestaError(v: unknown): v is RespuestaError {
++  return esObjeto(v) && v['ok'] === false && esObjeto(v['error']) && typeof v['error']['mensaje'] === 'string';
++}
++
++function esRespuestaOk(v: unknown): v is RespuestaOk<unknown> {
++  return esObjeto(v) && v['ok'] === true && 'data' in v;
++}
++
++// ───────────────────────── Núcleo ─────────────────────────
++
++export type ParametrosConsulta = Readonly<Record<string, string | number | boolean | null | undefined>>;
++
++export interface OpcionesPeticion {
++  readonly metodo?: 'GET' | 'POST' | 'PUT' | 'DELETE';
++  readonly consulta?: ParametrosConsulta;
++  /** JSON (objeto) o FormData (multipart: el navegador fija el Content-Type con su boundary). */
++  readonly cuerpo?: object;
++  /** No enviar el Bearer (rutas públicas / portal con token propio). */
++  readonly sinAuth?: boolean;
++  readonly timeoutMs?: number;
++  readonly senal?: AbortSignal;
++}
++
++function construirUrl(ruta: string, consulta?: ParametrosConsulta): string {
++  const base = `${PREFIJO_API}${ruta.startsWith('/') ? ruta : `/${ruta}`}`;
++  if (!consulta) return base;
++  const params = new URLSearchParams();
++  for (const [k, v] of Object.entries(consulta)) {
++    if (v !== undefined && v !== null && v !== '') params.set(k, String(v));
++  }
++  const texto = params.toString();
++  return texto ? `${base}?${texto}` : base;
++}
++
++function cabeceras(opciones: OpcionesPeticion, esFormData: boolean): Headers {
++  const h = new Headers({ Accept: 'application/json' });
++  if (opciones.cuerpo !== undefined && !esFormData) h.set('Content-Type', 'application/json');
++  const token = opciones.sinAuth ? null : sesion.token();
++  if (token) h.set('Authorization', `Bearer ${token}`);
++  return h;
++}
++
++async function ejecutar(ruta: string, opciones: OpcionesPeticion): Promise<{ readonly estado: number; readonly respuesta: Response }> {
++  const esFormData = opciones.cuerpo instanceof FormData;
++  const controlador = new AbortController();
++  const temporizador = setTimeout(() => controlador.abort(), opciones.timeoutMs ?? TIMEOUT_POR_DEFECTO_MS);
++  opciones.senal?.addEventListener('abort', () => controlador.abort(), { once: true });
++  const init: RequestInit = {
++    method: opciones.metodo ?? (opciones.cuerpo !== undefined ? 'POST' : 'GET'),
++    headers: cabeceras(opciones, esFormData),
++    signal: controlador.signal,
++    credentials: 'same-origin',
++  };
++  if (opciones.cuerpo !== undefined) init.body = esFormData ? (opciones.cuerpo as FormData) : JSON.stringify(opciones.cuerpo);
++  try {
++    const respuesta = await fetch(construirUrl(ruta, opciones.consulta), init);
++    return { estado: respuesta.status, respuesta };
++  } catch (e: unknown) {
++    throw new BmaRedError(e instanceof DOMException && e.name === 'AbortError' ? 'tiempo_agotado' : 'sin_conexion');
++  } finally {
++    clearTimeout(temporizador);
++  }
++}
++
++async function leerJson(respuesta: Response): Promise<unknown> {
++  try {
++    return (await respuesta.json()) as unknown;
++  } catch {
++    throw new BmaRedError('respuesta_invalida');
++  }
++}
++
++/** Devuelve el sobre completo `{ok:true,data,paginacion?}` o lanza la excepción tipada que corresponda. */
++async function sobre<T>(ruta: string, opciones: OpcionesPeticion = {}): Promise<RespuestaOk<T>> {
++  const { estado, respuesta } = await ejecutar(ruta, opciones);
++  const json = await leerJson(respuesta);
++
++  if (esRespuestaError(json)) {
++    if (estado === 401 && !opciones.sinAuth && ruta !== '/auth/login') {
++      sesion.cerrar();
++      throw new BmaSesionExpiradaError(json.error);
++    }
++    throw new BmaApiError(estado, json.error);
++  }
++  if (!respuesta.ok || !esRespuestaOk(json)) {
++    throw new BmaApiError(estado, { mensaje: 'El servidor devolvió una respuesta inesperada.' });
++  }
++  return json as RespuestaOk<T>;
++}
++
++// ───────────────────────── API pública del cliente ─────────────────────────
++
++export interface Pagina<T> {
++  readonly datos: readonly T[];
++  readonly paginacion: Paginacion;
++}
++
++export const bma = {
++  async get<T>(ruta: string, consulta?: ParametrosConsulta, extra: Omit<OpcionesPeticion, 'consulta' | 'cuerpo' | 'metodo'> = {}): Promise<T> {
++    const opciones: OpcionesPeticion = consulta ? { ...extra, consulta } : extra;
++    return (await sobre<T>(ruta, opciones)).data;
++  },
++
++  async post<T>(ruta: string, cuerpo: object = {}, extra: Omit<OpcionesPeticion, 'cuerpo' | 'metodo'> = {}): Promise<T> {
++    return (await sobre<T>(ruta, { ...extra, metodo: 'POST', cuerpo })).data;
++  },
++
++  /** Listados paginados: `{ ok, data: T[], paginacion }`. */
++  async pagina<T>(ruta: string, consulta?: ParametrosConsulta): Promise<Pagina<T>> {
++    const s = await sobre<readonly T[]>(ruta, consulta ? { consulta } : {});
++    return { datos: s.data, paginacion: s.paginacion ?? { pagina: 1, limite: s.data.length, total: s.data.length } };
++  },
++
++  /** Descarga binaria autenticada (exportaciones .xlsx). */
++  async descargar(ruta: string, nombreArchivo: string): Promise<void> {
++    const { estado, respuesta } = await ejecutar(ruta, { timeoutMs: 120_000 });
++    if (!respuesta.ok) {
++      const json = await respuesta.json().then((v: unknown) => v, () => null);
++      if (estado === 401) {
++        sesion.cerrar();
++        throw new BmaSesionExpiradaError(esRespuestaError(json) ? json.error : { mensaje: 'Tu sesión expiró.' });
++      }
++      throw new BmaApiError(estado, esRespuestaError(json) ? json.error : { mensaje: 'No se pudo exportar el archivo.' });
++    }
++    const url = URL.createObjectURL(await respuesta.blob());
++    const enlace = document.createElement('a');
++    enlace.href = url;
++    enlace.download = nombreArchivo;
++    enlace.click();
++    setTimeout(() => URL.revokeObjectURL(url), 1_000);
++  },
++} as const;
+diff --git a/frontend/src/css.d.ts b/frontend/src/css.d.ts
+new file mode 100644
+index 0000000..dcc72a2
+--- /dev/null
++++ b/frontend/src/css.d.ts
+@@ -0,0 +1,2 @@
++/** Importaciones de hojas de estilo (Vite las procesa con PostCSS + Tailwind). */
++declare module '*.css';
+diff --git a/frontend/src/lib/format.ts b/frontend/src/lib/format.ts
+new file mode 100644
+index 0000000..fb7f54d
+--- /dev/null
++++ b/frontend/src/lib/format.ts
+@@ -0,0 +1,55 @@
++/** Formato de dinero y fechas. "Hoy" siempre es la fecha de Caracas (UTC-4), igual que el backend. */
++
++const ZONA = 'America/Caracas';
++
++const fmtUsd = new Intl.NumberFormat('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
++const fmtBs = new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
++const fmtTasa = new Intl.NumberFormat('es-VE', { minimumFractionDigits: 2, maximumFractionDigits: 4 });
++
++export const usd = (n: number): string => `US$ ${fmtUsd.format(n)}`;
++export const bs = (n: number): string => `Bs. ${fmtBs.format(n)}`;
++export const tasa = (n: number): string => fmtTasa.format(n);
++
++/** 'AAAA-MM-DD' → 'DD/MM/AAAA' sin pasar por Date (evita el corrimiento de un día por zona horaria). */
++export function fechaCorta(iso: string): string {
++  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(iso);
++  return m ? `${m[3]}/${m[2]}/${m[1]}` : iso;
++}
++
++export function fechaHora(iso: string): string {
++  const d = new Date(iso);
++  if (Number.isNaN(d.getTime())) return iso;
++  return d.toLocaleString('es-VE', { timeZone: ZONA, dateStyle: 'short', timeStyle: 'short' });
++}
++
++export function horaConSegundos(d: Date): string {
++  return d.toLocaleTimeString('es-VE', { timeZone: ZONA, hour12: false });
++}
++
++/** Fecha de hoy en Caracas como 'AAAA-MM-DD'. */
++export function hoyCaracas(ahora: Date = new Date()): string {
++  const partes = new Intl.DateTimeFormat('en-CA', { timeZone: ZONA, year: 'numeric', month: '2-digit', day: '2-digit' }).format(ahora);
++  return partes; // en-CA ya produce AAAA-MM-DD
++}
++
++export const periodoActual = (): string => hoyCaracas().slice(0, 7);
++
++/** Cantidad de días del período 'AAAA-MM'. */
++export function diasDelPeriodo(periodo: string): number {
++  const m = /^(\d{4})-(\d{2})$/.exec(periodo);
++  if (!m) return 31;
++  return new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate();
++}
++
++export function esVencida(fechaVencimiento: string): boolean {
++  return fechaVencimiento < hoyCaracas();
++}
++
++export const NOMBRE_METODO: Readonly<Record<string, string>> = {
++  ZELLE: 'Zelle',
++  BINANCE: 'Binance',
++  PAYPAL: 'PayPal',
++  PAGO_MOVIL: 'Pago Móvil',
++};
++
++export const nombreMetodo = (m: string): string => NOMBRE_METODO[m] ?? m;
+diff --git a/frontend/src/lib/html.ts b/frontend/src/lib/html.ts
+new file mode 100644
+index 0000000..4f90c8f
+--- /dev/null
++++ b/frontend/src/lib/html.ts
+@@ -0,0 +1,66 @@
++/**
++ * Sanitización contra XSS.
++ *
++ * `esc()` escapa `& < > " ' \`` y es la ÚNICA función que convierte datos dinámicos en texto HTML.
++ * La etiqueta `html` la aplica automáticamente a CADA valor interpolado en una plantilla literal, así que
++ * un dato del formulario público (no confiable) no puede llegar al DOM sin pasar por `esc()`:
++ * solo se inserta tal cual lo que ya es `HtmlSeguro` (resultado de otra plantilla `html` o de `raw()`).
++ * Todos los atributos de las plantillas van entre comillas dobles, de modo que `"` escapado no puede cerrarlos.
++ */
++
++const ENTIDADES: Readonly<Record<string, string>> = {
++  '&': '&amp;',
++  '<': '&lt;',
++  '>': '&gt;',
++  '"': '&quot;',
++  "'": '&#39;',
++  '`': '&#96;',
++};
++
++export function esc(valor: unknown): string {
++  return String(valor ?? '').replace(/[&<>"'`]/g, (c) => ENTIDADES[c] ?? c);
++}
++
++/** Fragmento HTML ya saneado (o constante de confianza). Su constructor no es público a propósito: usa `html` o `raw`. */
++export class HtmlSeguro {
++  readonly valor: string;
++  constructor(valor: string) {
++    this.valor = valor;
++  }
++  toString(): string {
++    return this.valor;
++  }
++}
++
++export type Interpolable = string | number | boolean | null | undefined | HtmlSeguro | readonly Interpolable[];
++
++function aTexto(v: Interpolable): string {
++  if (v instanceof HtmlSeguro) return v.valor;
++  if (Array.isArray(v)) return (v as readonly Interpolable[]).map(aTexto).join('');
++  if (v === null || v === undefined) return ''; // los booleanos se imprimen como 'true'/'false' (atributos aria-*/data-*)
++  return esc(v);
++}
++
++/** Plantilla literal con escape automático de todo lo interpolado. */
++export function html(literales: TemplateStringsArray, ...valores: readonly Interpolable[]): HtmlSeguro {
++  let salida = '';
++  literales.forEach((trozo, i) => {
++    salida += trozo;
++    if (i < valores.length) salida += aTexto(valores[i] as Interpolable);
++  });
++  return new HtmlSeguro(salida);
++}
++
++/** SOLO para constantes del propio código (p. ej. el trazado de un SVG). Nunca con datos de la API ni del usuario. */
++export function raw(constante: string): HtmlSeguro {
++  return new HtmlSeguro(constante);
++}
++
++export function montar(elemento: Element, contenido: HtmlSeguro): void {
++  elemento.innerHTML = contenido.valor;
++}
++
++/** Devuelve `url` solo si empieza por uno de los prefijos permitidos (evita `javascript:` en href). */
++export function urlSegura(url: string, prefijosPermitidos: readonly string[]): string {
++  return prefijosPermitidos.some((p) => url.startsWith(p)) ? url : '#';
++}
+diff --git a/frontend/src/lib/icons.ts b/frontend/src/lib/icons.ts
+new file mode 100644
+index 0000000..9fbb4c9
+--- /dev/null
++++ b/frontend/src/lib/icons.ts
+@@ -0,0 +1,34 @@
++/** Iconos como SVG puro en línea (sin librerías ni imágenes). Trazos de 24×24 heredan `currentColor`. */
++import { HtmlSeguro, raw } from './html';
++
++const TRAZOS = {
++  home: '<path d="M3 11l9-8 9 8M5 10v10h14V10"/>',
++  users: '<circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-3.5 3-6 7-6s7 2.5 7 6M17 5a3.5 3.5 0 010 6M22 20c0-2.5-1.5-4.5-4-5.5"/>',
++  inbox: '<path d="M3 13l3-9h12l3 9v7H3zM3 13h6a3 3 0 006 0h6"/>',
++  book: '<path d="M4 4h12a4 4 0 014 4v12H8a4 4 0 01-4-4zM4 16a4 4 0 014-4h12"/>',
++  lock: '<rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/>',
++  menu: '<path d="M4 6h16M4 12h16M4 18h16"/>',
++  logout: '<path d="M9 4H5v16h4M16 8l4 4-4 4M20 12H9"/>',
++  down: '<path d="M12 3v12m0 0l-4-4m4 4l4-4M4 21h16"/>',
++  chat: '<path d="M4 5h16v11H9l-5 4z"/>',
++  check: '<path d="M5 13l4 4L19 7"/>',
++  x: '<path d="M6 6l12 12M18 6L6 18"/>',
++  alert: '<path d="M12 3l10 18H2zM12 10v5M12 18h.01"/>',
++  info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/>',
++  upload: '<path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16"/>',
++  file: '<path d="M6 3h8l4 4v14H6zM14 3v4h4"/>',
++  refresh: '<path d="M20 11a8 8 0 10-2.3 5.7M20 4v7h-7"/>',
++  school: '<path d="M2 9l10-5 10 5-10 5zM6 11v5c0 1.5 3 3 6 3s6-1.5 6-3v-5"/>',
++  phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
++  globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
++  bot: '<rect x="4" y="8" width="16" height="11" rx="2"/><path d="M12 8V4M9 13h.01M15 13h.01"/>',
++  wallet: '<path d="M3 7h16a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2zM3 7V6a2 2 0 012-2h11M17 14h.01"/>',
++} as const;
++
++export type NombreIcono = keyof typeof TRAZOS;
++
++export function icono(nombre: NombreIcono, clases = 'h-5 w-5 shrink-0'): HtmlSeguro {
++  return raw(
++    `<svg class="${clases}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${TRAZOS[nombre]}</svg>`,
++  );
++}
+diff --git a/frontend/src/lib/ui.ts b/frontend/src/lib/ui.ts
+new file mode 100644
+index 0000000..849a5f2
+--- /dev/null
++++ b/frontend/src/lib/ui.ts
+@@ -0,0 +1,198 @@
++/**
++ * Sistema de diseño neutro (Slate). Reglas:
++ *  - Glassmorphism sobrio: TODAS las superficies de contenido usan `bg-white/90` o `bg-white/95` (opacidad ≥ 86 %), borde slate-200 y blur suave.
++ *    Excepciones deliberadas: (1) la capa del Candado Premium usa `bg-white/80` + `backdrop-blur-md`, tal como pide la especificación
++ *    (el texto va dentro de una tarjeta `bg-white/95`); (2) el telón oscuro detrás de los diálogos (`backdrop:bg-slate-900/60`);
++ *    (3) tintes `/30` de borde y anillo en etiquetas/avisos, que no son superficies.
++ *  - Escala de espaciado rígida: solo 1·2·3·4·6·8·12 (4 · 8 · 12 · 16 · 24 · 32 · 48 px).
++ *  - Foco visible global (ver styles/main.css) y estados `disabled`.
++ */
++import { HtmlSeguro, esc, html, montar } from './html';
++import { icono } from './icons';
++
++export const CLS = {
++  tarjeta: 'rounded-xl border border-slate-200 bg-white/90 shadow-sm backdrop-blur',
++  tarjetaCristal: 'rounded-xl border border-slate-200 bg-white/95 shadow-lg backdrop-blur',
++  input:
++    'block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 aria-[invalid=true]:border-red-700 aria-[invalid=true]:bg-red-50',
++  etiqueta: 'mb-1 block text-sm font-medium text-slate-700',
++  ayuda: 'mt-1 text-xs text-slate-600',
++  errorCampo: 'mt-1 text-xs font-medium text-red-800',
++  btn: 'inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60',
++  btnPrimario: 'bg-slate-900 text-white hover:bg-slate-700',
++  btnSecundario: 'border border-slate-300 bg-white text-slate-800 hover:bg-slate-50',
++  btnPeligro: 'bg-red-700 text-white hover:bg-red-800',
++  btnOk: 'bg-emerald-700 text-white hover:bg-emerald-800',
++  btnPeq: '!px-3 !py-1 text-xs',
++  titulo: 'text-2xl font-bold tracking-tight text-slate-900',
++  subtitulo: 'mt-1 text-sm text-slate-600',
++  tabla: 'w-full min-w-[40rem] text-left text-sm',
++  th: 'whitespace-nowrap border-b border-slate-200 bg-slate-50 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-600',
++  td: 'border-b border-slate-100 px-4 py-3 align-top text-slate-800',
++} as const;
++
++export const boton = (...extra: readonly string[]): string => [CLS.btn, ...extra].join(' ');
++
++export type Tono = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
++
++const CLASE_ETIQUETA: Readonly<Record<Tono, string>> = {
++  ok: 'bg-emerald-50 text-emerald-900 ring-emerald-700/30',
++  warn: 'bg-amber-50 text-amber-900 ring-amber-700/30',
++  bad: 'bg-red-50 text-red-900 ring-red-700/30',
++  info: 'bg-sky-50 text-sky-900 ring-sky-700/30',
++  neutral: 'bg-slate-100 text-slate-800 ring-slate-500/30',
++};
++
++const CLASE_AVISO: Readonly<Record<Tono, string>> = {
++  ok: 'border-emerald-700/30 bg-emerald-50 text-emerald-900',
++  warn: 'border-amber-700/30 bg-amber-50 text-amber-900',
++  bad: 'border-red-700/30 bg-red-50 text-red-900',
++  info: 'border-sky-700/30 bg-sky-50 text-sky-900',
++  neutral: 'border-slate-300 bg-slate-50 text-slate-800',
++};
++
++export function etiqueta(texto: string, tono: Tono): HtmlSeguro {
++  return html`<span class="inline-flex items-center whitespace-nowrap rounded-full px-3 py-1 text-xs font-semibold ring-1 ring-inset ${CLASE_ETIQUETA[tono]}">${texto}</span>`;
++}
++
++export function tonoEstado(estado: string): Tono {
++  switch (estado) {
++    case 'Activo':
++    case 'Al día':
++    case 'Pagada':
++    case 'Aprobada':
++      return 'ok';
++    case 'Moroso':
++    case 'Fuera de la Academia':
++    case 'Rechazada':
++    case 'Anulada':
++      return 'bad';
++    case 'Pendiente por Validación Administrativa':
++    case 'Pendiente de Validación':
++    case 'En Revisión':
++    case 'Por Validar':
++      return 'warn';
++    case 'Pendiente':
++      return 'info';
++    default:
++      return 'neutral';
++  }
++}
++
++export const etiquetaEstado = (estado: string): HtmlSeguro => etiqueta(estado, tonoEstado(estado));
++
++/** Bloque de aviso accesible (`role="alert"` para errores, `status` para el resto). */
++export function aviso(tono: Tono, contenido: HtmlSeguro | string, titulo?: string): HtmlSeguro {
++  const rol = tono === 'bad' ? 'alert' : 'status';
++  const ic = tono === 'ok' ? 'check' : tono === 'info' || tono === 'neutral' ? 'info' : 'alert';
++  return html`<div role="${rol}" class="flex gap-3 rounded-lg border p-4 text-sm ${CLASE_AVISO[tono]}">${icono(ic, 'mt-1 h-4 w-4 shrink-0')}<div class="min-w-0 break-words">${titulo ? html`<p class="font-semibold">${titulo}</p>` : null}${contenido}</div></div>`;
++}
++
++// ───────────────────────── Acceso tipado al DOM ─────────────────────────
++
++type Constructor<E extends Element> = abstract new (...args: never[]) => E;
++
++/** `querySelector` con comprobación de tipo en ejecución; lanza si no existe (error de programación, no de usuario). */
++export function obtener<E extends Element>(selector: string, tipo: Constructor<E>, raiz: ParentNode = document): E {
++  const el = raiz.querySelector(selector);
++  if (!(el instanceof tipo)) throw new Error(`Elemento no encontrado o de tipo inesperado: ${selector}`);
++  return el;
++}
++
++export function buscar<E extends Element>(selector: string, tipo: Constructor<E>, raiz: ParentNode = document): E | null {
++  const el = raiz.querySelector(selector);
++  return el instanceof tipo ? el : null;
++}
++
++export function todos<E extends Element>(selector: string, tipo: Constructor<E>, raiz: ParentNode = document): readonly E[] {
++  return Array.from(raiz.querySelectorAll(selector)).filter((el): el is E => el instanceof tipo);
++}
++
++// ───────────────────────── Avisos flotantes (toasts) ─────────────────────────
++
++function contenedorAvisos(): HTMLElement {
++  const existente = document.getElementById('avisos');
++  if (existente) return existente;
++  const c = document.createElement('div');
++  c.id = 'avisos';
++  c.className = 'pointer-events-none fixed inset-x-4 bottom-4 z-[60] flex flex-col items-end gap-2 sm:left-auto sm:w-96';
++  document.body.append(c);
++  return c;
++}
++
++export function notificar(tono: Tono, mensaje: string, duracionMs = 6_000): void {
++  const caja = document.createElement('div');
++  caja.className = 'pointer-events-auto w-full';
++  montar(caja, aviso(tono, mensaje));
++  contenedorAvisos().append(caja);
++  window.setTimeout(() => caja.remove(), duracionMs);
++}
++
++// ───────────────────────── Modales (<dialog> nativo: foco atrapado + Esc) ─────────────────────────
++
++export interface Modal {
++  readonly dialogo: HTMLDialogElement;
++  cerrar(): void;
++}
++
++export interface OpcionesModal {
++  readonly titulo: string;
++  readonly cuerpo: HtmlSeguro;
++  readonly ancho?: 'md' | 'lg';
++  readonly alCerrar?: () => void;
++}
++
++let contadorModal = 0;
++
++export function abrirModal(opciones: OpcionesModal): Modal {
++  contadorModal += 1;
++  const idTitulo = `modal-titulo-${contadorModal}`;
++  const dialogo = document.createElement('dialog');
++  dialogo.setAttribute('aria-labelledby', idTitulo);
++  dialogo.className = `m-auto w-[calc(100%-2rem)] ${opciones.ancho === 'lg' ? 'max-w-2xl' : 'max-w-md'} rounded-xl border border-slate-200 bg-white/95 p-0 text-slate-900 shadow-lg backdrop:bg-slate-900/60 backdrop:backdrop-blur-sm`;
++  montar(
++    dialogo,
++    html`<div class="p-6">
++      <div class="mb-4 flex items-start justify-between gap-4">
++        <h2 id="${idTitulo}" class="text-lg font-bold">${opciones.titulo}</h2>
++        <button type="button" data-cerrar class="${boton(CLS.btnSecundario, CLS.btnPeq)}" aria-label="Cerrar">${icono('x', 'h-4 w-4')}</button>
++      </div>
++      <div data-cuerpo>${opciones.cuerpo}</div>
++    </div>`,
++  );
++  const cerrar = (): void => {
++    if (dialogo.open) dialogo.close();
++  };
++  dialogo.addEventListener('close', () => {
++    dialogo.remove();
++    opciones.alCerrar?.();
++  });
++  dialogo.addEventListener('click', (ev) => {
++    if (ev.target === dialogo) cerrar(); // clic sobre el fondo difuminado
++  });
++  dialogo.querySelector('[data-cerrar]')?.addEventListener('click', cerrar);
++  document.body.append(dialogo);
++  dialogo.showModal();
++  return { dialogo, cerrar };
++}
++
++// ───────────────────────── Utilidades varias ─────────────────────────
++
++export function iniciales(texto: string): string {
++  return esc(texto.trim().slice(0, 1).toUpperCase());
++}
++
++/** Ejecuta `tarea` con el botón bloqueado y un indicador de progreso; siempre lo restaura. */
++export async function conBotonOcupado<T>(boton_: HTMLButtonElement, tarea: () => Promise<T>): Promise<T> {
++  const etiquetaOriginal = boton_.innerHTML;
++  boton_.disabled = true;
++  boton_.setAttribute('aria-busy', 'true');
++  montar(boton_, html`${icono('refresh', 'h-4 w-4 animate-spin')}<span>Procesando…</span>`);
++  try {
++    return await tarea();
++  } finally {
++    boton_.disabled = false;
++    boton_.removeAttribute('aria-busy');
++    boton_.innerHTML = etiquetaOriginal;
++  }
++}
+diff --git a/frontend/src/portal.ts b/frontend/src/portal.ts
+new file mode 100644
+index 0000000..7dfefd3
+--- /dev/null
++++ b/frontend/src/portal.ts
+@@ -0,0 +1,268 @@
++/**
++ * Portal del representante.
++ *  - El token llega en la URL (`/portal/:token`; en desarrollo también `?token=`). Nunca se guarda en sessionStorage:
++ *    el portal usa su propio token y NO envía el Bearer del panel administrativo.
++ *  - Estado de cuenta (estado académico + estatus de pago), cuotas pendientes a tasa BCV y formulario tipado
++ *    para declarar la referencia de transferencia / pago móvil.
++ */
++import './styles/main.css';
++import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
++import { html, montar, type HtmlSeguro } from './lib/html';
++import { icono } from './lib/icons';
++import { bs, esVencida, fechaCorta, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
++import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, etiquetaEstado, notificar, obtener, todos } from './lib/ui';
++import type {
++  CuentaPago,
++  CuotaPortal,
++  DeclararReferenciaPeticion,
++  DeclararReferenciaRespuesta,
++  EstadoCuentaPortal,
++  MetodoPago,
++} from './types/index';
++
++const METODOS: readonly MetodoPago[] = ['ZELLE', 'BINANCE', 'PAYPAL', 'PAGO_MOVIL'];
++const RE_REFERENCIA = /^[A-Za-z0-9-]{4,40}$/;
++const RE_TOKEN = /^[A-Za-z0-9._~-]{8,256}$/;
++
++const esMetodoPago = (v: string): v is MetodoPago => (METODOS as readonly string[]).includes(v);
++
++// ───────────────────────── Token ─────────────────────────
++
++/** Extrae el token de `/portal/<token>` o, como respaldo (desarrollo), de `?token=`. Devuelve null si no hay o no es válido. */
++export function capturarToken(ubicacion: Pick<Location, 'pathname' | 'search'> = window.location): string | null {
++  const m = /^\/portal\/([^/]+)\/?$/.exec(ubicacion.pathname);
++  let candidato: string | null = null;
++  if (m && m[1] !== undefined && m[1] !== 'index.html') {
++    try {
++      candidato = decodeURIComponent(m[1]);
++    } catch {
++      candidato = null;
++    }
++  } else {
++    candidato = new URLSearchParams(ubicacion.search).get('token');
++  }
++  return candidato !== null && RE_TOKEN.test(candidato) ? candidato : null;
++}
++
++// ───────────────────────── Estado ─────────────────────────
++
++type EstadoPortal =
++  | { readonly fase: 'cargando' }
++  | { readonly fase: 'error'; readonly mensaje: string }
++  | { readonly fase: 'listo'; readonly datos: EstadoCuentaPortal };
++
++let token: string | null = null;
++let estado: EstadoPortal = { fase: 'cargando' };
++const enviando = new Set<number>();
++
++// ───────────────────────── Cálculos ─────────────────────────
++
++/** Suma en centavos enteros para evitar errores de coma flotante. */
++export function sumarMonto(valores: readonly number[]): number {
++  return valores.reduce((acc, v) => acc + Math.round(v * 100), 0) / 100;
++}
++
++export function cuotasAbiertas(cuotas: readonly CuotaPortal[]): readonly CuotaPortal[] {
++  return cuotas.filter((c) => c.estado === 'Pendiente' || c.estado === 'En Revisión');
++}
++
++// ───────────────────────── Plantillas ─────────────────────────
++
++function bannerEstado(d: EstadoCuentaPortal, pendientes: readonly CuotaPortal[]): HtmlSeguro {
++  const vencidas = pendientes.filter((c) => c.estado === 'Pendiente' && esVencida(c.fecha_vencimiento));
++  switch (d.estado) {
++    case 'Fuera de la Academia':
++      return aviso('bad', 'El estudiante figura fuera de la academia. Comunícate con la administración antes de realizar pagos.', 'Cuenta inactiva');
++    case 'Pendiente por Validación Administrativa':
++      return aviso('info', 'La administración está validando la inscripción y el pago de la matrícula. Te avisaremos por WhatsApp.', 'Inscripción en validación');
++    case 'Moroso':
++      return aviso('warn', `Tienes ${vencidas.length} ${vencidas.length === 1 ? 'cuota vencida' : 'cuotas vencidas'}. Registra tu pago para regularizar la cuenta.`, 'Cuenta con saldo vencido');
++    default:
++      return pendientes.length === 0
++        ? aviso('ok', 'No tienes cuotas pendientes. ¡Gracias por estar al día!', 'Cuenta al día')
++        : aviso('ok', 'Tu cuenta está al día. Estas son las próximas cuotas.', 'Cuenta al día');
++  }
++}
++
++function cuentasHtml(cuentas: readonly CuentaPago[]): HtmlSeguro {
++  if (cuentas.length === 0) return html`<p class="${CLS.ayuda}">Consulta los datos de pago con la administración.</p>`;
++  return html`<ul class="mt-2 grid gap-2 sm:grid-cols-2">${cuentas.map(
++    (c) => html`<li class="rounded-lg border border-slate-200 bg-white/95 p-3 text-sm"><p class="font-semibold text-slate-900">${nombreMetodo(c.metodo)}</p><p class="break-words text-slate-700">${c.detalle}</p><p class="text-xs text-slate-600">Titular: ${c.titular}</p></li>`,
++  )}</ul>`;
++}
++
++function formularioReferencia(c: CuotaPortal): HtmlSeguro {
++  const idRef = `ref-${c.id}`;
++  const idMet = `met-${c.id}`;
++  return html`<form data-cuota="${c.id}" novalidate class="mt-4 grid gap-4 border-t border-slate-200 pt-4 sm:grid-cols-2" aria-label="Registrar referencia de ${c.concepto}">
++    <div>
++      <label for="${idMet}" class="${CLS.etiqueta}">Método de pago</label>
++      <select id="${idMet}" name="metodo_pago" class="${CLS.input}">${METODOS.map((m) => html`<option value="${m}">${nombreMetodo(m)}</option>`)}</select>
++    </div>
++    <div>
++      <label for="${idRef}" class="${CLS.etiqueta}">Número de referencia</label>
++      <input id="${idRef}" name="referencia" type="text" required maxlength="40" autocomplete="off" aria-describedby="${idRef}-ayuda ${idRef}-error" class="${CLS.input}">
++      <p id="${idRef}-ayuda" class="${CLS.ayuda}">4 a 40 caracteres: letras, números o guiones, sin espacios.</p>
++      <p id="${idRef}-error" class="${CLS.errorCampo}" role="alert" hidden></p>
++    </div>
++    <div class="sm:col-span-2">
++      <button type="submit" class="${boton(CLS.btnPrimario, 'w-full sm:w-auto')}">${icono('check', 'h-4 w-4')}<span>Registrar referencia</span></button>
++    </div>
++  </form>`;
++}
++
++function cuotaHtml(c: CuotaPortal): HtmlSeguro {
++  const vencida = c.estado === 'Pendiente' && esVencida(c.fecha_vencimiento);
++  return html`<li class="${CLS.tarjeta} p-6" data-cuota-card="${c.id}">
++    <div class="flex flex-wrap items-start justify-between gap-4">
++      <div class="min-w-0">
++        <h3 class="break-words text-base font-bold text-slate-900">${c.concepto}</h3>
++        <p class="mt-1 text-sm text-slate-600">Vence el <time>${fechaCorta(c.fecha_vencimiento)}</time></p>
++      </div>
++      <div class="flex flex-wrap items-center gap-2">${vencida ? etiqueta('Vencida', 'bad') : null}${etiquetaEstado(c.estado === 'Pendiente' ? 'Pendiente' : 'En Revisión')}</div>
++    </div>
++    <p class="mt-4 text-2xl font-bold text-slate-900">${usd(c.monto_usd)} <span class="text-lg font-semibold text-slate-700">≈ ${bs(c.monto_bs)}</span></p>
++    ${c.estado === 'Pendiente' ? formularioReferencia(c) : html`<p class="mt-4 text-sm text-slate-700">Tu referencia está en revisión. La administración la confirmará en breve.</p>`}
++  </li>`;
++}
++
++function vistaListo(d: EstadoCuentaPortal): HtmlSeguro {
++  const abiertas = cuotasAbiertas(d.cuotas);
++  const porPagar = abiertas.filter((c) => c.estado === 'Pendiente');
++  return html`
++    <section class="${CLS.tarjetaCristal} p-6" aria-labelledby="t-estudiante">
++      <p class="text-sm text-slate-600">Estudiante</p>
++      <h2 id="t-estudiante" class="break-words text-xl font-bold text-slate-900">${d.estudiante}</h2>
++      <div class="mt-4 flex flex-wrap items-center gap-2">${etiquetaEstado(d.estado)}${etiquetaEstado(d.estatus_pago)}</div>
++      <p class="mt-4 text-sm text-slate-700">Tasa BCV vigente: <strong class="text-slate-900">${formatoTasa(d.tasa_bcv)}</strong> Bs. por US$. Los montos en bolívares se calculan con esta tasa.</p>
++      ${d.tasa_desactualizada ? html`<div class="mt-4">${aviso('warn', 'El BCV no respondió en este momento: se usa la última tasa disponible. El monto exacto se confirma al validar el pago.')}</div>` : null}
++    </section>
++    ${bannerEstado(d, abiertas)}
++    ${porPagar.length > 0
++      ? html`<section class="${CLS.tarjeta} flex flex-wrap items-center justify-between gap-4 p-6" aria-label="Total pendiente">
++          <span class="text-sm font-medium text-slate-700">Total pendiente de pago</span>
++          <span class="text-xl font-bold text-slate-900">${usd(sumarMonto(porPagar.map((c) => c.monto_usd)))} <span class="text-base font-semibold text-slate-700">≈ ${bs(sumarMonto(porPagar.map((c) => c.monto_bs)))}</span></span>
++        </section>`
++      : null}
++    <section class="${CLS.tarjeta} p-6" aria-labelledby="t-cuentas">
++      <h2 id="t-cuentas" class="text-base font-bold text-slate-900">Cuentas para pagar</h2>
++      ${cuentasHtml(d.cuentas)}
++    </section>
++    <section aria-labelledby="t-cuotas">
++      <h2 id="t-cuotas" class="mb-4 text-base font-bold text-slate-900">Cuotas pendientes</h2>
++      ${abiertas.length === 0 ? html`<div class="${CLS.tarjeta} p-6 text-sm text-slate-700">No tienes cuotas pendientes.</div>` : html`<ul class="flex flex-col gap-4">${abiertas.map(cuotaHtml)}</ul>`}
++    </section>`;
++}
++
++function esqueleto(): HtmlSeguro {
++  return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
++    <header class="flex flex-wrap items-center justify-between gap-4">
++      <div class="flex items-center gap-4">
++        <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-900 text-white">${icono('wallet', 'h-6 w-6')}</span>
++        <div>
++          <h1 class="${CLS.titulo}">Portal del representante</h1>
++          <p class="${CLS.subtitulo}">Brilliant Minds Academy</p>
++        </div>
++      </div>
++      <button type="button" id="actualizar" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">${icono('refresh', 'h-4 w-4')}<span>Actualizar</span></button>
++    </header>
++    <div id="contenido" class="flex flex-col gap-6"></div>
++  </div>`;
++}
++
++function pintar(): void {
++  const zona = obtener('#contenido', HTMLElement);
++  switch (estado.fase) {
++    case 'cargando':
++      montar(zona, html`<div class="h-32 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando estado de cuenta"></div>`);
++      return;
++    case 'error':
++      montar(zona, aviso('bad', html`${estado.mensaje} <span class="block pt-2">Si el problema continúa, solicita un nuevo enlace a la administración.</span>`, 'No pudimos abrir tu estado de cuenta'));
++      return;
++    case 'listo':
++      montar(zona, vistaListo(estado.datos));
++      for (const f of todos('form[data-cuota]', HTMLFormElement, zona)) {
++        f.addEventListener('submit', (ev) => {
++          ev.preventDefault();
++          void alDeclarar(f);
++        });
++      }
++  }
++}
++
++// ───────────────────────── Datos ─────────────────────────
++
++async function cargar(silencioso = false): Promise<void> {
++  if (token === null) {
++    estado = { fase: 'error', mensaje: 'El enlace del portal no es válido o está incompleto.' };
++    pintar();
++    return;
++  }
++  if (!silencioso) {
++    estado = { fase: 'cargando' };
++    pintar();
++  }
++  try {
++    const datos = await bma.get<EstadoCuentaPortal>(`/portal/${encodeURIComponent(token)}`, undefined, { sinAuth: true });
++    estado = { fase: 'listo', datos };
++  } catch (e: unknown) {
++    estado = { fase: 'error', mensaje: mensajeDeError(e) };
++  }
++  pintar();
++}
++
++function errorDeFormulario(f: HTMLFormElement, mensaje: string | null): void {
++  const idCuota = f.dataset['cuota'] ?? '';
++  const p = buscar(`#ref-${CSS.escape(idCuota)}-error`, HTMLElement, f);
++  const input = buscar('input[name="referencia"]', HTMLInputElement, f);
++  if (!p || !input) return;
++  p.textContent = mensaje ?? '';
++  p.hidden = mensaje === null;
++  if (mensaje === null) input.removeAttribute('aria-invalid');
++  else input.setAttribute('aria-invalid', 'true');
++}
++
++async function alDeclarar(f: HTMLFormElement): Promise<void> {
++  const idCuota = Number(f.dataset['cuota']);
++  if (token === null || !Number.isInteger(idCuota) || enviando.has(idCuota)) return;
++  errorDeFormulario(f, null);
++
++  const referencia = obtener('input[name="referencia"]', HTMLInputElement, f).value.trim();
++  const metodo = obtener('select[name="metodo_pago"]', HTMLSelectElement, f).value;
++  if (!RE_REFERENCIA.test(referencia)) {
++    errorDeFormulario(f, 'La referencia debe tener de 4 a 40 caracteres (letras, números o guiones, sin espacios).');
++    obtener('input[name="referencia"]', HTMLInputElement, f).focus();
++    return;
++  }
++  if (!esMetodoPago(metodo)) {
++    errorDeFormulario(f, 'Selecciona un método de pago válido.');
++    return;
++  }
++
++  const cuerpo: DeclararReferenciaPeticion = { cuota_id: idCuota, referencia, metodo_pago: metodo };
++  enviando.add(idCuota);
++  try {
++    const r = await conBotonOcupado(obtener('button[type="submit"]', HTMLButtonElement, f), () =>
++      bma.post<DeclararReferenciaRespuesta>(`/portal/${encodeURIComponent(token ?? '')}/referencias`, cuerpo, { sinAuth: true }),
++    );
++    notificar('ok', `Referencia registrada por ${usd(r.monto_usd)} (${bs(r.monto_bs)} a tasa ${formatoTasa(r.tasa_bcv)}). La administración la validará.`);
++    await cargar(true);
++  } catch (e: unknown) {
++    const detalle = e instanceof BmaApiError ? e.camposInvalidos()[0]?.mensaje : undefined;
++    errorDeFormulario(f, detalle ?? mensajeDeError(e));
++  } finally {
++    enviando.delete(idCuota);
++  }
++}
++
++// ───────────────────────── Arranque ─────────────────────────
++
++function iniciar(): void {
++  document.body.className = 'text-slate-900';
++  montar(obtener('#app', HTMLElement), esqueleto());
++  token = capturarToken();
++  obtener('#actualizar', HTMLButtonElement).addEventListener('click', () => void cargar());
++  void cargar();
++}
++
++iniciar();
+diff --git a/frontend/src/styles/main.css b/frontend/src/styles/main.css
+new file mode 100644
+index 0000000..ec624dd
+--- /dev/null
++++ b/frontend/src/styles/main.css
+@@ -0,0 +1,27 @@
++@tailwind base;
++@tailwind components;
++@tailwind utilities;
++
++@layer base {
++  html {
++    @apply bg-slate-100 text-slate-900 antialiased;
++  }
++
++  body {
++    @apply min-h-screen bg-gradient-to-br from-slate-100 via-slate-50 to-slate-200;
++  }
++
++  /* Foco visible para teclado en TODO control interactivo (contraste 3:1 mínimo sobre fondos claros). */
++  :focus-visible {
++    @apply outline-none ring-2 ring-slate-900 ring-offset-2 ring-offset-white;
++  }
++
++  @media (prefers-reduced-motion: reduce) {
++    *,
++    *::before,
++    *::after {
++      animation-duration: 0.01ms !important;
++      transition-duration: 0.01ms !important;
++    }
++  }
++}
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+new file mode 100644
+index 0000000..4b270c0
+--- /dev/null
++++ b/frontend/src/types/index.ts
+@@ -0,0 +1,332 @@
++/**
++ * Contratos JSON del backend (Express + PostgreSQL/Supabase). Todo es de solo lectura (`readonly`):
++ * lo que llega de la API nunca se muta; la UI deriva copias nuevas.
++ * Convención del servidor: DATE → 'AAAA-MM-DD' (texto), NUMERIC/BIGINT → number, TIMESTAMPTZ → ISO-8601.
++ */
++
++// ───────────────────────── Dominio ─────────────────────────
++
++export type RolUsuario = 'admin' | 'secretaria';
++
++export interface Usuario {
++  readonly id: number;
++  readonly nombre: string;
++  readonly email: string;
++  readonly rol: RolUsuario;
++}
++
++export type EstadoDinamico =
++  | 'Activo'
++  | 'Moroso'
++  | 'Fuera de la Academia'
++  | 'Pendiente por Validación Administrativa';
++
++export type EstatusPago = 'Al día' | 'Moroso' | 'Pendiente de Validación' | 'N/A';
++
++export interface Estudiante {
++  readonly id: number;
++  readonly representante_id: number;
++  readonly nombres: string;
++  readonly apellidos: string;
++  readonly grado_solicitado: string;
++  readonly estado_dinamico: EstadoDinamico;
++  readonly estatus_pago: EstatusPago;
++  readonly deuda_vencida_usd: number;
++}
++
++/** Fila de `GET /api/estudiantes` (vw_estudiantes_estado + representante). */
++export interface EstudianteListado extends Estudiante {
++  readonly representante: string;
++  readonly telefono_representante: string | null;
++  readonly cuotas_vencidas: number;
++}
++
++export type TipoCuota = 'MATRICULA' | 'MENSUALIDAD' | 'OTRO';
++export type EstadoCuota = 'Pendiente' | 'En Revisión' | 'Pagada' | 'Anulada';
++
++export interface Cuota {
++  readonly id: number;
++  readonly estudiante_id: number;
++  readonly tipo: TipoCuota;
++  readonly concepto: string;
++  readonly monto_usd: number;
++  readonly monto_bs: number;
++  readonly fecha_vencimiento: string;
++  readonly estado: EstadoCuota;
++}
++
++export type MetodoPago = 'ZELLE' | 'BINANCE' | 'PAYPAL' | 'PAGO_MOVIL';
++export type EstadoPagoReferencia = 'Por Validar' | 'Aprobada' | 'Rechazada';
++
++export interface PagoReferencia {
++  readonly id: number;
++  readonly cuota_id: number;
++  readonly referencia: string;
++  readonly metodo_pago: MetodoPago;
++  readonly monto_usd: number;
++  readonly monto_bs: number;
++  readonly tasa_bcv: number;
++  readonly estado: EstadoPagoReferencia;
++}
++
++/** Cuenta bancaria/billetera de la academia donde el representante deposita. */
++export interface CuentaPago {
++  readonly id: number;
++  readonly metodo: MetodoPago;
++  readonly titular: string;
++  readonly detalle: string;
++}
++
++// ───────────────────────── Envoltorios de la API ─────────────────────────
++
++export interface Paginacion {
++  readonly pagina: number;
++  readonly limite: number;
++  readonly total: number;
++}
++
++export interface RespuestaOk<T> {
++  readonly ok: true;
++  readonly data: T;
++  readonly paginacion?: Paginacion;
++}
++
++export interface DetalleCampo {
++  readonly campo: string;
++  readonly mensaje: string;
++}
++
++export interface CuerpoError {
++  readonly codigo?: string;
++  readonly mensaje: string;
++  readonly detalles?: unknown;
++  readonly requestId?: string;
++}
++
++export interface RespuestaError {
++  readonly ok: false;
++  readonly error: CuerpoError;
++}
++
++export type RespuestaApi<T> = RespuestaOk<T> | RespuestaError;
++
++/** Datos adjuntos al error 403 MODULO_PREMIUM_DESHABILITADO. */
++export interface DetalleModuloPremium {
++  readonly modulo: string;
++  readonly nombre: string;
++  readonly precio_usd: number;
++}
++
++// ───────────────────────── Autenticación ─────────────────────────
++
++export interface CredencialesLogin {
++  readonly email: string;
++  readonly password: string;
++}
++
++export interface RespuestaLogin {
++  readonly token: string;
++  readonly usuario: Usuario;
++}
++
++/** `GET /api/auth/me` */
++export interface RespuestaMe {
++  readonly usuario: Usuario;
++}
++
++// ───────────────────────── Admisiones públicas ─────────────────────────
++
++/** `GET /api/public/admisiones/config` */
++export interface ConfigAdmisiones {
++  readonly matricula_usd: number;
++  readonly tasa_bcv: number;
++  readonly tasa_desactualizada: boolean;
++  readonly matricula_bs: number;
++  readonly cuentas: readonly CuentaPago[];
++}
++
++export type TipoSangre = 'A+' | 'A-' | 'B+' | 'B-' | 'AB+' | 'AB-' | 'O+' | 'O-';
++
++/** Campos de texto del formulario `POST /api/public/admisiones` (multipart). */
++export interface SolicitudAdmisionTexto {
++  readonly alumno_nombres: string;
++  readonly alumno_apellidos: string;
++  readonly alumno_cedula: string;
++  readonly alumno_fecha_nacimiento: string;
++  readonly grado_solicitado: string;
++  readonly colegio_procedencia: string;
++  readonly ultimo_grado_aprobado: string;
++  readonly tipo_sangre: TipoSangre | '';
++  readonly alergias: string;
++  readonly condiciones_medicas: string;
++  readonly medicamentos: string;
++  readonly emergencia_nombre: string;
++  readonly emergencia_telefono: string;
++  readonly representante_nombres: string;
++  readonly representante_apellidos: string;
++  readonly representante_cedula: string;
++  readonly representante_email: string;
++  readonly telefono_codigo: string;
++  readonly telefono_numero: string;
++  readonly metodo_pago: MetodoPago;
++  readonly referencia_bancaria: string;
++}
++
++export type CampoArchivoAdmision = 'foto_carnet' | 'cedula_identidad' | 'acta_nacimiento';
++
++export interface RespuestaAdmision {
++  readonly estudiante_id: number;
++  readonly estatus: string;
++  readonly carpeta_drive: string | null;
++  readonly referencia: string;
++  readonly metodo_pago: MetodoPago;
++  readonly monto_usd: number;
++  readonly monto_bs: number;
++  readonly tasa_bcv: number;
++  readonly tasa_desactualizada: boolean;
++}
++
++// ───────────────────────── Portal del representante ─────────────────────────
++
++export type CuotaPortal = Pick<
++  Cuota,
++  'id' | 'concepto' | 'monto_usd' | 'monto_bs' | 'fecha_vencimiento' | 'estado'
++>;
++
++/** `GET /api/portal/:token` */
++export interface EstadoCuentaPortal {
++  readonly estudiante: string;
++  readonly estado: EstadoDinamico;
++  readonly estatus_pago: EstatusPago;
++  readonly tasa_bcv: number;
++  readonly tasa_desactualizada: boolean;
++  readonly cuentas: readonly CuentaPago[];
++  readonly cuotas: readonly CuotaPortal[];
++}
++
++/** Cuerpo de `POST /api/portal/:token/referencias`. */
++export interface DeclararReferenciaPeticion {
++  readonly cuota_id: number;
++  readonly referencia: string;
++  readonly metodo_pago: MetodoPago;
++}
++
++export interface DeclararReferenciaRespuesta {
++  readonly pago_id: number;
++  readonly estado: 'Por Validar';
++  readonly monto_usd: number;
++  readonly monto_bs: number;
++  readonly tasa_bcv: number;
++}
++
++// ───────────────────────── Tablero financiero y auditoría ─────────────────────────
++
++export interface TotalConCantidad {
++  readonly monto_usd: number;
++  readonly cantidad: number;
++}
++
++export interface CobroDiario {
++  readonly dia: string;
++  readonly monto_usd: number;
++}
++
++export interface ConteoEstudiantes {
++  readonly activos: number;
++  readonly morosos: number;
++  readonly fuera_de_la_academia: number;
++  readonly pendientes_validacion: number;
++  readonly total: number;
++}
++
++/** `GET /api/facturacion/tablero?periodo=AAAA-MM` */
++export interface TableroFacturacion {
++  readonly periodo: string;
++  readonly cobrado: TotalConCantidad;
++  readonly saldos_vencidos: TotalConCantidad;
++  readonly cuentas_pendientes: TotalConCantidad;
++  readonly facturado_mes_usd: number;
++  readonly referencias_por_validar: number;
++  readonly cobrado_por_dia: readonly CobroDiario[];
++  readonly estudiantes: ConteoEstudiantes;
++}
++
++/** Fila de `GET /api/facturacion/auditoria`. */
++export interface ReferenciaAuditoria
++  extends Pick<PagoReferencia, 'id' | 'referencia' | 'metodo_pago' | 'monto_usd' | 'monto_bs' | 'tasa_bcv' | 'estado'> {
++  readonly declarado_en: string;
++  readonly revisado_en: string | null;
++  readonly nota_revision: string | null;
++  readonly estudiante_id: number;
++  readonly estudiante: string;
++  readonly representante: string;
++  readonly telefono_representante: string | null;
++  readonly cuota_id: number;
++  readonly concepto: string;
++  readonly tipo_cuota: TipoCuota;
++  readonly fecha_vencimiento: string;
++}
++
++export interface ResultadoRevision {
++  readonly pagoId: number;
++  readonly estudianteId: number;
++  readonly estado_dinamico: EstadoDinamico;
++  readonly estatus_pago: EstatusPago;
++  readonly deuda_vencida_usd: number;
++}
++
++export interface CuerpoRevision {
++  readonly nota?: string;
++}
++
++// ───────────────────────── Otros módulos del panel ─────────────────────────
++
++export type TipoAlertaWhatsapp = 'preventiva' | 'morosidad';
++
++export interface AlertaWhatsapp {
++  readonly notificacion_id: number;
++  readonly tipo: 'PREVENTIVA' | 'MOROSIDAD';
++  readonly estado: string;
++  readonly telefono: string;
++  readonly mensaje: string;
++  readonly enlace_whatsapp: string;
++  readonly monto_usd: number;
++  readonly monto_bs: number;
++  readonly tasa_bcv: number;
++}
++
++export interface BalanceContable {
++  readonly periodo: string;
++  readonly ingresos_usd: number;
++  readonly egresos_usd: number;
++  readonly neto_usd: number;
++}
++
++/** `GET /api/premium/modulos` */
++export type CodigoModuloPremium =
++  | 'IA_ATENCION'
++  | 'WHATSAPP_AUTOMATICO'
++  | 'BANCAMIGA'
++  | 'APP_MOVIL'
++  | 'FACHADA_WEB';
++
++export interface ModuloPremium {
++  readonly codigo: CodigoModuloPremium;
++  readonly nombre: string;
++  readonly descripcion: string;
++  readonly precio_usd: number;
++  readonly vista: string;
++  readonly habilitado: boolean;
++  readonly bloqueado: boolean;
++  readonly tooltip: string;
++}
++
++// ───────────────────────── Estado de la interfaz ─────────────────────────
++
++export type VistaAdmin = 'dashboard' | 'estudiantes' | 'auditoria' | 'contabilidad';
++
++export interface EstadoSidebar {
++  readonly colapsado: boolean;
++}
++
++export type FiltroEstudiantes = '' | EstadoDinamico;
+diff --git a/frontend/tailwind.config.js b/frontend/tailwind.config.js
+new file mode 100644
+index 0000000..cdc65f7
+--- /dev/null
++++ b/frontend/tailwind.config.js
+@@ -0,0 +1,8 @@
++/** @type {import('tailwindcss').Config} */
++export default {
++  content: ["./index.html", "./src/**/*.{ts,js}"],
++  theme: {
++    extend: {},
++  },
++  plugins: [],
++};
+diff --git a/frontend/tsconfig.json b/frontend/tsconfig.json
+new file mode 100644
+index 0000000..4c2a87c
+--- /dev/null
++++ b/frontend/tsconfig.json
+@@ -0,0 +1,35 @@
++{
++  "compilerOptions": {
++    "target": "ES2022",
++    "module": "ESNext",
++    "moduleResolution": "Bundler",
++    "lib": ["ES2022", "DOM", "DOM.Iterable"],
++    "types": ["node"],
++
++    "strict": true,
++    "noImplicitAny": true,
++    "strictNullChecks": true,
++    "strictFunctionTypes": true,
++    "strictBindCallApply": true,
++    "strictPropertyInitialization": true,
++    "noImplicitThis": true,
++    "useUnknownInCatchVariables": true,
++    "alwaysStrict": true,
++    "noUncheckedIndexedAccess": true,
++    "exactOptionalPropertyTypes": true,
++    "noImplicitOverride": true,
++    "noImplicitReturns": true,
++    "noFallthroughCasesInSwitch": true,
++    "noUnusedLocals": true,
++    "noUnusedParameters": true,
++    "noPropertyAccessFromIndexSignature": true,
++    "forceConsistentCasingInFileNames": true,
++    "verbatimModuleSyntax": true,
++    "isolatedModules": true,
++
++    "resolveJsonModule": true,
++    "skipLibCheck": true,
++    "noEmit": true
++  },
++  "include": ["src/**/*.ts", "vite.config.ts"]
++}
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+new file mode 100644
+index 0000000..b7c0908
+--- /dev/null
++++ b/frontend/vite.config.ts
+@@ -0,0 +1,55 @@
++import { defineConfig, type Plugin } from 'vite';
++import { resolve } from 'node:path';
++import { fileURLToPath } from 'node:url';
++
++const aqui = fileURLToPath(new URL('.', import.meta.url));
++
++/**
++ * Salida: la carpeta `public/` de Express (../public respecto a frontend/).
++ *   /admin/index.html · /admisiones/index.html · /portal/index.html · /assets/*.js|css (con hash)
++ * Express (app.js) ya sirve /admin, /admisiones y GET /portal/:token; /assets se sirve con su propio static.
++ */
++
++/** Solo en `vite dev`: replica las rutas de Express (/admin, /admisiones, /portal/:token). */
++function rutasDeExpress(): Plugin {
++  return {
++    name: 'bma-rutas-express',
++    configureServer(servidor) {
++      servidor.middlewares.use((req, _res, next) => {
++        const url = req.url ?? '/';
++        const ruta = url.split('?')[0] ?? '/';
++        const consulta = url.slice(ruta.length);
++        if (ruta === '/admin' || ruta === '/admisiones') req.url = `${ruta}/${consulta}`;
++        else if (ruta.startsWith('/portal/') && ruta !== '/portal/index.html') req.url = `/portal/index.html${consulta}`;
++        next();
++      });
++    },
++  };
++}
++
++export default defineConfig({
++  root: aqui,
++  base: '/',
++  appType: 'mpa',
++  plugins: [rutasDeExpress()],
++  server: {
++    port: 5173,
++    proxy: {
++      '/api': { target: 'http://localhost:3000', changeOrigin: false },
++    },
++  },
++  build: {
++    outDir: resolve(aqui, '../public'),
++    emptyOutDir: true, // compilación limpia: elimina los archivos estáticos anteriores de public/
++    assetsDir: 'assets',
++    target: 'es2022',
++    sourcemap: false,
++    rollupOptions: {
++      input: {
++        admin: resolve(aqui, 'admin/index.html'),
++        admisiones: resolve(aqui, 'admisiones/index.html'),
++        portal: resolve(aqui, 'portal/index.html'),
++      },
++    },
++  },
++});
+diff --git a/package.json b/package.json
+index d25d0b6..4bd809d 100644
+--- a/package.json
++++ b/package.json
+@@ -12,7 +12,10 @@
+     "migrate": "node scripts/migrate.js",
+     "crear-admin": "node scripts/crear-admin.js",
+     "test": "node --test tests/*.test.js",
+-    "test:integracion": "node --test tests/integracion.pg.test.js"
++    "test:integracion": "node --test tests/integracion.pg.test.js",
++    "frontend:install": "npm --prefix frontend install",
++    "frontend:build": "npm --prefix frontend run build",
++    "frontend:dev": "npm --prefix frontend run dev"
+   },
+   "keywords": [
+     "express",
+-- 
+2.43.0
+

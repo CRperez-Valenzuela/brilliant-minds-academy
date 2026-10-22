@@ -12,7 +12,10 @@
     "migrate": "node scripts/migrate.js",
     "crear-admin": "node scripts/crear-admin.js",
     "test": "node --test tests/*.test.js",
-    "test:integracion": "node --test tests/integracion.pg.test.js"
+    "test:integracion": "node --test tests/integracion.pg.test.js",
+    "frontend:install": "npm --prefix frontend install",
+    "frontend:build": "npm --prefix frontend run build",
+    "frontend:dev": "npm --prefix frontend run dev"
   },
   "keywords": [
     "express",
@@ -36,6 +39,12 @@
     "pg": "^8.13.1"
   },
   "devDependencies": {
-    "nodemon": "^3.1.7"
+    "autoprefixer": "^10.6.1",
+    "nodemon": "^3.1.7",
+    "postcss": "^8.5.31",
+    "tailwindcss": "^4.3.3",
+    "terser": "^5.51.2",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
   }
 }
