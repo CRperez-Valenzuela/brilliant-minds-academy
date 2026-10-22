@@ -1,19 +1,18 @@
 <!doctype html>
-<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex">
-<title>Portal del representante · BMA</title>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet"><link rel="stylesheet" href="/admin/admin.css"><style>main{margin:0 auto;max-width:720px}</style></head>
-<body><main><h1>Portal del representante</h1><p class="sub" id="quien">Cargando…</p><div id="n"></div><div id="c"></div><div id="cu"></div></main>
-<script>
-const $=(s)=>document.querySelector(s);const esc=(v)=>String(v??'').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const token=location.pathname.split('/').pop();const NOM={ZELLE:'Zelle',BINANCE:'Binance',PAYPAL:'PayPal',PAGO_MOVIL:'Pago Móvil'};
-async function cargar(){const j=await (await fetch(`/api/portal/${encodeURIComponent(token)}`)).json();
- if(!j.ok){$('#quien').textContent='';$('#n').innerHTML=`<div class="msg err">${esc(j.error.mensaje)}. Solicita un nuevo enlace a la administración.</div>`;return;}
- const d=j.data;$('#quien').innerHTML=`${esc(d.estudiante)} · <span class="tag ${esc(d.estado.split(' ')[0])}">${esc(d.estado)}</span> · tasa BCV ${esc(d.tasa_bcv)}`;
- $('#c').innerHTML='<div class="card" style="margin-bottom:16px"><b>Cuentas para pagar</b>'+(d.cuentas.map(c=>`<p><b>${esc(NOM[c.metodo]||c.metodo)}</b>: ${esc(c.detalle)} <small>(${esc(c.titular)})</small></p>`).join('')||'<p>Consulta los datos con la administración.</p>')+'</div>';
- $('#cu').innerHTML=d.cuotas.map(q=>`<div class="card" style="margin-bottom:16px"><b>${esc(q.concepto)}</b> · vence ${esc(q.fecha_vencimiento)}<p>US$ ${q.monto_usd.toFixed(2)} = Bs. ${q.monto_bs.toLocaleString('es-VE',{minimumFractionDigits:2})}</p>
- ${q.estado==='Pendiente'?`<form data-c="${q.id}"><label>Método</label><select name="metodo_pago"><option value="ZELLE">Zelle</option><option value="BINANCE">Binance</option><option value="PAYPAL">PayPal</option><option value="PAGO_MOVIL">Pago Móvil</option></select><label>Número de referencia</label><input name="referencia" required pattern="[A-Za-z0-9\\-]{4,40}" title="4 a 40 caracteres, sin espacios"><p><button class="btn p">Registrar referencia</button></p></form>`:'<span class="tag Pendiente">Referencia en revisión</span>'}</div>`).join('')||'<div class="card">No tienes cuotas pendientes.</div>';
- document.querySelectorAll('form[data-c]').forEach(f=>f.onsubmit=async(ev)=>{ev.preventDefault();const b=Object.fromEntries(new FormData(f));b.cuota_id=Number(f.dataset.c);
-  const r=await (await fetch(`/api/portal/${encodeURIComponent(token)}/referencias`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)})).json();
-  $('#n').innerHTML=r.ok?'<div class="msg okk" role="status">Referencia registrada. La administración la validará.</div>':`<div class="msg err" role="alert">${esc(r.error.mensaje)}</div>`;if(r.ok)cargar();});}
-cargar();
-</script></body></html>
+<html lang="es">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="robots" content="noindex,nofollow" />
+    <meta name="referrer" content="no-referrer" />
+    <link rel="icon" href="data:," />
+    <title>Portal del representante · Brilliant Minds Academy</title>
+    <script type="module" crossorigin src="/assets/portal-C9OvlLDL.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/ui-D4hKMfqH.js">
+    <link rel="stylesheet" crossorigin href="/assets/ui-CwXYHWiQ.css">
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>Este portal necesita JavaScript habilitado para funcionar.</noscript>
+  </body>
+</html>
