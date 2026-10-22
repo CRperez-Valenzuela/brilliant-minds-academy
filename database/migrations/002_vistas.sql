@@ -1,8 +1,11 @@
 -- 002_vistas.sql — Clasificación en tiempo real de estudiantes (Activo / Fuera de la Academia / Moroso).
--- "Hoy" = día calendario de Caracas (UTC-4 fijo). Una cuota Pendiente o En Revisión con vencimiento
--- anterior a hoy convierte al estudiante en Moroso hasta que un administrador apruebe la referencia.
+-- "Hoy" = día calendario de Caracas (America/Caracas = UTC-4 todo el año). Una cuota Pendiente o En Revisión con
+-- vencimiento anterior a hoy convierte al estudiante en Moroso hasta que un administrador apruebe la referencia.
+--
+-- security_invoker = true (PostgreSQL 15+, Supabase): la vista se evalúa con los permisos de quien la consulta, de modo
+-- que el RLS de las tablas base se respeta y la API REST de Supabase (anon/authenticated) no puede usarla para saltárselo.
 
-CREATE OR ALTER VIEW dbo.vw_estudiantes_estado AS
+CREATE OR REPLACE VIEW vw_estudiantes_estado WITH (security_invoker = true) AS
 SELECT
   e.id,
   e.representante_id,
@@ -11,29 +14,28 @@ SELECT
   e.grado_solicitado,
   e.estatus_academico,
   CASE
-    WHEN e.estatus_academico = N'Fuera de la Academia'                      THEN N'Fuera de la Academia'
-    WHEN e.estatus_academico = N'Pendiente por Validación Administrativa'   THEN N'Pendiente por Validación Administrativa'
-    WHEN ISNULL(m.cuotas_vencidas, 0) > 0                                   THEN N'Moroso'
-    ELSE N'Activo'
-  END AS estado_dinamico,
+    WHEN e.estatus_academico = 'Fuera de la Academia'                    THEN 'Fuera de la Academia'
+    WHEN e.estatus_academico = 'Pendiente por Validación Administrativa' THEN 'Pendiente por Validación Administrativa'
+    WHEN COALESCE(m.cuotas_vencidas, 0) > 0                              THEN 'Moroso'
+    ELSE 'Activo'
+  END::VARCHAR(45) AS estado_dinamico,
   CASE
-    WHEN e.estatus_academico = N'Fuera de la Academia'                      THEN N'N/A'
-    WHEN e.estatus_academico = N'Pendiente por Validación Administrativa'   THEN N'Pendiente de Validación'
-    WHEN ISNULL(m.cuotas_vencidas, 0) > 0                                   THEN N'Moroso'
-    ELSE N'Al día'
-  END AS estatus_pago,
-  ISNULL(m.cuotas_vencidas, 0)       AS cuotas_vencidas,
-  ISNULL(m.deuda_vencida_usd, 0)     AS deuda_vencida_usd,
+    WHEN e.estatus_academico = 'Fuera de la Academia'                    THEN 'N/A'
+    WHEN e.estatus_academico = 'Pendiente por Validación Administrativa' THEN 'Pendiente de Validación'
+    WHEN COALESCE(m.cuotas_vencidas, 0) > 0                              THEN 'Moroso'
+    ELSE 'Al día'
+  END::VARCHAR(45) AS estatus_pago,
+  COALESCE(m.cuotas_vencidas, 0)::INTEGER             AS cuotas_vencidas,
+  COALESCE(m.deuda_vencida_usd, 0)::NUMERIC(12,2)     AS deuda_vencida_usd,
   m.proximo_vencimiento
-FROM dbo.estudiantes AS e
-CROSS APPLY (SELECT CAST(SWITCHOFFSET(SYSDATETIMEOFFSET(), N'-04:00') AS DATE) AS hoy) AS h
-OUTER APPLY (
+FROM estudiantes AS e
+CROSS JOIN LATERAL (SELECT (NOW() AT TIME ZONE 'America/Caracas')::DATE AS hoy) AS h
+LEFT JOIN LATERAL (
   SELECT
-    SUM(CASE WHEN c.fecha_vencimiento < h.hoy THEN 1 ELSE 0 END)              AS cuotas_vencidas,
-    SUM(CASE WHEN c.fecha_vencimiento < h.hoy THEN c.monto_usd ELSE 0 END)    AS deuda_vencida_usd,
+    COUNT(*) FILTER (WHERE c.fecha_vencimiento < h.hoy)                       AS cuotas_vencidas,
+    SUM(c.monto_usd) FILTER (WHERE c.fecha_vencimiento < h.hoy)               AS deuda_vencida_usd,
     MIN(c.fecha_vencimiento)                                                  AS proximo_vencimiento
-  FROM dbo.cuotas AS c
+  FROM cuotas AS c
   WHERE c.estudiante_id = e.id
-    AND c.estado IN (N'Pendiente', N'En Revisión')
-) AS m;
-GO
+    AND c.estado IN ('Pendiente', 'En Revisión')
+) AS m ON TRUE;

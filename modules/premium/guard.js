@@ -1,15 +1,15 @@
 'use strict';
-const { sql, ejecutar } = require('../../config/db');
+const { ejecutar } = require('../../config/db');
 const { AppError } = require('../../errors/AppError');
 const { TOOLTIP_BLOQUEADO, porCodigo } = require('./catalogo');
 
 const repoSql = {
   async leer(codigo) {
-    const r = await ejecutar('SELECT nombre, precio_usd, habilitado FROM dbo.modulos_premium WHERE codigo = @c', { c: [sql.NVarChar(30), codigo] });
-    return r.recordset[0] || null;
+    const r = await ejecutar('SELECT nombre, precio_usd, habilitado FROM modulos_premium WHERE codigo = $1', [codigo]);
+    return r.rows[0] || null;
   },
   async leerTodos() {
-    return (await ejecutar('SELECT codigo, nombre, descripcion, precio_usd, habilitado, habilitado_en FROM dbo.modulos_premium ORDER BY precio_usd')).recordset;
+    return (await ejecutar('SELECT codigo, nombre, descripcion, precio_usd, habilitado, habilitado_en FROM modulos_premium ORDER BY precio_usd')).rows;
   },
 };
 

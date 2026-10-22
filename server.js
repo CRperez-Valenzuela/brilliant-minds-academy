@@ -8,7 +8,7 @@ const server = app.listen(cfg.puerto, () => {
   console.log(`Brilliant Minds Academy · Core Base escuchando en http://localhost:${cfg.puerto}`);
   console.log(`  Admisiones: /admisiones   Panel: /admin   Salud: /api/health`);
   // Verifica la base al arrancar (no bloquea el servidor: /api/health/db informa el estado después).
-  getPool().then(() => console.log('  Base de datos MSSQL conectada.')).catch((e) => console.error('  ⚠ MSSQL no disponible:', e.message));
+  getPool().then(() => console.log('  Base de datos PostgreSQL (Supabase) conectada.')).catch((e) => console.error('  ⚠ PostgreSQL no disponible:', e.message));
 });
 
 // Un rechazo no manejado jamás debe tumbar el proceso en silencio ni dejarlo en estado inconsistente.

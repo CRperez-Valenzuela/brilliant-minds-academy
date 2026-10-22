@@ -1,18 +1,17 @@
 'use strict';
-const { sql, ejecutar } = require('../config/db');
+const { ejecutar } = require('../config/db');
 const { e } = require('../errors/AppError');
 
 async function obtener(clave, ejecutor) {
-  const r = await ejecutar('SELECT valor FROM dbo.parametros WHERE clave = @clave', { clave: [sql.NVarChar(60), clave] }, ejecutor);
-  return r.recordset[0] ? r.recordset[0].valor : null;
+  const r = await ejecutar('SELECT valor FROM parametros WHERE clave = $1', [clave], ejecutor);
+  return r.rows[0] ? r.rows[0].valor : null;
 }
 
 async function guardar(clave, valor, ejecutor) {
   await ejecutar(
-    `MERGE dbo.parametros AS t USING (SELECT @clave AS clave) AS s ON t.clave = s.clave
-     WHEN MATCHED THEN UPDATE SET valor = @valor, actualizado_en = SYSUTCDATETIME()
-     WHEN NOT MATCHED THEN INSERT (clave, valor) VALUES (@clave, @valor);`,
-    { clave: [sql.NVarChar(60), clave], valor: [sql.NVarChar(300), String(valor)] },
+    `INSERT INTO parametros (clave, valor) VALUES ($1, $2)
+     ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_en = NOW()`,
+    [clave, String(valor)],
     ejecutor,
   );
 }
@@ -27,8 +26,8 @@ async function matriculaUsd(ejecutor) {
 }
 
 async function cuentasActivas(ejecutor) {
-  const r = await ejecutar('SELECT id, metodo, titular, detalle FROM dbo.cuentas_pago WHERE activa = 1 ORDER BY metodo, id', {}, ejecutor);
-  return r.recordset;
+  const r = await ejecutar('SELECT id, metodo, titular, detalle FROM cuentas_pago WHERE activa = TRUE ORDER BY metodo, id', [], ejecutor);
+  return r.rows;
 }
 
 module.exports = { obtener, guardar, matriculaUsd, cuentasActivas };

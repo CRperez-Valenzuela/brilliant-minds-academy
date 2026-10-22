@@ -1,23 +1,18 @@
 'use strict';
 /**
  * Entorno de pruebas SIN dependencias de red ni base de datos real.
- *  - Sustituye los paquetes externos pesados (mssql, dotenv, axios, googleapis) por stubs inertes.
+ *  - Sustituye los paquetes externos pesados (pg, dotenv, axios, googleapis) por stubs inertes.
  *  - Sustituye config/db por una base de datos falsa programable (`db.handler`) que registra cada consulta.
- * Las pruebas verifican la lógica de negocio y la orquestación; el SQL real se valida en el test de consistencia de esquema
- * y, contra un SQL Server real, con `npm run migrate` + smoke test (ver CAMBIOS_BMA_CORE.md).
+ * Las pruebas verifican la lógica de negocio y la orquestación; el SQL real se valida en tests/schema-consistencia.test.js (estático)
+ * y contra un PostgreSQL real en tests/integracion.pg.test.js (`npm run test:integracion`, ver CAMBIOS_BMA_CORE.md).
  */
 const Module = require('node:module');
 
-const sqlStub = new Proxy({}, {
-  get: (_t, k) => {
-    if (k === 'ISOLATION_LEVEL') return { READ_COMMITTED: 2 };
-    if (k === 'MAX') return 'MAX';
-    return (...a) => ({ tipo: String(k), a });
-  },
-});
+class PoolStub { on() { return this; } async query() { return { rows: [], rowCount: 0 }; } async connect() { return { query: async () => ({ rows: [], rowCount: 0 }), release() {} }; } async end() {} }
+const pgStub = { Pool: PoolStub, types: { setTypeParser() {} } };
 
 const externos = {
-  mssql: sqlStub,
+  pg: pgStub,
   dotenv: { config: () => ({}) },
   axios: { get: async () => { throw new Error('axios real no disponible en pruebas'); }, post: async () => { throw new Error('axios real no disponible en pruebas'); } },
   googleapis: { google: { auth: { GoogleAuth: class {} }, drive: () => ({}) } },
@@ -25,16 +20,21 @@ const externos = {
 };
 
 const db = {
-  sql: sqlStub,
   llamadas: [],
   rollbacks: 0,
   commits: 0,
-  handler: async () => ({ recordset: [], rowsAffected: [0] }),
-  async ejecutar(texto, params = {}) {
+  handler: async () => ({ rows: [], rowCount: 0 }),
+  async ejecutar(texto, params = []) {
+    // Mismo contrato que config/db.js: los parámetros son un ARREGLO posicional ($1, $2, …).
+    if (!Array.isArray(params)) throw new TypeError('params debe ser un arreglo ordenado');
+    const esperados = new Set([...texto.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])));
+    const maximo = esperados.size ? Math.max(...esperados) : 0;
+    if (maximo !== params.length) throw new Error(`La consulta usa $1..$${maximo} pero recibió ${params.length} parámetro(s): ${texto.slice(0, 80)}`);
     db.llamadas.push({ texto, params });
     const r = await db.handler(texto, params);
-    return r || { recordset: [], rowsAffected: [0] };
+    return r || { rows: [], rowCount: 0 };
   },
+  async ejecutarScript() {},
   async conTransaccion(fn) {
     try {
       const r = await fn({ tx: true });
@@ -47,7 +47,7 @@ const db = {
   },
   async getPool() { return {}; },
   async closePool() {},
-  reiniciar() { db.llamadas.length = 0; db.rollbacks = 0; db.commits = 0; db.handler = async () => ({ recordset: [], rowsAffected: [0] }); },
+  reiniciar() { db.llamadas.length = 0; db.rollbacks = 0; db.commits = 0; db.handler = async () => ({ rows: [], rowCount: 0 }); },
 };
 
 const cargaOriginal = Module._load;

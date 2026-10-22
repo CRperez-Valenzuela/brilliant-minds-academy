@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Catálogo de la Fase 2. La fuente de verdad del estado (habilitado / no) es la tabla dbo.modulos_premium;
+ * Catálogo de la Fase 2. La fuente de verdad del estado (habilitado / no) es la tabla modulos_premium;
  * este archivo solo describe cada módulo para la interfaz (candado + tooltip) y sus rutas reservadas.
  */
 const TOOLTIP_BLOQUEADO = 'Módulo Premium Deshabilitado';

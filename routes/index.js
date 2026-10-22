@@ -2,7 +2,7 @@
 const express = require('express');
 const { requireAuth, requireRol } = require('../middlewares/auth');
 const { crearLimitador } = require('../middlewares/limitador');
-const { getPool } = require('../config/db');
+const { ejecutar } = require('../config/db');
 const { asyncHandler, ok } = require('../utils/http');
 
 const auth = require('../controllers/auth.controller');
@@ -22,7 +22,7 @@ const api = express.Router();
 // ── Salud ───────────────────────────────────────────────────────────────────────────────────────
 api.get('/health', (_req, res) => ok(res, { estado: 'activo', uptime_s: Math.round(process.uptime()) }));
 api.get('/health/db', asyncHandler(async (_req, res) => {
-  await (await getPool()).request().query('SELECT 1 AS ok');
+  await ejecutar('SELECT 1 AS ok');
   ok(res, { base_de_datos: 'conectada' });
 }));
 

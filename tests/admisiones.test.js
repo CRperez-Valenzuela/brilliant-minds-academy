@@ -6,19 +6,19 @@ const { registrarInscripcion } = require('../services/admisiones.service');
 const { prepararInscripcion } = require('../controllers/admisiones.controller');
 const { AppError } = require('../errors/AppError');
 
-const rs = (...filas) => ({ recordset: filas, rowsAffected: [filas.length] });
+const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
 const bcvOk = { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false }) };
 
 function programar({ matricula = '100.00', fallaEn } = {}) {
   db.reiniciar();
   db.handler = async (texto) => {
-    if (fallaEn && fallaEn.test(texto)) throw Object.assign(new Error("Cannot insert duplicate key row ... unique index 'ux_pagos_referencia_activa'."), { name: 'RequestError', number: 2601 });
-    if (/FROM dbo\.parametros/.test(texto)) return rs({ valor: matricula });
-    if (/MERGE dbo\.representantes/.test(texto)) return rs({ id: 5 });
-    if (/INSERT INTO dbo\.estudiantes/.test(texto)) return rs({ id: 10 });
-    if (/INSERT INTO dbo\.cuotas/.test(texto)) return rs({ id: 20 });
-    if (/UPDATE dbo\.cuotas SET estado = N'En Revisión'/.test(texto)) return rs({ monto_usd: 100 });
-    if (/INSERT INTO dbo\.pagos_referencias/.test(texto)) return rs({ id: 30 });
+    if (fallaEn && fallaEn.test(texto)) throw Object.assign(new Error('duplicate key value violates unique constraint "ux_pagos_referencia_activa"'), { name: 'error', severity: 'ERROR', code: '23505', constraint: 'ux_pagos_referencia_activa' });
+    if (/FROM parametros/.test(texto)) return rs({ valor: matricula });
+    if (/INSERT INTO representantes[\s\S]*ON CONFLICT \(cedula\)/.test(texto)) return rs({ id: 5 });
+    if (/INSERT INTO estudiantes/.test(texto)) return rs({ id: 10 });
+    if (/INSERT INTO cuotas/.test(texto)) return rs({ id: 20 });
+    if (/UPDATE cuotas SET estado = 'En Revisión'/.test(texto)) return rs({ monto_usd: 100 });
+    if (/INSERT INTO pagos_referencias/.test(texto)) return rs({ id: 30 });
     return rs();
   };
 }
@@ -61,10 +61,10 @@ test('inscripción OK: estatus "Pendiente por Validación Administrativa", monto
   assert.equal(db.rollbacks, 0);
   assert.equal(drive.subidas[0].estudianteId, 10); // el ID real alimenta 'Nombre_Apellido_ID'
   assert.equal(drive.subidas[0].archivos.length, 3);
-  assert.equal(db.llamadas.filter((l) => /INSERT INTO dbo\.documentos_estudiante/.test(l.texto)).length, 3);
+  assert.equal(db.llamadas.filter((l) => /INSERT INTO documentos_estudiante/.test(l.texto)).length, 3);
   // la referencia se persiste ANTES de tocar Drive: un duplicado nunca deja archivos huérfanos
-  const orden = db.llamadas.findIndex((l) => /INSERT INTO dbo\.pagos_referencias/.test(l.texto));
-  assert.ok(orden > -1 && orden < db.llamadas.findIndex((l) => /UPDATE dbo\.estudiantes SET drive_folder_id/.test(l.texto)));
+  const orden = db.llamadas.findIndex((l) => /INSERT INTO pagos_referencias/.test(l.texto));
+  assert.ok(orden > -1 && orden < db.llamadas.findIndex((l) => /UPDATE estudiantes SET drive_folder_id/.test(l.texto)));
 });
 
 test('si Drive falla, TODO se revierte (rollback) y el error JSON 502 se propaga; no hay carpeta que limpiar', async () => {
@@ -77,17 +77,17 @@ test('si Drive falla, TODO se revierte (rollback) y el error JSON 502 se propaga
 });
 
 test('si la base falla DESPUÉS de crear la carpeta, se revierte y la carpeta se envía a la papelera (compensación)', async () => {
-  programar({ fallaEn: /INSERT INTO dbo\.documentos_estudiante/ });
+  programar({ fallaEn: /INSERT INTO documentos_estudiante/ });
   const drive = driveFalso();
-  await assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: drive }), (e) => e.number === 2601);
+  await assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: drive }), (e) => e.code === '23505');
   assert.equal(db.rollbacks, 1);
   assert.deepEqual(drive.eliminadas, ['carpeta-1']);
 });
 
 test('referencia bancaria duplicada: falla antes de Drive (no se sube nada)', async () => {
-  programar({ fallaEn: /INSERT INTO dbo\.pagos_referencias/ });
+  programar({ fallaEn: /INSERT INTO pagos_referencias/ });
   const drive = driveFalso();
-  await assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: drive }), (e) => e.number === 2601);
+  await assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: drive }), (e) => e.code === '23505');
   assert.equal(drive.subidas.length, 0);
   assert.equal(db.rollbacks, 1);
 });

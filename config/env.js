@@ -13,6 +13,13 @@ function entero(nombre, defecto) {
   return n;
 }
 
+function booleano(nombre, defecto) {
+  const v = process.env[nombre];
+  if (v === undefined || v === '') return defecto;
+  if (!['true', 'false'].includes(v.toLowerCase())) throw new Error(`[env] ${nombre} debe ser true o false (recibido: ${v})`);
+  return v.toLowerCase() === 'true';
+}
+
 function validarProduccion(cfg) {
   const faltan = [];
   if (!cfg.jwt.secret || cfg.jwt.secret.length < 32) faltan.push('JWT_SECRET (>= 32 caracteres)');
@@ -28,12 +35,14 @@ const config = Object.freeze({
   puerto: entero('PORT', 3000),
   db: Object.freeze({
     server: process.env.DB_SERVER,
-    port: entero('DB_PORT', 1433),
+    port: entero('DB_PORT', 5432),
     database: process.env.DB_NAME,
     user: process.env.DB_USER,
     password: process.env.DB_PASSWORD,
-    encrypt: process.env.DB_ENCRYPT !== 'false',
-    trustServerCertificate: process.env.DB_TRUST_SERVER_CERT === 'true',
+    // Supabase exige TLS. Se verifica el certificado salvo que se desactive de forma explícita.
+    ssl: booleano('DB_SSL', true),
+    sslRejectUnauthorized: booleano('DB_SSL_REJECT_UNAUTHORIZED', true),
+    sslCaPath: process.env.DB_SSL_CA_PATH || '',
     poolMax: entero('DB_POOL_MAX', 10),
     poolMin: entero('DB_POOL_MIN', 0),
     idleMs: entero('DB_POOL_IDLE_MS', 30000),

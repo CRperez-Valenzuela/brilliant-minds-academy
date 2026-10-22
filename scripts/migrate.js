@@ -1,41 +1,35 @@
 'use strict';
-// Aplica database/migrations/*.sql en orden, una sola vez cada una, separando lotes por líneas "GO".
+// Aplica database/migrations/*.sql en orden, una sola vez cada una. Cada archivo corre dentro de UNA transacción
+// (PostgreSQL admite DDL transaccional): o se aplica completo junto con su registro en schema_migrations, o no se aplica nada.
 // Uso: npm run migrate
-require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
 const fs = require('node:fs');
 const path = require('node:path');
-const { getPool, closePool, sql } = require('../config/db');
+const { conTransaccion, ejecutar, ejecutarScript, closePool } = require('../config/db');
 
 const DIR = path.resolve(__dirname, '..', 'database', 'migrations');
+// Clave del candado de asesoría que serializa a dos migradores simultáneos (p. ej. dos despliegues a la vez).
+const CLAVE_CANDADO = 726_150_001;
 
-function lotes(texto) {
-  return texto
-    .split(/^\s*GO\s*$/gim)
-    .map((l) => l.trim())
-    .filter(Boolean);
+async function yaAplicada(cliente, archivo) {
+  const t = await ejecutar("SELECT to_regclass('public.schema_migrations') AS tabla", [], cliente);
+  if (!t.rows[0].tabla) return false; // primera migración: la tabla de control aún no existe
+  const r = await ejecutar('SELECT 1 FROM schema_migrations WHERE nombre = $1', [archivo], cliente);
+  return r.rowCount > 0;
 }
 
 async function main() {
-  const pool = await getPool();
-  // La tabla de control se crea con el primer lote de 001; si no existe aún, se asume vacía.
-  const existeControl = (await pool.request().query(
-    "SELECT OBJECT_ID(N'dbo.schema_migrations', N'U') AS id")).recordset[0].id;
-  const aplicadas = new Set(
-    existeControl ? (await pool.request().query('SELECT nombre FROM dbo.schema_migrations')).recordset.map((r) => r.nombre) : [],
-  );
-
   const archivos = fs.readdirSync(DIR).filter((f) => f.endsWith('.sql')).sort();
   for (const archivo of archivos) {
-    if (aplicadas.has(archivo)) {
-      console.log(`= ${archivo} (ya aplicada)`);
-      continue;
-    }
-    console.log(`> Aplicando ${archivo}`);
-    for (const lote of lotes(fs.readFileSync(path.join(DIR, archivo), 'utf8'))) {
-      await pool.request().batch(lote);
-    }
-    await pool.request().input('n', sql.NVarChar(150), archivo)
-      .query('INSERT INTO dbo.schema_migrations (nombre) VALUES (@n)');
+    const texto = fs.readFileSync(path.join(DIR, archivo), 'utf8');
+    const aplicada = await conTransaccion(async (cliente) => {
+      // pg_advisory_xact_lock se libera solo al terminar la transacción: seguro incluso detrás de un pooler en modo transacción.
+      await ejecutar('SELECT pg_advisory_xact_lock($1)', [CLAVE_CANDADO], cliente);
+      if (await yaAplicada(cliente, archivo)) return false;
+      await ejecutarScript(texto, cliente);
+      await ejecutar('INSERT INTO schema_migrations (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING', [archivo], cliente);
+      return true;
+    });
+    console.log(aplicada ? `> Aplicada ${archivo}` : `= ${archivo} (ya aplicada)`);
   }
   console.log('Migraciones al día.');
 }

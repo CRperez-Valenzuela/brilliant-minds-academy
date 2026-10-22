@@ -1,6 +1,6 @@
 'use strict';
 const bcrypt = require('bcryptjs');
-const { sql, ejecutar } = require('../config/db');
+const { ejecutar } = require('../config/db');
 const { e } = require('../errors/AppError');
 const { firmarToken } = require('../middlewares/auth');
 const { validar } = require('../utils/validar');
@@ -11,8 +11,9 @@ const HASH_SENTINELA = bcrypt.hashSync('sentinela-no-es-una-clave-real', 12);
 
 const login = asyncHandler(async (req, res) => {
   const { email, password } = validar(req.body, { email: { tipo: 'email', requerido: true, max: 160 }, password: { requerido: true, max: 200 } });
-  const r = await ejecutar('SELECT id, nombre, email, password_hash, rol FROM dbo.usuarios_admin WHERE email = @e AND activo = 1', { e: [sql.NVarChar(160), email] });
-  const u = r.recordset[0];
+  // `validar` ya normaliza el correo a minúsculas y crear-admin lo guarda así (PostgreSQL compara con distinción de mayúsculas).
+  const r = await ejecutar('SELECT id, nombre, email, password_hash, rol FROM usuarios_admin WHERE email = $1 AND activo = TRUE', [email]);
+  const u = r.rows[0];
   const coincide = await bcrypt.compare(password, u ? u.password_hash : HASH_SENTINELA);
   if (!u || !coincide) throw e.noAutenticado('Correo o contraseña incorrectos.');
   ok(res, { token: firmarToken(u), usuario: { id: u.id, nombre: u.nombre, email: u.email, rol: u.rol } });

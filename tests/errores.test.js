@@ -14,7 +14,7 @@ function resFalsa() {
   r.destroy = () => { r.destruida = true; };
   return r;
 }
-const errorMssql = (numero, mensaje, extra = {}) => Object.assign(new Error(mensaje), { name: 'RequestError', number: numero, ...extra });
+const errorPg = (code, mensaje, extra = {}) => Object.assign(new Error(mensaje), { name: 'error', severity: 'ERROR', code, ...extra });
 
 test('todo error sale como JSON { ok:false, error:{codigo,mensaje,requestId} }', () => {
   const res = resFalsa();
@@ -33,31 +33,48 @@ test('multer: archivo grande → 413, campo inesperado → 422', () => {
   assert.equal(normalizar(Object.assign(new Error('x'), { name: 'MulterError', code: 'LIMIT_UNEXPECTED_FILE', field: 'virus' })).status, 422);
 });
 
-test('MSSQL: duplicados (2601/2627) → 409 con código legible según el índice violado', () => {
-  const ref = normalizar(errorMssql(2601, "Cannot insert duplicate key row in object 'dbo.pagos_referencias' with unique index 'ux_pagos_referencia_activa'."));
+test('PostgreSQL: duplicados (23505) → 409 con código legible según el índice/constraint violado', () => {
+  const ref = normalizar(errorPg('23505', 'duplicate key value violates unique constraint "ux_pagos_referencia_activa"', { constraint: 'ux_pagos_referencia_activa' }));
   assert.equal(ref.status, 409);
   assert.equal(ref.codigo, 'REFERENCIA_DUPLICADA');
-  const ced = normalizar(errorMssql(2627, "Violation of UNIQUE KEY constraint 'uq_personal_cedula'. Cannot insert duplicate key in object 'dbo.personal'."));
+  const ced = normalizar(errorPg('23505', 'duplicate key value violates unique constraint "uq_personal_cedula"', { constraint: 'uq_personal_cedula' }));
   assert.equal(ced.codigo, 'CEDULA_DUPLICADA');
-  assert.equal(normalizar(errorMssql(2627, 'sin nombre conocido')).codigo, 'REGISTRO_DUPLICADO');
+  assert.equal(normalizar(errorPg('23505', 'sin nombre conocido')).codigo, 'REGISTRO_DUPLICADO');
+  assert.equal(normalizar(errorPg('23505', 'x', { constraint: 'ux_cuotas_mensualidad_concepto' })).codigo, 'CUOTA_DUPLICADA');
 });
 
-test('MSSQL: FK, truncamiento, deadlock y conexión caída no filtran SQL al cliente', () => {
-  assert.equal(normalizar(errorMssql(547, 'The INSERT statement conflicted with the FOREIGN KEY constraint "fk_x"')).codigo, 'VIOLACION_INTEGRIDAD');
-  assert.equal(normalizar(errorMssql(8152, 'String or binary data would be truncated')).status, 422);
-  const dl = normalizar(errorMssql(1205, 'deadlock'));
-  assert.equal(dl.status, 503);
-  assert.equal(dl.headers['Retry-After'], '2');
-  assert.equal(normalizar(errorMssql(undefined, 'timeout', { code: 'ETIMEOUT' })).status, 504);
-  const caida = normalizar(Object.assign(new Error('Failed to connect'), { name: 'ConnectionError', code: 'ESOCKET' }));
-  assert.equal(caida.codigo, 'BASE_DATOS_NO_DISPONIBLE');
+test('PostgreSQL: FK, NOT NULL, CHECK, tipos, deadlock, timeout y conexión caída no filtran SQL al cliente', () => {
+  assert.equal(normalizar(errorPg('23503', 'insert or update on table "cuotas" violates foreign key constraint "fk_x"')).codigo, 'VIOLACION_INTEGRIDAD');
+  assert.equal(normalizar(errorPg('23502', 'null value in column "nombres"')).status, 422);
+  assert.equal(normalizar(errorPg('23514', 'new row violates check constraint "ck_personal_coherencia"')).status, 422);
+  assert.equal(normalizar(errorPg('22001', 'value too long for type character varying(100)')).status, 422);
+  assert.equal(normalizar(errorPg('22P02', 'invalid input syntax for type integer: "abc"')).status, 422);
+  for (const c of ['40P01', '40001']) {
+    const dl = normalizar(errorPg(c, 'deadlock detected'));
+    assert.equal(dl.status, 503);
+    assert.equal(dl.codigo, 'REINTENTAR');
+    assert.equal(dl.headers['Retry-After'], '2');
+  }
+  assert.equal(normalizar(errorPg('57014', 'canceling statement due to statement timeout')).status, 504);
+  for (const c of ['08006', '08001', '28P01', '53300', '57P01']) assert.equal(normalizar(errorPg(c, 'x')).codigo, 'BASE_DATOS_NO_DISPONIBLE', c);
+  // errores de red / del pool sin SQLSTATE
+  assert.equal(normalizar(Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5432'), { code: 'ECONNREFUSED' })).codigo, 'BASE_DATOS_NO_DISPONIBLE');
+  assert.equal(normalizar(new Error('timeout exceeded when trying to connect')).status, 503);
+  assert.equal(normalizar(new Error('Connection terminated unexpectedly')).status, 503);
+  // un EPERM de Node (5 letras mayúsculas) NO se confunde con un SQLSTATE
+  assert.equal(normalizar(Object.assign(new Error('operation not permitted'), { code: 'EPERM' })).codigo, 'ERROR_INTERNO');
   const res = resFalsa();
   const orig = console.error; console.error = () => {};
-  errorHandler(new Error("SELECT * FROM dbo.usuarios_admin WHERE password_hash = 'x' falló"), { id: 'r', method: 'GET', originalUrl: '/' }, res, () => {});
+  errorHandler(new Error("SELECT * FROM usuarios_admin WHERE password_hash = 'x' falló"), { id: 'r', method: 'GET', originalUrl: '/' }, res, () => {});
   console.error = orig;
   assert.equal(res.estado, 500);
   assert.equal(res.cuerpo.error.codigo, 'ERROR_INTERNO');
   assert.ok(!JSON.stringify(res.cuerpo).includes('password_hash'));
+  // el detalle del servidor ("Key (cedula)=(V-1) already exists") jamás llega al cliente
+  const dup = resFalsa();
+  errorHandler(errorPg('23505', 'dup', { constraint: 'uq_representantes_cedula', detail: 'Key (cedula)=(V-12345678) already exists.' }), { id: 'r', method: 'POST', originalUrl: '/' }, dup, () => {});
+  assert.equal(dup.estado, 409);
+  assert.ok(!JSON.stringify(dup.cuerpo).includes('V-12345678'));
 });
 
 test('error antes del primer byte de un .xlsx: se quita Content-Disposition; con cabeceras ya enviadas se corta la conexión', () => {

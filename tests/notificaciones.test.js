@@ -6,18 +6,18 @@ const { generarAlerta } = require('../services/notificaciones.service');
 const { AppError } = require('../errors/AppError');
 
 const AHORA = () => Date.parse('2026-10-21T20:00:00-04:00'); // hoy en Caracas = 2026-10-21
-const rs = (...filas) => ({ recordset: filas, rowsAffected: [filas.length] });
+const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
 
 function programar({ estado = 'Activo', cuotaProxima, vencidas = [] }) {
   db.reiniciar();
   db.handler = async (texto) => {
-    if (/FROM dbo\.vw_estudiantes_estado v JOIN dbo\.representantes/.test(texto)) {
+    if (/FROM vw_estudiantes_estado v JOIN representantes/.test(texto)) {
       return rs({ id: 1, nombres: 'Luis', apellidos: 'Pérez', estado_dinamico: estado, rep_nombres: 'Ana', rep_apellidos: 'Pérez', telefono: '584141234567' });
     }
-    if (/SELECT TOP 1 id, concepto/.test(texto)) return cuotaProxima ? rs(cuotaProxima) : rs();
-    if (/fecha_vencimiento < @hoy ORDER BY/.test(texto)) return rs(...vencidas);
-    if (/FROM dbo\.cuentas_pago/.test(texto)) return rs({ id: 1, metodo: 'ZELLE', titular: 'BMA LLC', detalle: 'pagos@bma.example' });
-    if (/INSERT INTO dbo\.notificaciones_whatsapp/.test(texto)) return rs({ id: 99 });
+    if (/FROM cuotas WHERE estudiante_id = \$1 AND estado = 'Pendiente' AND fecha_vencimiento >= \$2/.test(texto)) return cuotaProxima ? rs(cuotaProxima) : rs();
+    if (/fecha_vencimiento < \$2 ORDER BY/.test(texto)) return rs(...vencidas);
+    if (/FROM cuentas_pago/.test(texto)) return rs({ id: 1, metodo: 'ZELLE', titular: 'BMA LLC', detalle: 'pagos@bma.example' });
+    if (/INSERT INTO notificaciones_whatsapp/.test(texto)) return rs({ id: 99 });
     return rs();
   };
 }
@@ -38,7 +38,7 @@ test('preventiva: fuera de la ventana 3–5 días → 422 FUERA_DE_VENTANA_PREVE
     generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1, usuarioId: 3 }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora: AHORA }),
     (e) => e.status === 422 && e.codigo === 'FUERA_DE_VENTANA_PREVENTIVA' && e.detalles.dias_restantes === 2,
   );
-  assert.ok(!sqlUsado(/INSERT INTO dbo\.notificaciones_whatsapp/));
+  assert.ok(!sqlUsado(/INSERT INTO notificaciones_whatsapp/));
   programar({ cuotaProxima: { id: 7, concepto: 'Mensualidad', monto_usd: '50.00', fecha_vencimiento: '2026-10-27' } }); // faltan 6
   await assert.rejects(generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1 }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora: AHORA }), (e) => e.codigo === 'FUERA_DE_VENTANA_PREVENTIVA');
 });
@@ -55,7 +55,7 @@ test('preventiva (4 días): consulta la tasa FRESCA, convierte a Bs., genera lin
   assert.match(r.mensaje, /http:\/\/localhost:3000\/portal\/[a-f0-9]{48}/);
   assert.ok(r.enlace_whatsapp.startsWith('https://wa.me/584141234567?text='));
   assert.equal(w.enviados.length, 0);
-  assert.ok(sqlUsado(/INSERT INTO dbo\.portal_tokens/));
+  assert.ok(sqlUsado(/INSERT INTO portal_tokens/));
 });
 
 test('envío real: éxito marca ENVIADA; si Meta rechaza queda FALLIDA y el error JSON se propaga', async () => {
@@ -64,14 +64,14 @@ test('envío real: éxito marca ENVIADA; si Meta rechaza queda FALLIDA y el erro
   const r = await generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1, enviar: true }, { bcvSvc: bcvFresca(), waSvc: w, ahora: AHORA });
   assert.equal(r.estado, 'ENVIADA');
   assert.equal(w.enviados[0].to, '584141234567');
-  assert.ok(sqlUsado(/estado = N'ENVIADA'/));
+  assert.ok(sqlUsado(/estado = 'ENVIADA'/));
 
   programar({ cuotaProxima: { id: 7, concepto: 'M', monto_usd: '50.00', fecha_vencimiento: '2026-10-25' } });
   const meta = new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131047: ventana de 24 h' });
   await assert.rejects(generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1, enviar: true }, { bcvSvc: bcvFresca(), waSvc: wa(meta), ahora: AHORA }), (e) => e.status === 502);
-  const fallida = db.llamadas.find((l) => /estado = N'FALLIDA'/.test(l.texto));
+  const fallida = db.llamadas.find((l) => /estado = 'FALLIDA'/.test(l.texto));
   assert.ok(fallida, 'debe registrar la notificación como FALLIDA');
-  assert.match(fallida.params.er[1], /131047/);
+  assert.match(fallida.params[1], /131047/);
 });
 
 test('tasa desactualizada → 503 TASA_BCV_DESACTUALIZADA: no se cobra con una tasa vieja', async () => {
@@ -80,7 +80,7 @@ test('tasa desactualizada → 503 TASA_BCV_DESACTUALIZADA: no se cobra con una t
     generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1 }, { bcvSvc: bcvFresca({ desactualizada: true }), waSvc: wa(), ahora: AHORA }),
     (e) => e.status === 503 && e.codigo === 'TASA_BCV_DESACTUALIZADA',
   );
-  assert.ok(!sqlUsado(/INSERT INTO dbo\.notificaciones_whatsapp/));
+  assert.ok(!sqlUsado(/INSERT INTO notificaciones_whatsapp/));
 });
 
 test('preventiva solo para estudiantes Activos', async () => {

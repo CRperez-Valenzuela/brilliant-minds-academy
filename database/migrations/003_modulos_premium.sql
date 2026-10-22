@@ -1,39 +1,32 @@
 -- 003_modulos_premium.sql — Candados de la Fase 2. Ningún módulo viene habilitado: Astra Digital Solutions
 -- lo activa con un UPDATE tras la contratación:
---   UPDATE dbo.modulos_premium SET habilitado = 1, habilitado_en = SYSUTCDATETIME(), actualizado_en = SYSUTCDATETIME()
---    WHERE codigo = N'WHATSAPP_AUTOMATICO';
+--   UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW()
+--    WHERE codigo = 'WHATSAPP_AUTOMATICO';
 
-IF OBJECT_ID(N'dbo.modulos_premium', N'U') IS NULL
-CREATE TABLE dbo.modulos_premium (
-  codigo         NVARCHAR(30)  NOT NULL CONSTRAINT pk_modulos_premium PRIMARY KEY,
-  nombre         NVARCHAR(120) NOT NULL,
-  descripcion    NVARCHAR(400) NOT NULL,
-  precio_usd     DECIMAL(10,2) NOT NULL CONSTRAINT ck_modulos_precio CHECK (precio_usd >= 0),
-  habilitado     BIT           NOT NULL CONSTRAINT df_modulos_habilitado DEFAULT 0,
-  habilitado_en  DATETIME2     NULL,
-  actualizado_en DATETIME2     NOT NULL CONSTRAINT df_modulos_actualizado DEFAULT SYSUTCDATETIME()
+CREATE TABLE IF NOT EXISTS modulos_premium (
+  codigo         VARCHAR(30)   NOT NULL CONSTRAINT pk_modulos_premium PRIMARY KEY,
+  nombre         VARCHAR(120)  NOT NULL,
+  descripcion    VARCHAR(400)  NOT NULL,
+  precio_usd     NUMERIC(10,2) NOT NULL CONSTRAINT ck_modulos_precio CHECK (precio_usd >= 0),
+  habilitado     BOOLEAN       NOT NULL DEFAULT FALSE,
+  habilitado_en  TIMESTAMPTZ   NULL,
+  actualizado_en TIMESTAMPTZ   NOT NULL DEFAULT NOW()
 );
-GO
 
-INSERT INTO dbo.modulos_premium (codigo, nombre, descripcion, precio_usd)
-SELECT v.codigo, v.nombre, v.descripcion, v.precio_usd
-FROM (VALUES
-  (N'IA_ATENCION',         N'Atención al Cliente por IA y Clasificación Temática',
-   N'Agente de respuestas frecuentes que clasifica los mensajes entrantes en Reclamos, Felicitaciones o Propuestas.', CAST(200.00 AS DECIMAL(10,2))),
-  (N'WHATSAPP_AUTOMATICO', N'Automatización vía WhatsApp',
-   N'Tarea programada que despacha las alertas masivas automáticamente en las fechas límite.',                         CAST(150.00 AS DECIMAL(10,2))),
-  (N'BANCAMIGA',           N'Integración Bancaria - API Bancamiga',
-   N'Validación digital inmediata de la referencia contra el banco, en sustitución de la auditoría humana.',            CAST(300.00 AS DECIMAL(10,2))),
-  (N'APP_MOVIL',           N'Aplicación Móvil Administrativa',
-   N'API REST unificada para auditar referencias y controlar el Dashboard desde una app móvil.',                        CAST(450.00 AS DECIMAL(10,2))),
-  (N'FACHADA_WEB',         N'Fachada Web con Scroll-Tour Inmersivo',
-   N'Ruteador público que enlaza el tráfico de la landing page con el Portal de Admisiones.',                           CAST(550.00 AS DECIMAL(10,2)))
-) AS v (codigo, nombre, descripcion, precio_usd)
-WHERE NOT EXISTS (SELECT 1 FROM dbo.modulos_premium m WHERE m.codigo = v.codigo);
-GO
+-- DO NOTHING: re-ejecutar la migración jamás pisa el estado "habilitado" ni un precio negociado.
+INSERT INTO modulos_premium (codigo, nombre, descripcion, precio_usd) VALUES
+  ('IA_ATENCION',         'Atención al Cliente por IA y Clasificación Temática',
+   'Agente de respuestas frecuentes que clasifica los mensajes entrantes en Reclamos, Felicitaciones o Propuestas.', 200.00),
+  ('WHATSAPP_AUTOMATICO', 'Automatización vía WhatsApp',
+   'Tarea programada que despacha las alertas masivas automáticamente en las fechas límite.',                         150.00),
+  ('BANCAMIGA',           'Integración Bancaria - API Bancamiga',
+   'Validación digital inmediata de la referencia contra el banco, en sustitución de la auditoría humana.',            300.00),
+  ('APP_MOVIL',           'Aplicación Móvil Administrativa',
+   'API REST unificada para auditar referencias y controlar el Dashboard desde una app móvil.',                        450.00),
+  ('FACHADA_WEB',         'Fachada Web con Scroll-Tour Inmersivo',
+   'Ruteador público que enlaza el tráfico de la landing page con el Portal de Admisiones.',                           550.00)
+ON CONFLICT (codigo) DO NOTHING;
 
 -- Parámetro obligatorio antes de abrir inscripciones: el backend responde 503 CONFIG_INCOMPLETA mientras sea 0.
-INSERT INTO dbo.parametros (clave, valor)
-SELECT N'MATRICULA_USD', N'0.00'
-WHERE NOT EXISTS (SELECT 1 FROM dbo.parametros WHERE clave = N'MATRICULA_USD');
-GO
+INSERT INTO parametros (clave, valor) VALUES ('MATRICULA_USD', '0.00')
+ON CONFLICT (clave) DO NOTHING;

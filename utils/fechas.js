@@ -17,9 +17,18 @@ function esFechaValida(s) {
   return f.getUTCFullYear() === y && f.getUTCMonth() === mo - 1 && f.getUTCDate() === d;
 }
 
-/** 'YYYY-MM-DD' → Date a medianoche UTC (lo que node-mssql espera para sql.Date sin desfase de huso). */
+/**
+ * Valor de un parámetro DATE para `pg`: la cadena 'YYYY-MM-DD' tal cual. NO se convierte a Date: node-postgres serializa los
+ * Date en la zona horaria del proceso y una medianoche UTC puede caer en el día anterior (Caracas es UTC-4).
+ */
 function aFechaSql(s) {
-  return new Date(`${s}T00:00:00Z`);
+  if (!esFechaValida(s)) throw new TypeError(`[fechas] Fecha inválida para SQL: ${s}`);
+  return String(s);
+}
+
+/** Instante (Date) → cadena ISO-8601 UTC para un parámetro TIMESTAMPTZ (sin ambigüedad de huso). */
+function aInstanteSql(d) {
+  return (d instanceof Date ? d : new Date(d)).toISOString();
 }
 
 /** Diferencia en días calendario b - a (ambas 'YYYY-MM-DD'). */
@@ -48,4 +57,4 @@ function limitesPeriodo(periodo) {
   };
 }
 
-module.exports = { hoyCaracas, esFechaValida, aFechaSql, diasEntre, periodoActual, esPeriodoValido, limitesPeriodo };
+module.exports = { hoyCaracas, esFechaValida, aFechaSql, aInstanteSql, diasEntre, periodoActual, esPeriodoValido, limitesPeriodo };

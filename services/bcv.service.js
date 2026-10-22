@@ -1,7 +1,7 @@
 'use strict';
 const axios = require('axios');
 const cfg = require('../config/env');
-const { sql, ejecutar } = require('../config/db');
+const { ejecutar } = require('../config/db');
 const { e } = require('../errors/AppError');
 
 const CACHE_MS = 5 * 60_000;
@@ -21,14 +21,14 @@ function extraerTasa(payload) {
 const repoSql = {
   async guardar({ tasa, fuente, fechaValor }) {
     const r = await ejecutar(
-      `INSERT INTO dbo.tasas_bcv (tasa, fuente, fecha_valor) OUTPUT inserted.capturada_en VALUES (@tasa, @fuente, @fecha)`,
-      { tasa: [sql.Decimal(18, 4), tasa], fuente: [sql.NVarChar(120), fuente], fecha: [sql.DateTime2, fechaValor] },
+      `INSERT INTO tasas_bcv (tasa, fuente, fecha_valor) VALUES ($1, $2, $3) RETURNING capturada_en`,
+      [tasa, fuente, fechaValor ? fechaValor.toISOString() : null],
     );
-    return r.recordset[0].capturada_en;
+    return r.rows[0].capturada_en;
   },
   async ultima() {
-    const r = await ejecutar('SELECT TOP 1 tasa, fuente, fecha_valor, capturada_en FROM dbo.tasas_bcv ORDER BY capturada_en DESC');
-    return r.recordset[0] || null;
+    const r = await ejecutar('SELECT tasa, fuente, fecha_valor, capturada_en FROM tasas_bcv ORDER BY capturada_en DESC LIMIT 1');
+    return r.rows[0] || null;
   },
 };
 

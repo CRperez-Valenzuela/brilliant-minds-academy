@@ -1,5 +1,5 @@
 'use strict';
-const { sql, ejecutar } = require('../config/db');
+const { ejecutar } = require('../config/db');
 const { e } = require('../errors/AppError');
 const parametros = require('../services/parametros.service');
 const { validar, idParam } = require('../utils/validar');
@@ -14,8 +14,8 @@ const REGLAS_CUENTA = {
 };
 
 const obtener = asyncHandler(async (_req, res) => {
-  const cuentas = await ejecutar('SELECT id, metodo, titular, detalle, activa FROM dbo.cuentas_pago ORDER BY metodo, id');
-  ok(res, { matricula_usd: Number(await parametros.obtener('MATRICULA_USD')), cuentas: cuentas.recordset });
+  const cuentas = await ejecutar('SELECT id, metodo, titular, detalle, activa FROM cuentas_pago ORDER BY metodo, id');
+  ok(res, { matricula_usd: Number(await parametros.obtener('MATRICULA_USD')), cuentas: cuentas.rows });
 });
 
 const fijarMatricula = asyncHandler(async (req, res) => {
@@ -27,18 +27,18 @@ const fijarMatricula = asyncHandler(async (req, res) => {
 const crearCuenta = asyncHandler(async (req, res) => {
   const d = validar(req.body, REGLAS_CUENTA);
   const r = await ejecutar(
-    'INSERT INTO dbo.cuentas_pago (metodo, titular, detalle, activa) OUTPUT inserted.id VALUES (@m, @t, @d, @a)',
-    { m: [sql.NVarChar(20), d.metodo], t: [sql.NVarChar(150), d.titular], d: [sql.NVarChar(500), d.detalle], a: [sql.Bit, d.activa] });
-  ok(res, { id: r.recordset[0].id }, 201);
+    'INSERT INTO cuentas_pago (metodo, titular, detalle, activa) VALUES ($1, $2, $3, $4) RETURNING id',
+    [d.metodo, d.titular, d.detalle, d.activa]);
+  ok(res, { id: r.rows[0].id }, 201);
 });
 
 const actualizarCuenta = asyncHandler(async (req, res) => {
   const id = idParam(req.params.id);
   const d = validar(req.body, REGLAS_CUENTA);
   const r = await ejecutar(
-    'UPDATE dbo.cuentas_pago SET metodo = @m, titular = @t, detalle = @d, activa = @a OUTPUT inserted.id WHERE id = @id',
-    { id: [sql.Int, id], m: [sql.NVarChar(20), d.metodo], t: [sql.NVarChar(150), d.titular], d: [sql.NVarChar(500), d.detalle], a: [sql.Bit, d.activa] });
-  if (!r.recordset.length) throw e.noEncontrado('La cuenta');
+    'UPDATE cuentas_pago SET metodo = $2, titular = $3, detalle = $4, activa = $5 WHERE id = $1 RETURNING id',
+    [id, d.metodo, d.titular, d.detalle, d.activa]);
+  if (!r.rowCount) throw e.noEncontrado('La cuenta');
   ok(res, { id });
 });
 

@@ -11,11 +11,13 @@
     "dev": "nodemon server.js",
     "migrate": "node scripts/migrate.js",
     "crear-admin": "node scripts/crear-admin.js",
-    "test": "node --test tests/*.test.js"
+    "test": "node --test tests/*.test.js",
+    "test:integracion": "node --test tests/integracion.pg.test.js"
   },
   "keywords": [
     "express",
-    "mssql",
+    "supabase",
+    "postgresql",
     "google-drive",
     "academy",
     "crm"
@@ -30,8 +32,8 @@
     "express": "^4.21.1",
     "googleapis": "^144.0.0",
     "jsonwebtoken": "^9.0.2",
-    "mssql": "^11.0.1",
-    "multer": "^1.4.5-lts.1"
+    "multer": "^1.4.5-lts.1",
+    "pg": "^8.13.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.7"

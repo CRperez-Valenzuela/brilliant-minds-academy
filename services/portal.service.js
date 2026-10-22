@@ -1,6 +1,6 @@
 'use strict';
 const crypto = require('node:crypto');
-const { sql, ejecutar } = require('../config/db');
+const { ejecutar } = require('../config/db');
 const { e } = require('../errors/AppError');
 const { usdABs } = require('../utils/dinero');
 const { bcv } = require('./bcv.service');
@@ -15,8 +15,8 @@ const sha256 = (t) => crypto.createHash('sha256').update(t).digest('hex');
 async function emitirToken(estudianteId, ejecutor) {
   const token = crypto.randomBytes(24).toString('hex');
   await ejecutar(
-    `INSERT INTO dbo.portal_tokens (estudiante_id, token_hash, expira_en) VALUES (@e, @h, DATEADD(DAY, ${DIAS_VIGENCIA}, SYSUTCDATETIME()))`,
-    { e: [sql.Int, estudianteId], h: [sql.Char(64), sha256(token)] }, ejecutor);
+    `INSERT INTO portal_tokens (estudiante_id, token_hash, expira_en) VALUES ($1, $2, NOW() + make_interval(days => $3::int))`,
+    [estudianteId, sha256(token), DIAS_VIGENCIA], ejecutor);
   return token;
 }
 
@@ -24,11 +24,11 @@ async function resolverToken(token) {
   if (!TOKEN_RE.test(String(token))) throw e.noEncontrado('El enlace');
   const r = await ejecutar(
     `SELECT t.estudiante_id, v.nombres, v.apellidos, v.estado_dinamico, v.estatus_pago
-     FROM dbo.portal_tokens t JOIN dbo.vw_estudiantes_estado v ON v.id = t.estudiante_id
-     WHERE t.token_hash = @h AND t.expira_en > SYSUTCDATETIME()`, { h: [sql.Char(64), sha256(token)] });
+     FROM portal_tokens t JOIN vw_estudiantes_estado v ON v.id = t.estudiante_id
+     WHERE t.token_hash = $1 AND t.expira_en > NOW()`, [sha256(token)]);
   // Mismo mensaje para "no existe" y "vencido": no se revela cuáles tokens existieron.
-  if (!r.recordset.length) throw e.noEncontrado('El enlace');
-  return r.recordset[0];
+  if (!r.rowCount) throw e.noEncontrado('El enlace');
+  return r.rows[0];
 }
 
 async function vista(token, { bcvSvc = bcv } = {}) {
@@ -37,9 +37,9 @@ async function vista(token, { bcvSvc = bcv } = {}) {
     bcvSvc.obtenerTasa(),
     parametros.cuentasActivas(),
     ejecutar(
-      `SELECT id, concepto, monto_usd, CONVERT(char(10), fecha_vencimiento, 23) AS fecha_vencimiento, estado
-       FROM dbo.cuotas WHERE estudiante_id = @e AND estado IN (N'Pendiente', N'En Revisión') ORDER BY fecha_vencimiento, id`,
-      { e: [sql.Int, est.estudiante_id] }),
+      `SELECT id, concepto, monto_usd, fecha_vencimiento, estado
+       FROM cuotas WHERE estudiante_id = $1 AND estado IN ('Pendiente', 'En Revisión') ORDER BY fecha_vencimiento, id`,
+      [est.estudiante_id]),
   ]);
   return {
     estudiante: `${est.nombres} ${est.apellidos}`,
@@ -48,7 +48,7 @@ async function vista(token, { bcvSvc = bcv } = {}) {
     tasa_bcv: tasa.tasa,
     tasa_desactualizada: tasa.desactualizada,
     cuentas,
-    cuotas: cuotas.recordset.map((c) => ({ ...c, monto_usd: Number(c.monto_usd), monto_bs: usdABs(c.monto_usd, tasa.tasa) })),
+    cuotas: cuotas.rows.map((c) => ({ ...c, monto_usd: Number(c.monto_usd), monto_bs: usdABs(c.monto_usd, tasa.tasa) })),
   };
 }
 
