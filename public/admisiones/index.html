@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Inscripción · Brilliant Minds Academy</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/admin/admin.css"><style>main{margin:0 auto;max-width:760px}fieldset{border:1px solid var(--line);border-radius:12px;margin:0 0 16px;padding:16px;background:var(--glass)}legend{font-weight:700;padding:0 8px}.row{display:grid;gap:12px;grid-template-columns:repeat(auto-fit,minmax(220px,1fr))}</style></head>
+<body><main><h1>Inscripción de nuevos estudiantes</h1><p class="sub">Brilliant Minds Academy</p><div id="aviso"></div>
+<div class="card" id="pago" style="margin-bottom:16px"><b>Matrícula inicial</b><div id="costo">Cargando…</div><div id="cuentas"></div></div>
+<form id="f" novalidate>
+<fieldset><legend>Estudiante</legend><div class="row">
+<div><label for="alumno_nombres">Nombres</label><input id="alumno_nombres" name="alumno_nombres" required></div><div><label for="alumno_apellidos">Apellidos</label><input id="alumno_apellidos" name="alumno_apellidos" required></div>
+<div><label for="alumno_fecha_nacimiento">Fecha de nacimiento</label><input type="date" id="alumno_fecha_nacimiento" name="alumno_fecha_nacimiento" required></div><div><label for="alumno_cedula">Cédula (si tiene)</label><input id="alumno_cedula" name="alumno_cedula"></div>
+<div><label for="grado_solicitado">Grado a cursar</label><input id="grado_solicitado" name="grado_solicitado" required></div><div><label for="colegio_procedencia">Colegio de procedencia</label><input id="colegio_procedencia" name="colegio_procedencia"></div>
+<div><label for="ultimo_grado_aprobado">Último grado aprobado</label><input id="ultimo_grado_aprobado" name="ultimo_grado_aprobado"></div></div></fieldset>
+<fieldset><legend>Datos médicos</legend><div class="row"><div><label for="tipo_sangre">Tipo de sangre</label><select id="tipo_sangre" name="tipo_sangre"><option value="">—</option><option>A+</option><option>A-</option><option>B+</option><option>B-</option><option>AB+</option><option>AB-</option><option>O+</option><option>O-</option></select></div>
+<div><label for="alergias">Alergias</label><input id="alergias" name="alergias"></div><div><label for="condiciones_medicas">Condiciones médicas</label><input id="condiciones_medicas" name="condiciones_medicas"></div><div><label for="medicamentos">Medicamentos</label><input id="medicamentos" name="medicamentos"></div>
+<div><label for="emergencia_nombre">Contacto de emergencia</label><input id="emergencia_nombre" name="emergencia_nombre"></div><div><label for="emergencia_telefono">Teléfono de emergencia</label><input id="emergencia_telefono" name="emergencia_telefono" inputmode="tel"></div></div></fieldset>
+<fieldset><legend>Representante</legend><div class="row"><div><label for="representante_nombres">Nombres</label><input id="representante_nombres" name="representante_nombres" required></div><div><label for="representante_apellidos">Apellidos</label><input id="representante_apellidos" name="representante_apellidos" required></div>
+<div><label for="representante_cedula">Cédula</label><input id="representante_cedula" name="representante_cedula" required></div><div><label for="representante_email">Correo</label><input type="email" id="representante_email" name="representante_email"></div>
+<div><label for="telefono_codigo">Código de país</label><input id="telefono_codigo" name="telefono_codigo" value="+58"></div><div><label for="telefono_numero">Teléfono (WhatsApp)</label><input id="telefono_numero" name="telefono_numero" inputmode="tel" required></div></div></fieldset>
+<fieldset><legend>Documentos (JPG, PNG o PDF · máx. 5 MB)</legend><div class="row"><div><label for="foto_carnet">Foto carnet (imagen)</label><input type="file" id="foto_carnet" name="foto_carnet" accept="image/jpeg,image/png" required></div>
+<div><label for="cedula_identidad">Cédula de identidad</label><input type="file" id="cedula_identidad" name="cedula_identidad" accept="image/jpeg,image/png,application/pdf" required></div>
+<div><label for="acta_nacimiento">Acta de nacimiento</label><input type="file" id="acta_nacimiento" name="acta_nacimiento" accept="image/jpeg,image/png,application/pdf" required></div></div></fieldset>
+<fieldset><legend>Pago de la matrícula</legend><div class="row"><div><label for="metodo_pago">Método</label><select id="metodo_pago" name="metodo_pago" required><option value="ZELLE">Zelle</option><option value="BINANCE">Binance</option><option value="PAYPAL">PayPal</option><option value="PAGO_MOVIL">Pago Móvil</option></select></div>
+<div><label for="referencia_bancaria">Número de referencia bancaria</label><input id="referencia_bancaria" name="referencia_bancaria" required minlength="4" maxlength="40" pattern="[A-Za-z0-9\-]{4,40}" title="Letras, números o guiones, sin espacios"></div></div></fieldset>
+<button class="btn p" id="env" style="width:100%;justify-content:center;padding:12px">Enviar inscripción</button></form></main>
+<script>
+const $=(s)=>document.querySelector(s);const esc=(v)=>String(v??'').replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const NOM={ZELLE:'Zelle',BINANCE:'Binance',PAYPAL:'PayPal',PAGO_MOVIL:'Pago Móvil'};
+fetch('/api/public/admisiones/config').then(r=>r.json()).then(j=>{
+ if(!j.ok){$('#costo').innerHTML=`<div class="msg err">${esc(j.error.mensaje)}</div>`;return;}
+ const d=j.data;$('#costo').innerHTML=`<p><b>US$ ${d.matricula_usd.toFixed(2)}</b> = <b>Bs. ${d.matricula_bs.toLocaleString('es-VE',{minimumFractionDigits:2})}</b> (tasa BCV ${d.tasa_bcv})${d.tasa_desactualizada?' · tasa del último dato disponible':''}</p>`;
+ $('#cuentas').innerHTML=d.cuentas.map(c=>`<p><b>${esc(NOM[c.metodo]||c.metodo)}</b>: ${esc(c.detalle)} <small>(${esc(c.titular)})</small></p>`).join('')||'<p>Consulta los datos de pago con la administración.</p>';
+}).catch(()=>{$('#costo').innerHTML='<div class="msg err">No se pudo cargar el costo de la matrícula.</div>'});
+$('#f').onsubmit=async(ev)=>{ev.preventDefault();$('#env').disabled=true;$('#aviso').innerHTML='';
+ try{const r=await fetch('/api/public/admisiones',{method:'POST',body:new FormData(ev.target)});const j=await r.json();
+  if(!j.ok){const det=(j.error.detalles||[]).map(d=>`<li>${esc(d.campo)}: ${esc(d.mensaje)}</li>`).join('');$('#aviso').innerHTML=`<div class="msg err" role="alert">${esc(j.error.mensaje)}<ul>${det}</ul></div>`;window.scrollTo(0,0);return;}
+  $('#f').hidden=true;$('#aviso').innerHTML=`<div class="msg okk" role="status"><b>¡Inscripción recibida!</b> Estatus: ${esc(j.data.estatus)}. Referencia ${esc(j.data.referencia)} por Bs. ${esc(j.data.monto_bs)}. La administración la validará pronto.</div>`;window.scrollTo(0,0);
+ }catch{$('#aviso').innerHTML='<div class="msg err" role="alert">Sin conexión con el servidor. Intenta de nuevo.</div>'}finally{$('#env').disabled=false}};
+</script></body></html>

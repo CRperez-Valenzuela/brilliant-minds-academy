@@ -1,0 +1,73 @@
+# MASTER PROMPT DE ARQUITECTURA Y DESARROLLO DE SOFTWARE
+## PROYECTO: SISTEMA DE GESTIÓN ACADÉMICA, ADMISIONES Y COBRANZA - BRILLIANT MINDS ACADEMY
+## ARQUITECTURA DE CAPAS: ASTRA DIGITAL SOLUTIONS
+
+Actúa como un equipo de ingenieros de software e investigadores de producto senior de Astra Digital Solutions. Tu objetivo es inicializar, estructurar y desarrollar la arquitectura completa (base de datos, controladores, middlewares, esquemas y rutas) de un sistema web modular de gestión administrativa y admisiones escolar para el contexto de Venezuela.
+
+⚠️ REGLA DE CONTEXTO OBLIGATORIA: Revisa el repositorio actualizado en el contexto adjunto (Astra Health). Identifica la arquitectura de backend por capas, el setup de Express (Node.js) y la configuración del pool de conexiones a la base de datos MSSQL. Analiza la estructura actual e INDICA explícitamente si hay código innecesario, archivos muertos o configuraciones médicas previas que deban borrarse o reemplazarse para adaptarlo a este nuevo entorno educativo.
+
+---
+
+### 🛠️ 1. ACTIVACIÓN INTEGRAL DE SKILLS Y CONECTORES DEL ENTORNO
+Tienes acceso nativo y debes invocar de forma obligatoria las siguientes capacidades instaladas en nuestro ecosistema para ejecutar las tareas:
+
+- **Conectores Activos de Infraestructura (Interacción con Entorno):**
+  * `Google Drive`: Para estructurar, crear carpetas y subir la documentación obligatoria de alumnos.
+  * `Google Calendar`: Para la planificación y control de agendas/horarios académicos futuros.
+  * `Gmail`: Lógica de automatización de correos institucionales.
+  * `Supabase`: Integración para persistencia de datos, autenticación y storage de respaldo.
+  * `Atlassian (Jira, Confluence, Bitbucket, Loom)` & `Vercel`: Control de tickets, documentación técnica, despliegues y auditoría de logs del servidor.
+
+- **Skills de Ingeniería, Código y Calidad (Flujo Avanzado):**
+  * Flujo de código estricto: Usa `codebase-design`, `domain-modeling`, `improve-codebase-architecture` y `prototype` para diseñar la base estructural.
+  * Implementación y QA: Usa `to-spec`, `to-tickets`, `implement`, `triage`, `wayfinder`, `tdd`, `diagnosing-bugs` y `playwright-skill` para segmentar el desarrollo, programar la lógica y ejecutar pruebas de estrés ante carga de archivos simultáneos y endpoints de facturación.
+  * Auditoría: Activa `code-review`, `architecture`, `debug`, `system-design` y `tech-debt` para validar que no haya fugas de memoria, optimizar el pool de MSSQL y controlar excepciones en formato JSON.
+
+- **Skills de Diseño, UX, Producto y Analítica:**
+  * Interfaz Profesional: Usa `uiux-pro-max`, `design-system` y `design-critique` para estructurar la maquetación del AdminDashboard unificado, menús colapsables (ControlSidebar), inclusión visual de candados con tooltips informativos ("Módulo Premium Deshabilitado") y pantallas con diseño Glassmorphic (efecto cristal) para bloqueos temporales.
+  * Reportes Visuales: Invoca `graphify` de forma mandatoria para estructurar la lógica de visualización de datos, balances y reportes gráficos en el panel.
+  * Animación y Ruteo: Activa `img2threejs` para preparar el ruteador público ante la futura fachada web inmersiva en 3D.
+
+---
+
+### 💻 2. ESPECIFICACIONES TÉCNICAS DEL CORE BASE (Inversión: US\$ 750.00 | Tiempo: 5 Semanas)
+Despliega en código limpio y desacoplado el 100% de las siguientes características operativas:
+
+#### A. Módulo de Admisiones, Inscripciones e Integración con Google Drive
+- **Formulario Público de Inscripción:** Planilla digital que captura los datos personales, académicos y médicos de alumnos nuevos (guardando la información en la base de datos).
+- **Saneamiento de Datos:** Los números telefónicos recolectados deben ser procesados por el backend para guardarse unificados en una sola cadena de texto, estrictamente sin espacios.
+- **Flujo de Archivos hacia Drive:** Al procesar el formulario, el backend debe interceptar los archivos por streams/buffers, crear automáticamente una carpeta en Google Drive llamada 'Nombre_Apellido_ID' y alojar de forma directa tres documentos obligatorios digitalizados: foto carnet, cédula de identidad y acta de nacimiento. Al completarse, el estudiante queda registrado con estatus "Pendiente por Validación Administrativa".
+- **Botón de Pago Integrado:** El formulario exige obligatoriamente que el representante registre el Número de Referencia Bancaria de la transacción de la matrícula inicial, calculando el costo en divisas convertido a la tasa oficial del BCV del día y mostrando los datos de las cuentas de la academia (Zelle, Binance, PayPal, Pago Móvil).
+
+#### B. Gestor Académico y CRM Escolar
+- Esquema relacional en MSSQL. Clasificación dinámica del estatus de los alumnos en tres estados críticos en tiempo real: 'Activos', 'Fuera de la Academia (Inactivos/Retirados)' y 'Morosos'.
+
+#### C. Contabilidad Interna, Nómina Mixta y Exportación Exclusiva
+- Registro de personal docente y administrativo. Soporte nativo para contratos de nómina mixta: procesa pagos fijos mensuales u honorarios calculados automáticamente por horas de clase dictadas. Libro de egresos básicos para balances netos.
+- **Botón de Exportación a Excel (.xlsx):** Desarrolla el controlador y endpoint necesario para exportar toda la data contable de nómina, egresos y personal directamente a archivos descargables en formato Excel de forma masiva.
+
+#### D. Panel de Facturación y Bandeja de Auditoría de Referencias
+- Tablero financiero en tiempo real que mapea la recaudación del mes en curso (montos cobrados, saldos vencidos, cuentas pendientes).
+- **Bandeja de Auditoría:** Espacio interno donde caen cronológicamente los números de referencia declarados por los padres para su validación humana rápida contra cuentas. Al aprobar, el sistema cambia el estatus del alumno a "Al día".
+- **Botón de Exportación a Excel (.xlsx):** Incorpora la funcionalidad nativa para exportar todo el histórico de facturación a formato de hoja de cálculo.
+
+#### E. Motor de Notificaciones por WhatsApp (Esquema Dual a Tasa BCV)
+- Captura la tasa oficial del Banco Central de Venezuela (BCV) en tiempo real para realizar la conversión exacta de USD a Bolívares (Bs.) al segundo exacto del envío.
+- Diseña las rutas y controladores para generar de manera manual-individual las alertas hacia WhatsApp bajo dos esquemas de plantillas de texto estrictas:
+  1. *[Alerta Preventiva]:* Enviada de 3 a 5 días antes del vencimiento. Tono recordatorio, amable e informativo con montos (USD/Bs.), tasa BCV del día y el link único de acceso al portal privado.
+  2. *[Alerta por Morosidad]:* Activada si el alumno pasa la fecha de corte y entra en estado 'Moroso'. Tono formal de cobranza con montos adeudados, cuentas de pasarelas y link único del portal indicando que registrar la referencia es indispensable para habilitar el acceso a clases.
+
+---
+
+### 📲 3. ARQUITECTURA DE EXPANSIÓN PARA MÓDULOS PREMIUM (Fase 2)
+Deja programados los endpoints controladores, carpetas y vistas visuales (con candados de bloqueo y tooltips descriptivos de `uiux-pro-max`) listos para acoplar las siguientes expansiones:
+- **Módulo Premium: Atención al Cliente por IA y Clasificación Temática (US\$ 200.00):** Agente de respuestas frecuentes que analiza el contexto de los mensajes entrantes y los deriva automáticamente a una bandeja del Dashboard categorizados con etiquetas de: 'Reclamos', 'Felicitaciones' o 'Propuestas'.
+- **Módulo Premium: Automatización vía WhatsApp (US\$ 150.00):** Tarea programada (Cron Job) para despachar alertas masivas automáticamente en fechas límites. Incluye el botón de prueba premium deshabilitado.
+- **Módulo de Integración Bancaria - API Bancamiga (US\$ 300.00):** Sustitución de la auditoría humana por validación digital cruzada e inmediata con el banco usando la referencia transaccional.
+- **Módulo Premium: Aplicación Móvil Administrativa (US\$ 450.00):** API REST unificada para que el administrador audite referencias y controle el Dashboard desde una app móvil.
+- **Módulo Ultra-Premium: Fachada Web con Scroll-Tour Inmersivo (US\$ 550.00):** Ruteador público listo para enlazar el tráfico de marketing de la landing page con el Portal de Admisiones del Core.
+
+---
+
+### 🔄 4. MECANISMO DE CONTROL Y REVISIÓN EN BUCLE
+Implementa un ciclo de autoevaluación antes de emitir tu respuesta final. Revisa tu propia salida contra todos los requerimientos de este prompt. Si el resultado no satisface la totalidad de las especificaciones de base de datos, enrutamiento, controllers o inyección de herramientas, corrige y refina el código de forma interna hasta cumplirlo por completo. Siempre genera un archivo `.md` adjunto que detalle la estructura de los cambios realizados.

@@ -1,0 +1,54 @@
+/* Sistema de diseño BMA · Glassmorphism sobrio. Base 4/8 px. Texto Slate-900 sobre fondos claros (contraste >= 4.5:1). */
+:root{
+  --bg:#F8FAFC; --ink:#0F172A; --ink-2:#475569; --line:#E2E8F0;
+  --primary:#4338CA; --primary-h:#3730A3; --ok:#047857; --warn:#B45309; --bad:#B91C1C;
+  --glass:rgba(255,255,255,.86); --radius:12px; --sb:248px; --sb-c:72px;
+  font-family:Inter,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font-size:15px;line-height:1.5}
+body::before{content:"";position:fixed;inset:0;z-index:-1;background:radial-gradient(900px 500px at 10% -10%,#E0E7FF 0,transparent 60%),radial-gradient(700px 400px at 100% 0,#CCFBF1 0,transparent 55%)}
+button{font:inherit;cursor:pointer;transition:background-color .2s,transform .1s,border-color .2s}
+button:active{transform:scale(.97)} :focus-visible{outline:3px solid #A5B4FC;outline-offset:2px}
+.ico{width:20px;height:20px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.app{display:grid;grid-template-columns:var(--sb) 1fr;min-height:100vh;transition:grid-template-columns .25s}
+.app.collapsed{grid-template-columns:var(--sb-c) 1fr}
+/* ControlSidebar */
+.sidebar{background:var(--glass);backdrop-filter:blur(12px);border-right:1px solid var(--line);padding:16px 12px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh;overflow:auto}
+.brand{display:flex;align-items:center;gap:12px;padding:8px;font-weight:700;margin-bottom:8px}
+.brand .logo{width:32px;height:32px;border-radius:8px;background:var(--primary);color:#fff;display:grid;place-items:center;font-weight:700}
+.nav{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:8px;border:0;background:none;color:var(--ink);text-align:left;width:100%;position:relative}
+.nav:hover{background:#EEF2FF} .nav[aria-current=page]{background:#E0E7FF;color:var(--primary-h);font-weight:600}
+.nav .lock{margin-left:auto;color:var(--ink-2)} .nav.locked{color:var(--ink-2)}
+.collapsed .nav span,.collapsed .brand span,.collapsed .sec,.collapsed .lock{display:none}
+.sec{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--ink-2);padding:16px 12px 4px}
+.toggle{margin-top:auto;border:1px solid var(--line);background:#fff;border-radius:8px;padding:8px;display:flex;justify-content:center}
+[data-tip]{position:relative}
+[data-tip]:hover::after,[data-tip]:focus-visible::after{content:attr(data-tip);position:absolute;left:calc(100% + 8px);top:50%;transform:translateY(-50%);background:var(--ink);color:#fff;font-size:12px;padding:4px 8px;border-radius:6px;white-space:nowrap;z-index:20}
+main{padding:24px;max-width:1280px;width:100%}
+h1{font-size:24px;margin:0 0 4px} .sub{color:var(--ink-2);margin:0 0 24px}
+.card{background:var(--glass);backdrop-filter:blur(10px);border:1px solid var(--line);border-radius:var(--radius);padding:20px;box-shadow:0 1px 2px rgba(15,23,42,.04)}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));margin-bottom:16px}
+.kpi b{display:block;font-size:26px;margin-top:4px} .kpi small{color:var(--ink-2)}
+table{width:100%;border-collapse:collapse;font-size:14px} th{text-align:left;color:var(--ink-2);font-weight:600;padding:8px;border-bottom:1px solid var(--line)}
+td{padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:middle} .scroll{overflow-x:auto}
+.btn{border:1px solid var(--line);background:#fff;color:var(--ink);border-radius:8px;padding:8px 12px;display:inline-flex;gap:8px;align-items:center}
+.btn:hover{border-color:var(--primary)} .btn.p{background:var(--primary);color:#fff;border-color:var(--primary)} .btn.p:hover{background:var(--primary-h)}
+.btn.bad{color:var(--bad)} .btn.sm{padding:4px 8px;font-size:13px}
+.tag{display:inline-block;padding:2px 8px;border-radius:999px;font-size:12px;font-weight:600;background:#E2E8F0}
+.tag.Activo,.tag.Aprobada,.tag.ENVIADA{background:#D1FAE5;color:#065F46} .tag.Moroso,.tag.Rechazada,.tag.FALLIDA{background:#FEE2E2;color:#991B1B}
+.tag.Pendiente,.tag.Por{background:#FEF3C7;color:#92400E}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:16px}
+.tabs button{border:1px solid var(--line);background:#fff;border-radius:999px;padding:6px 14px} .tabs button[aria-pressed=true]{background:var(--primary);color:#fff;border-color:var(--primary)}
+.msg{padding:12px;border-radius:8px;margin-bottom:16px} .msg.err{background:#FEE2E2;color:#7F1D1D} .msg.okk{background:#D1FAE5;color:#064E3B}
+.bars{display:flex;align-items:flex-end;gap:6px;height:140px;margin-top:12px} .bars div{flex:1;background:var(--primary);border-radius:4px 4px 0 0;min-height:2px;position:relative}
+.bars div:hover::after{content:attr(data-v);position:absolute;bottom:100%;left:50%;transform:translateX(-50%);font-size:11px;background:var(--ink);color:#fff;padding:2px 6px;border-radius:4px;white-space:nowrap}
+/* Candado premium: pantalla cristal */
+.premium{position:relative;min-height:340px;overflow:hidden}
+.premium .ghost{filter:blur(5px);opacity:.55;pointer-events:none;user-select:none}
+.glass-lock{position:absolute;inset:0;display:grid;place-items:center;background:rgba(255,255,255,.82);backdrop-filter:blur(8px);text-align:center;padding:24px}
+.glass-lock .box{max-width:420px} .glass-lock .ico{width:40px;height:40px;color:var(--primary)}
+.login{max-width:380px;margin:12vh auto;padding:0 16px} label{display:block;font-weight:600;margin:12px 0 4px}
+input,select,textarea{width:100%;padding:10px 12px;border:1px solid #94A3B8;border-radius:8px;font:inherit;background:#fff;color:var(--ink)}
+dialog{border:0;border-radius:var(--radius);max-width:560px;width:92%;padding:20px} dialog::backdrop{background:rgba(15,23,42,.45)} pre{white-space:pre-wrap;background:#F1F5F9;padding:12px;border-radius:8px;font-family:inherit}
+@media(max-width:768px){.app,.app.collapsed{grid-template-columns:var(--sb-c) 1fr} .nav span,.brand span,.sec,.lock{display:none} main{padding:16px}}
+@media(prefers-reduced-motion:reduce){*{transition:none!important}}
