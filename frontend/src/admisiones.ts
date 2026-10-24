@@ -10,10 +10,11 @@ import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
 import { html, montar, raw, type HtmlSeguro } from './lib/html';
 import { icono } from './lib/icons';
 import { bs, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
-import { CLS, aviso, boton, buscar, conBotonOcupado, obtener, todos } from './lib/ui';
+import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
 import type {
   CampoArchivoAdmision,
   ConfigAdmisiones,
+  CuentaPago,
   MetodoPago,
   RespuestaAdmision,
   SolicitudAdmisionTexto,
@@ -24,11 +25,60 @@ import type {
 
 export const MAX_BYTES_ARCHIVO = 5 * 1024 * 1024;
 const INTERVALO_TASA_MS = 30_000;
-const METODOS: readonly MetodoPago[] = ['ZELLE', 'BINANCE', 'PAYPAL', 'PAGO_MOVIL'];
+/** Orden de presentación: primero el método local (bolívares) y luego las divisas. */
+const METODOS: readonly MetodoPago[] = ['PAGO_MOVIL', 'ZELLE', 'BINANCE', 'PAYPAL'];
 const TIPOS_SANGRE: readonly TipoSangre[] = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
 const RE_CEDULA = /^[A-Za-z0-9.-]{4,20}$/;
 const RE_REFERENCIA = /^[A-Za-z0-9-]{4,40}$/;
 const RE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+/** Quita TODO espacio en blanco (pegar «0012 3456» o «ABC 123» deja una referencia válida). */
+export function sanearReferencia(valor: string): string {
+  return valor.replace(/\s+/g, '');
+}
+
+/**
+ * Valida el número de referencia bancaria (mismo patrón que el backend: ^[A-Za-z0-9-]{4,40}$).
+ * Devuelve el mensaje de error o null si es válido. Con `completo = false` (mientras se escribe) no se exige aún el mínimo.
+ */
+export function mensajeReferencia(valor: string, completo = true): string | null {
+  if (valor === '') return completo ? 'Número de referencia: es obligatorio.' : null;
+  if (/\s/.test(valor)) return 'Número de referencia: no puede contener espacios.';
+  if (/[^A-Za-z0-9-]/.test(valor)) return 'Número de referencia: solo letras, números o guiones.';
+  if (valor.length > 40) return 'Número de referencia: máximo 40 caracteres.';
+  if (valor.length < 4) return completo ? 'Número de referencia: mínimo 4 caracteres.' : null;
+  return RE_REFERENCIA.test(valor) ? null : 'Número de referencia: formato no válido.';
+}
+
+/** Moneda en la que se paga con cada método y pasos a seguir (las cuentas concretas llegan de /api/public/admisiones/config). */
+interface InfoMetodo {
+  readonly moneda: 'USD' | 'BS';
+  readonly icono: 'phone' | 'wallet' | 'globe';
+  readonly pasos: readonly string[];
+}
+
+const INFO_METODOS: Readonly<Record<MetodoPago, InfoMetodo>> = {
+  PAGO_MOVIL: {
+    moneda: 'BS',
+    icono: 'phone',
+    pasos: ['Abre la app de tu banco y elige Pago Móvil.', 'Transfiere el monto exacto en bolívares a los datos indicados.', 'Copia el número de referencia que te da el banco y pégalo abajo.'],
+  },
+  ZELLE: {
+    moneda: 'USD',
+    icono: 'wallet',
+    pasos: ['Envía el monto exacto en dólares al contacto de Zelle indicado, a nombre del titular.', 'Guarda el número de confirmación que te entrega tu banco.', 'Pégalo en «Número de referencia».'],
+  },
+  BINANCE: {
+    moneda: 'USD',
+    icono: 'globe',
+    pasos: ['En Binance entra a Pay y envía el monto exacto en dólares al ID o correo indicado.', 'Copia el ID de la orden de la transacción.', 'Pégalo en «Número de referencia».'],
+  },
+  PAYPAL: {
+    moneda: 'USD',
+    icono: 'globe',
+    pasos: ['Envía el monto exacto en dólares al correo de PayPal indicado.', 'Copia el ID de la transacción que muestra PayPal.', 'Pégalo en «Número de referencia».'],
+  },
+};
 
 type NombreTexto = keyof SolicitudAdmisionTexto;
 type TipoControl = 'text' | 'date' | 'email' | 'tel' | 'select';
@@ -43,6 +93,8 @@ interface DefCampo {
   readonly ayuda?: string;
   readonly opciones?: readonly { readonly valor: string; readonly texto: string }[];
   readonly porDefecto?: string;
+  /** Atributos HTML constantes del propio código (nunca datos del usuario). */
+  readonly atributos?: string;
 }
 
 interface DefSeccion {
@@ -106,7 +158,7 @@ const SECCIONES: readonly DefSeccion[] = [
         requerido: true,
         opciones: METODOS.map((m) => ({ valor: m, texto: nombreMetodo(m) })),
       },
-      { nombre: 'referencia_bancaria', etiqueta: 'Número de referencia', tipo: 'text', requerido: true, maximo: 40, ayuda: 'De 4 a 40 caracteres: letras, números o guiones, sin espacios.' },
+      { nombre: 'referencia_bancaria', etiqueta: 'Número de referencia bancaria', tipo: 'text', requerido: true, maximo: 40, ayuda: 'Cópiala tal como la muestra tu banco o billetera: de 4 a 40 letras, números o guiones, sin espacios.', atributos: 'spellcheck="false" autocapitalize="characters"' },
     ],
   },
 ];
@@ -224,8 +276,9 @@ export function validarTextos(v: SolicitudAdmisionTexto, hoy: string = hoyCaraca
   if (v.emergencia_telefono && !ya('emergencia_telefono') && normalizarTelefono(v.emergencia_telefono) === null) {
     agregar('emergencia_telefono', 'Teléfono de emergencia: debe tener entre 10 y 15 dígitos incluyendo el código de país.');
   }
-  if (!ya('referencia_bancaria') && !RE_REFERENCIA.test(v.referencia_bancaria)) {
-    agregar('referencia_bancaria', 'Número de referencia: de 4 a 40 caracteres (letras, números o guiones, sin espacios).');
+  if (!ya('referencia_bancaria')) {
+    const problema = mensajeReferencia(v.referencia_bancaria);
+    if (problema) agregar('referencia_bancaria', problema);
   }
   return errores;
 }
@@ -266,7 +319,7 @@ export function leerTextos(formulario: HTMLFormElement): SolicitudAdmisionTexto 
     telefono_codigo: t('telefono_codigo'),
     telefono_numero: t('telefono_numero'),
     metodo_pago: esMetodoPago(metodo) ? metodo : 'ZELLE',
-    referencia_bancaria: t('referencia_bancaria'),
+    referencia_bancaria: sanearReferencia(t('referencia_bancaria')),
   };
 }
 
@@ -312,7 +365,7 @@ function controlHtml(def: DefCampo): HtmlSeguro {
     control = html`<select id="${id}" name="${def.nombre}" class="${CLS.input}" aria-describedby="${descrito}" ${def.requerido ? raw('required') : null}>${(def.opciones ?? []).map((o) => html`<option value="${o.valor}">${o.texto}</option>`)}</select>`;
   } else {
     const extra = def.tipo === 'date' ? html` min="1990-01-01" max="${hoyCaracas()}"` : html`${def.maximo ? html` maxlength="${def.maximo}"` : null}`;
-    control = html`<input id="${id}" name="${def.nombre}" type="${def.tipo}" class="${CLS.input}" value="${def.porDefecto ?? ''}" autocomplete="${def.autocompletar ?? 'off'}" aria-describedby="${descrito}"${extra} ${def.requerido ? raw('required') : null}>`;
+    control = html`<input id="${id}" name="${def.nombre}" type="${def.tipo}" class="${CLS.input}" value="${def.porDefecto ?? ''}" autocomplete="${def.autocompletar ?? 'off'}" aria-describedby="${descrito}"${extra} ${def.atributos ? raw(def.atributos) : null} ${def.requerido ? raw('required') : null}>`;
   }
   return html`<div>
     <label for="${id}" class="${CLS.etiqueta}">${def.etiqueta}${estrella}</label>
@@ -333,11 +386,17 @@ function archivoHtml(def: DefArchivo): HtmlSeguro {
   </div>`;
 }
 
-function seccionHtml(s: DefSeccion): HtmlSeguro {
-  const bloqueCuentas = s.id === 'pago' ? html`<div class="sm:col-span-2" id="cuentas-pago"></div>` : null;
+/** Número de paso (1–5) en un círculo: guía el orden de la planilla sin depender del color. */
+function encabezadoSeccion(id: string, numero: number, titulo: string): HtmlSeguro {
+  return html`<h2 id="t-${id}" class="mb-4 flex items-center gap-3 text-base font-bold text-slate-900"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-bold text-white" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
+}
+
+function seccionHtml(s: DefSeccion, numero: number): HtmlSeguro {
+  // En el paso de pago las instrucciones de las cuentas van PRIMERO: se paga y luego se anota la referencia.
+  const bloqueCuentas = s.id === 'pago' ? html`<div class="sm:col-span-2" id="cuentas-pago" aria-live="polite"></div>` : null;
   return html`<section class="${CLS.tarjeta} p-6" aria-labelledby="t-${s.id}">
-    <h2 id="t-${s.id}" class="mb-4 text-base font-bold text-slate-900">${s.titulo}</h2>
-    <div class="grid gap-4 sm:grid-cols-2">${s.campos.map(controlHtml)}${bloqueCuentas}</div>
+    ${encabezadoSeccion(s.id, numero, s.titulo)}
+    <div class="grid gap-4 sm:grid-cols-2">${bloqueCuentas}${s.campos.map(controlHtml)}</div>
   </section>`;
 }
 
@@ -356,12 +415,12 @@ function esqueleto(): HtmlSeguro {
     <div id="resumen-errores" tabindex="-1"></div>
 
     <form id="planilla" novalidate class="flex flex-col gap-6" aria-label="Planilla de inscripción">
-      ${SECCIONES.slice(0, 3).map(seccionHtml)}
+      ${SECCIONES.slice(0, 3).map((s, i) => seccionHtml(s, i + 1))}
       <section class="${CLS.tarjeta} p-6" aria-labelledby="t-documentos">
-        <h2 id="t-documentos" class="mb-4 text-base font-bold text-slate-900">Documentos obligatorios</h2>
+        ${encabezadoSeccion('documentos', 4, 'Documentos obligatorios')}
         <div class="grid gap-4 sm:grid-cols-2">${ARCHIVOS.map(archivoHtml)}</div>
       </section>
-      ${seccionHtml(SECCIONES[3] ?? { id: 'pago', titulo: 'Pago', campos: [] })}
+      ${seccionHtml(SECCIONES[3] ?? { id: 'pago', titulo: 'Pago', campos: [] }, 5)}
       <button id="enviar" type="submit" class="${boton(CLS.btnPrimario, 'w-full py-3 text-base')}">${icono('upload', 'h-5 w-5')}<span>Enviar inscripción</span></button>
       <p class="text-center text-xs text-slate-600">Los campos con <span aria-hidden="true">*</span><span class="sr-only">asterisco</span> son obligatorios.</p>
     </form>
@@ -378,12 +437,6 @@ function costoHtml(): HtmlSeguro {
     return html`${titulo}<div class="mt-4">${aviso('bad', errorConfig ?? 'No se pudo cargar el costo de la matrícula.')}</div>
       <button type="button" id="reintentar" class="${boton(CLS.btnSecundario, 'mt-4')}">${icono('refresh', 'h-4 w-4')}<span>Reintentar</span></button>`;
   }
-  const cuentas =
-    config.cuentas.length === 0
-      ? html`<p class="${CLS.ayuda}">Consulta los datos de pago con la administración.</p>`
-      : html`<ul class="mt-2 grid gap-2 sm:grid-cols-2">${config.cuentas.map(
-          (c) => html`<li class="rounded-lg border border-slate-200 bg-white/95 p-3 text-sm"><p class="font-semibold text-slate-900">${nombreMetodo(c.metodo)}</p><p class="break-words text-slate-700">${c.detalle}</p><p class="text-xs text-slate-600">Titular: ${c.titular}</p></li>`,
-        )}</ul>`;
   return html`${titulo}
     <div class="mt-4 flex flex-wrap items-end gap-x-6 gap-y-2">
       <p class="text-3xl font-bold text-slate-900" data-usd>${usd(config.matricula_usd)}</p>
@@ -395,7 +448,7 @@ function costoHtml(): HtmlSeguro {
       <button type="button" id="actualizar-tasa" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">${icono('refresh', 'h-4 w-4')}<span>Actualizar</span></button>
     </p>
     ${config.tasa_desactualizada ? html`<div class="mt-4">${aviso('warn', 'El BCV no respondió en este momento: se muestra la última tasa disponible. El monto exacto se confirma al enviar.')}</div>` : null}
-    <h3 class="mt-6 text-sm font-semibold text-slate-900">Cuentas para pagar</h3>${cuentas}`;
+    <p class="mt-4 text-sm text-slate-700">Las cuentas autorizadas y los pasos para pagar están en el <a href="#t-pago" class="font-semibold text-slate-900 underline">paso 5 · Pago de la matrícula</a>.</p>`;
 }
 
 function pintarCosto(): void {
@@ -403,6 +456,110 @@ function pintarCosto(): void {
   montar(zona, costoHtml());
   buscar('#reintentar', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
   buscar('#actualizar-tasa', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
+  pintarCuentas();
+}
+
+// ───────────────────────── Cuentas autorizadas (instrucciones de pago dinámicas) ─────────────────────────
+
+const montoEn = (config: ConfigAdmisiones, moneda: InfoMetodo['moneda']): string => (moneda === 'BS' ? bs(config.matricula_bs) : usd(config.matricula_usd));
+
+function cuentaHtml(c: CuentaPago): HtmlSeguro {
+  return html`<div class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
+    <p class="break-words font-semibold text-slate-900">${c.detalle}</p>
+    <p class="text-xs text-slate-600">Titular: ${c.titular}</p>
+    <button type="button" data-copiar="${c.detalle}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'mt-2')}" aria-label="Copiar los datos de ${nombreMetodo(c.metodo)}">${icono('copy', 'h-4 w-4')}<span>Copiar datos</span></button>
+  </div>`;
+}
+
+function tarjetaMetodoHtml(config: ConfigAdmisiones, metodo: MetodoPago, cuentas: readonly CuentaPago[], elegido: boolean): HtmlSeguro {
+  const info = INFO_METODOS[metodo];
+  return html`<article role="listitem" data-metodo="${metodo}" class="flex flex-col gap-3 rounded-xl border bg-white/95 p-4 shadow-sm ${elegido ? 'border-slate-900 ring-2 ring-slate-900' : 'border-slate-200'}">
+    <header class="flex items-center justify-between gap-3">
+      <h3 class="flex items-center gap-2 text-sm font-bold text-slate-900">${icono(info.icono, 'h-5 w-5')}<span>${nombreMetodo(metodo)}</span></h3>
+      ${elegido ? etiqueta('Seleccionado', 'ok') : null}
+    </header>
+    <p class="text-lg font-bold text-slate-900">${montoEn(config, info.moneda)} <span class="text-xs font-medium text-slate-600">· monto exacto${info.moneda === 'BS' ? ` a tasa BCV ${formatoTasa(config.tasa_bcv)}` : ''}</span></p>
+    ${cuentas.map(cuentaHtml)}
+    <ol class="flex list-decimal flex-col gap-1 pl-6 text-xs text-slate-700">${info.pasos.map((p) => html`<li>${p}</li>`)}</ol>
+    <button type="button" data-elegir="${metodo}" aria-pressed="${elegido}" class="${boton(elegido ? CLS.btnPrimario : CLS.btnSecundario, 'mt-auto')}">${elegido ? 'Método seleccionado' : 'Pagaré con este método'}</button>
+  </article>`;
+}
+
+function cuentasHtml(config: ConfigAdmisiones, elegido: string): HtmlSeguro {
+  const grupos = METODOS.map((m) => ({ metodo: m, cuentas: config.cuentas.filter((c) => c.metodo === m) })).filter((g) => g.cuentas.length > 0);
+  if (grupos.length === 0) {
+    return aviso('warn', 'Aún no hay cuentas de pago habilitadas. Consulta los datos de pago con la administración antes de enviar la planilla.');
+  }
+  return html`<p class="mb-3 text-sm text-slate-700">Paga el monto exacto en una de las cuentas autorizadas, elige el método que usaste y anota abajo el número de referencia.</p>
+    <div class="grid gap-4 sm:grid-cols-2" role="list" aria-label="Cuentas autorizadas para el pago">${grupos.map((g) => tarjetaMetodoHtml(config, g.metodo, g.cuentas, g.metodo === elegido))}</div>`;
+}
+
+const metodoElegido = (): string => buscar('#f-metodo_pago', HTMLSelectElement)?.value ?? '';
+
+let ultimoHtmlCuentas = '';
+
+/** Redibuja las tarjetas solo si cambió algo (tasa, cuentas o método elegido) y devuelve el foco al botón que lo tenía. */
+function pintarCuentas(): void {
+  const zona = buscar('#cuentas-pago', HTMLElement);
+  if (!zona || !estado.config) return;
+  const contenido = cuentasHtml(estado.config, metodoElegido());
+  if (contenido.valor === ultimoHtmlCuentas && zona.childElementCount > 0) return;
+  const activo = document.activeElement;
+  const clave = activo instanceof HTMLElement && zona.contains(activo) ? (activo.dataset['elegir'] ? `[data-elegir="${CSS.escape(activo.dataset['elegir'])}"]` : null) : null;
+  ultimoHtmlCuentas = contenido.valor;
+  montar(zona, contenido);
+  if (clave) buscar(clave, HTMLElement, zona)?.focus();
+}
+
+function seleccionarMetodo(valor: string): void {
+  if (!esMetodoPago(valor)) return;
+  const selector = buscar('#f-metodo_pago', HTMLSelectElement);
+  if (!selector) return;
+  selector.value = valor;
+  pintarCuentas();
+}
+
+/** Copia al portapapeles (API moderna con plan B para navegadores sin permiso) y avisa del resultado. */
+async function copiarTexto(texto: string): Promise<void> {
+  try {
+    if (navigator.clipboard) {
+      await navigator.clipboard.writeText(texto);
+      notificar('ok', 'Datos copiados al portapapeles.', 3_000);
+      return;
+    }
+  } catch {
+    /* sin permiso: se intenta el plan B */
+  }
+  const area = document.createElement('textarea');
+  area.value = texto;
+  area.setAttribute('readonly', '');
+  area.className = 'fixed left-0 top-0 opacity-0';
+  document.body.append(area);
+  area.select();
+  let copiado = false;
+  try {
+    copiado = document.execCommand('copy');
+  } catch {
+    copiado = false;
+  }
+  area.remove();
+  notificar(copiado ? 'ok' : 'warn', copiado ? 'Datos copiados al portapapeles.' : 'No se pudo copiar automáticamente: selecciona los datos y cópialos.', 4_000);
+}
+
+/** Validación en vivo del número de referencia: sin espacios, solo letras/números/guiones. */
+function validarReferenciaEnVivo(control: HTMLInputElement, completo: boolean): void {
+  const problema = mensajeReferencia(control.value, completo);
+  const texto = buscar('#e-referencia_bancaria', HTMLElement);
+  if (!texto) return;
+  if (problema) {
+    texto.textContent = problema;
+    texto.hidden = false;
+    control.setAttribute('aria-invalid', 'true');
+  } else {
+    texto.textContent = '';
+    texto.hidden = true;
+    control.removeAttribute('aria-invalid');
+  }
 }
 
 // ───────────────────────── Carga de la tasa BCV ─────────────────────────
@@ -570,6 +727,28 @@ function iniciar(): void {
   for (const control of todos('input[type="file"]', HTMLInputElement, formulario)) {
     control.addEventListener('change', () => mostrarArchivoElegido(control));
   }
+
+  // Cuentas de pago: copiar datos y elegir método desde las tarjetas (delegación: las tarjetas se redibujan con la tasa).
+  obtener('#cuentas-pago', HTMLElement).addEventListener('click', (ev) => {
+    const origen = ev.target instanceof Element ? ev.target : null;
+    const copiar = origen?.closest('[data-copiar]');
+    if (copiar instanceof HTMLElement) {
+      void copiarTexto(copiar.dataset['copiar'] ?? '');
+      return;
+    }
+    const elegir = origen?.closest('[data-elegir]');
+    if (elegir instanceof HTMLElement) seleccionarMetodo(elegir.dataset['elegir'] ?? '');
+  });
+  obtener('#f-metodo_pago', HTMLSelectElement).addEventListener('change', pintarCuentas);
+
+  // Referencia bancaria: se quitan los espacios al escribir/pegar y se valida el patrón al instante.
+  const referencia = obtener('#f-referencia_bancaria', HTMLInputElement);
+  referencia.addEventListener('input', () => {
+    const limpio = sanearReferencia(referencia.value);
+    if (limpio !== referencia.value) referencia.value = limpio;
+    validarReferenciaEnVivo(referencia, false);
+  });
+  referencia.addEventListener('blur', () => validarReferenciaEnVivo(referencia, referencia.value !== ''));
 
   void refrescarConfig(false);
   window.setInterval(() => {

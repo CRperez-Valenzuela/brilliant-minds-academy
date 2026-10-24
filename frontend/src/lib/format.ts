@@ -47,7 +47,7 @@ export function esVencida(fechaVencimiento: string): boolean {
 
 export const NOMBRE_METODO: Readonly<Record<string, string>> = {
   ZELLE: 'Zelle',
-  BINANCE: 'Binance',
+  BINANCE: 'Binance Pay',
   PAYPAL: 'PayPal',
   PAGO_MOVIL: 'Pago Móvil',
 };
