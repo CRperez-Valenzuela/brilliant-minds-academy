@@ -20,6 +20,12 @@ function booleano(nombre, defecto) {
   return v.toLowerCase() === 'true';
 }
 
+function horaHHMM(nombre, defecto) {
+  const v = process.env[nombre] || defecto;
+  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) throw new Error(`[env] ${nombre} debe tener el formato HH:MM de 24 h (recibido: ${v})`);
+  return v;
+}
+
 function validarProduccion(cfg) {
   const faltan = [];
   if (!cfg.jwt.secret || cfg.jwt.secret.length < 32) faltan.push('JWT_SECRET (>= 32 caracteres)');
@@ -69,6 +75,17 @@ const config = Object.freeze({
     token: process.env.WHATSAPP_TOKEN || '',
     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
     graphVersion: process.env.GRAPH_API_VERSION || 'v20.0',
+  }),
+  // Bot de envío masivo (módulo premium WHATSAPP_AUTOMATICO). Sin WHATSAPP_CRON_ACTIVO explícito solo arranca en producción;
+  // aun activo, cada ciclo exige que el módulo esté habilitado (contratado o en prueba vigente).
+  whatsappCron: Object.freeze({
+    activo: booleano('WHATSAPP_CRON_ACTIVO', ES_PRODUCCION),
+    hora: horaHHMM('WHATSAPP_CRON_HORA', '08:00'), // hora de Caracas (UTC-4)
+    delayMs: entero('WHATSAPP_CRON_DELAY_MS', 1500), // pausa entre envíos para no ser baneado por Meta
+    maxEnviosPorCiclo: entero('WHATSAPP_CRON_MAX_ENVIOS', 400),
+    morosidadCadaDias: entero('WHATSAPP_CRON_MOROSIDAD_CADA_DIAS', 7), // no repetir el cobro al mismo estudiante antes de N días
+    maxFallosSeguidos: entero('WHATSAPP_CRON_MAX_FALLOS_SEGUIDOS', 5), // corta el ciclo si Meta/la base fallan en cadena
+    arrendamientoMin: entero('WHATSAPP_CRON_LEASE_MIN', 120), // candado entre instancias (ver cron/whatsappCron.js)
   }),
   portalBaseUrl: (process.env.PORTAL_BASE_URL || 'http://localhost:3000').replace(/\/+$/, ''),
   admisiones: Object.freeze({

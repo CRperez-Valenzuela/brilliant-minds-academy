@@ -1,0 +1,3097 @@
+diff --git a/.env.example b/.env.example
+index 1368812..81152ea 100644
+--- a/.env.example
++++ b/.env.example
+@@ -43,6 +43,11 @@ BCV_TIMEOUT_MS=6000
+ BCV_MAX_ANTIGUEDAD_HORAS=24
+ 
+ # ── WhatsApp Business (Meta Cloud API) ────────────────────
++# Alertas automáticas de WhatsApp (módulo premium). El temporizador interno corre a diario a CRON_WHATSAPP_HORA (hora de Caracas).
++# Con un programador externo usa CRON_WHATSAPP=false y `npm run cron:whatsapp`.
++CRON_WHATSAPP=true
++CRON_WHATSAPP_HORA=8
++CRON_WHATSAPP_PAUSA_MS=1500
+ WHATSAPP_TOKEN=
+ WHATSAPP_PHONE_NUMBER_ID=
+ GRAPH_API_VERSION=v20.0
+diff --git a/CAMBIOS_BMA_MULTISEDE.md b/CAMBIOS_BMA_MULTISEDE.md
+new file mode 100644
+index 0000000..3da8a31
+--- /dev/null
++++ b/CAMBIOS_BMA_MULTISEDE.md
+@@ -0,0 +1,83 @@
++# CAMBIOS_BMA_MULTISEDE — Multi-sede, invitaciones con nivel blindado y prueba Premium de 15 días
++
++**Proyecto:** Brilliant Minds Academy · **Rama:** `development` · **Agente:** Arquitecto Principal, Astra Digital Solutions
++**Motor:** PostgreSQL 15+ / Supabase (`pg` nativo, parámetros posicionales `$1…$n`, errores JSON estables). No queda rastro de MSSQL.
++
++## Verificación realizada
++
++| Verificación | Resultado |
++|---|---|
++| `npm test` sin base de datos (unitarias + auditoría estática SQL↔código + cableado de sede) | 91 OK · 0 fallos · 44 omitidas (las de integración) |
++| `PG_TEST_PORT=… npm test` contra un **PostgreSQL 16 real** (incluye las 44 de integración) | **135/135** |
++| Migraciones 001–007 aplicadas dos veces y cuerpos de 005–007 re-ejecutados a mano | OK (idempotentes) |
++| RLS/REVOKE con roles `anon`/`authenticated` simulados sobre `sedes` e `invitaciones_inscripcion` | OK (SQLSTATE 42501) |
++| Frontend: `tsc --noEmit` sobre `frontend/src` + bundle con esbuild + prueba en Chromium (Playwright) del formulario con la API simulada | OK |
++
++**Límites honestos**
++- `pg` real, `vite` y `tailwindcss` **no se pudieron instalar** (el registro de npm no respondió). La integración usó `tests/helpers/pg-minimo.js` (mismo protocolo que `pg`). No se probó contra Supabase en la nube ni con TLS.
++- **`public/` NO se regeneró** (es salida de Vite con hashes). Ejecuta `npm run frontend:install && npm run frontend:build` para que `public/admisiones/index.html` y `public/assets/*` incluyan los cambios de `frontend/src`. Las tres clases Tailwind del bloqueo (`bg-slate-100 pointer-events-none select-none`) ya existen en el CSS compilado actual.
++- El `.patch` incluye código fuente, migraciones, pruebas y este `.md`; no incluye la salida compilada.
++
++## Decisiones y desviaciones respecto al enunciado (revísalas)
++
++| Enunciado | Qué se hizo y por qué |
++|---|---|
++| `dbo.sedes`, `dbo.invitaciones_inscripcion` | Tablas en el esquema **`public`** (`sedes`, `invitaciones_inscripcion`). `dbo.` es MSSQL: el test estático del repo lo rechaza y Supabase usa `public`. |
++| Modificar `public/admisiones/index.html` "en TypeScript" | `public/` es salida compilada. El cambio está en `frontend/src/admisiones.ts` (+ tipos); hay que recompilar (ver arriba). |
++| Bloqueo del nivel con clases Tailwind | Las clases son solo la señal visual. **El servidor impone el nivel y la sede**: ignora el grado enviado y toma `nivel_asignado` de la invitación; el enlace se consume de forma atómica (un solo uso). |
++| `sede_id` NULL = consolidado | Solo para `rol = 'admin'`. **Fail-closed:** una secretaria sin sede (o un token anterior a la migración) recibe `403 SEDE_NO_ASIGNADA`; nunca se trata como global. |
++| `sede_id` en `usuarios_admin, estudiantes, cuotas, egresos, pagos_referencias` | Más `cuentas_pago.sede_id` (NULL = cuenta común): el portal de invitación muestra las cuentas **de la sede**. Cuotas y pagos heredan la sede del estudiante por trigger. |
++| Filtro `WHERE sede_id = $n` | Predicado `($n::int IS NULL OR x.sede_id = $n::int)` con el parámetro **siempre enlazado** (un usuario de sede solo ve su sede; el consolidado ve todo). Un dato con `sede_id` NULL solo lo ve el consolidado. |
++| Personal, horas, nómina | No tienen sede → solo acceso consolidado (admin sin sede), igual que `/configuracion` y el Excel contable. Egresos y balance sí respetan la sede. |
++| Cron "a las 8:00 AM Caracas" | Temporizador en proceso (sin dependencias nuevas) a las 08:00 UTC-4 (= 12:00 UTC) + reclamación diaria atómica en `parametros` (varias instancias o un reinicio no duplican). Alternativa externa: `npm run cron:whatsapp`. |
++| CHECK condicional de sede por rol | No se añadió a la base (rompería a las secretarias existentes sin sede); se impone en `crear-admin.js` y, sobre todo, en `alcanceDe()` (fail-closed). |
++
++**Operación inicial:** tras migrar, los estudiantes/cuotas/pagos existentes quedan con `sede_id` NULL (visibles solo en vista consolidada). Para asignarlos: crear sedes (`POST /api/sedes`), `UPDATE estudiantes SET sede_id = … ` y re-asignar secretarias (`ADMIN_ROL=secretaria ADMIN_SEDE_ID=<id> npm run crear-admin`). El JWT lleva `sede_id`: un cambio de sede se refleja al volver a iniciar sesión (≤ 8 h).
++
++## Migraciones creadas (idempotentes, una transacción por archivo)
++
++| Archivo | Contenido |
++|---|---|
++| `database/migrations/005_multisede.sql` | Tabla `sedes`; `sede_id` NULLABLE + FK + índices en `usuarios_admin`, `estudiantes`, `cuotas`, `egresos`, `pagos_referencias`, `cuentas_pago`; función/trigger `fn_heredar_sede_estudiante` (`search_path` fijo, `REVOKE` a PUBLIC); relleno de lo existente; `vw_estudiantes_estado` con `sede_id` al final; RLS + REVOKE de `sedes`. |
++| `database/migrations/006_invitaciones_inscripcion.sql` | `invitaciones_inscripcion` (`token_hash CHAR(64)` único, `sede_id`, `nivel_asignado`, `estado` Pendiente/Usada/Revocada, `expira_en TIMESTAMPTZ`, `estudiante_id`, `usada_en`) + RLS/REVOKE. |
++| `database/migrations/007_prueba_premium.sql` | `modulos_premium.prueba_inicio / prueba_expira_en / prueba_usada` + CHECK de ventana coherente. |
++
++## Archivos creados
++
++| Archivo | Para qué |
++|---|---|
++| `utils/alcance.js` | `alcanceDe(usuario)` (fail-closed) y `requireConsolidado`. |
++| `services/sedes.service.js`, `controllers/sedes.controller.js` | Sedes (listar/crear/activar) e invitaciones (crear/listar/revocar). |
++| `services/invitaciones.service.js` | Token 48-hex con SHA-256 en BD, `resolver`, `consumir` atómico, `revocar`, estado efectivo "Vencida". |
++| `modules/premium/prueba.service.js` | `activarPrueba`: un `UPDATE` condicional atómico (15 días, una vez por módulo). |
++| `modules/premium/whatsapp-cron.js`, `scripts/cron-whatsapp.js` | Ciclo diario por sede: Preventiva (3–5 días) → Morosidad, secuencial, pausa de 1,5 s, sin duplicar el mismo día. |
++| `tests/multisede.test.js` | 12 pruebas unitarias (reloj del cron, guard con prueba, alcance, JWT, formulario con invitación). |
++| `CAMBIOS_BMA_MULTISEDE.md`, `bma-multisede.patch` | Este resumen y el parche unificado. |
++
++## Archivos modificados
++
++| Archivo | Cambio |
++|---|---|
++| `middlewares/auth.js`, `controllers/auth.controller.js` | `sede_id` en login, JWT y `req.usuario`. |
++| `services/crm`, `facturacion`, `pagos`, `contabilidad` (egresos/balance), `notificaciones`, `exportacion` `.service.js` | Parámetro `sedeId` (NULL = consolidado) con el predicado de sede; fuera de sede ⇒ `404`. |
++| `controllers/crm`, `facturacion`, `contabilidad`, `notificaciones`, `exportaciones`, `configuracion` `.controller.js` | Resuelven `alcanceDe(req.usuario)`; las cuentas de cobro admiten `sede_id`. |
++| `services/parametros.service.js`, `portal.service.js` | `cuentasActivas(ejecutor, sedeId)`: comunes + las de la sede; sin sede, solo las comunes. |
++| `services/admisiones.service.js`, `controllers/admisiones.controller.js` | `configInvitacion`; `registrarInscripcion` con `invitacion` (nivel y sede del servidor, consumo atómico en la misma transacción); `GET /api/public/admisiones/invitacion/:token`; token mal formado ⇒ 422, enlace inválido ⇒ 410 `INVITACION_NO_VALIDA`. |
++| `routes/index.js` | Rutas de sedes e invitaciones, ruta pública de invitación, `soloConsolidado` en personal/horas/nómina/configuración/Excel contable. |
++| `modules/premium/guard.js`, `premium.routes.js` | Acceso = contratado **o** prueba vigente, evaluado en vivo (bloqueo automático al vencer, sin tareas de limpieza); `POST /api/premium/activar-prueba` (admin consolidado); el catálogo expone `en_prueba`, `prueba_expira_en`, `prueba_disponible`. |
++| `config/env.js`, `.env.example`, `server.js`, `package.json` | `CRON_WHATSAPP`, `CRON_WHATSAPP_HORA`, `CRON_WHATSAPP_PAUSA_MS`; arranque/parada del cron; script `cron:whatsapp`. |
++| `utils/fechas.js` | `proximaEjecucionCaracas`. |
++| `scripts/crear-admin.js` | `ADMIN_ROL` y `ADMIN_SEDE_ID` opcionales (nunca borra la sede de un usuario existente). |
++| `middlewares/errorHandler.js` | Los tokens de invitación/portal se ocultan en los logs de errores 5xx. |
++| `frontend/src/admisiones.ts`, `frontend/src/types/index.ts` | `?invitacion=` → consulta la configuración de la invitación, campo «Grado a cursar» bloqueado (`readonly` + `bg-slate-100 pointer-events-none select-none`), banner de sede y nivel, envío del token; enlace inválido ⇒ planilla oculta. |
++| `frontend/src/admin.ts` | Botón «Activar prueba gratuita de 15 días» (solo admin consolidado) y aviso de prueba vigente. |
++| `tests/schema-consistencia.test.js`, `tests/integracion.pg.test.js`, `tests/facturacion-tablero.test.js` | Parser con `ALTER TABLE … ADD COLUMN`, RLS en 19 tablas, cableado de alcance; 10 pruebas de integración nuevas (aislamiento por sede, invitaciones, concurrencia, prueba, cron); tablero con el parámetro de sede. |
++
++## Contratos nuevos de la API
++
++- `GET /api/public/admisiones/invitacion/:token` → `{ sede:{id,nombre}, nivel_asignado, matricula_usd, tasa_bcv, matricula_bs, tasa_desactualizada, cuentas[] }` · `410 INVITACION_NO_VALIDA`.
++- `POST /api/public/admisiones` acepta `invitacion` (token); con él el grado enviado se descarta.
++- `POST /api/invitaciones` `{ nivel_asignado, dias?, sede_id? }` → devuelve `token` y `enlace` **una sola vez** · `GET /api/invitaciones` · `POST /api/invitaciones/:id/revocar`.
++- `GET /api/sedes` · `POST /api/sedes` · `POST /api/sedes/:id/activar|desactivar` (los dos últimos, consolidado).
++- `POST /api/premium/activar-prueba` `{ modulo? = WHATSAPP_AUTOMATICO }` → `201 { dias:15, prueba_expira_en }` · `409 PRUEBA_YA_UTILIZADA | MODULO_YA_CONTRATADO`.
++- Errores nuevos: `403 SEDE_NO_ASIGNADA`, `409 SEDE_DUPLICADA`, `422 SEDE_INACTIVA`, `409 INVITACION_NO_REVOCABLE`.
+diff --git a/config/env.js b/config/env.js
+index 35e1720..f666fc7 100644
+--- a/config/env.js
++++ b/config/env.js
+@@ -70,6 +70,12 @@ const config = Object.freeze({
+     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+     graphVersion: process.env.GRAPH_API_VERSION || 'v20.0',
+   }),
++  cron: Object.freeze({
++    // Alertas automáticas de WhatsApp (módulo premium): temporizador interno diario. Con varias instancias no duplica (reclamación en BD).
++    whatsappActivo: booleano('CRON_WHATSAPP', true),
++    hora: Math.min(23, entero('CRON_WHATSAPP_HORA', 8)), // hora de pared en Caracas (UTC-4)
++    pausaMs: entero('CRON_WHATSAPP_PAUSA_MS', 1500),
++  }),
+   portalBaseUrl: (process.env.PORTAL_BASE_URL || 'http://localhost:3000').replace(/\/+$/, ''),
+   admisiones: Object.freeze({
+     maxArchivoMb: entero('ADMISIONES_MAX_ARCHIVO_MB', 5),
+diff --git a/controllers/admisiones.controller.js b/controllers/admisiones.controller.js
+index c18300d..ad8313f 100644
+--- a/controllers/admisiones.controller.js
++++ b/controllers/admisiones.controller.js
+@@ -8,6 +8,7 @@ const { detectarTipo } = require('../utils/archivos');
+ const { Semaforo } = require('../utils/semaforo');
+ const { asyncHandler, ok } = require('../utils/http');
+ const admisiones = require('../services/admisiones.service');
++const invitaciones = require('../services/invitaciones.service');
+ 
+ const METODOS = ['ZELLE', 'BINANCE', 'PAYPAL', 'PAGO_MOVIL'];
+ const CEDULA = { patron: /^[A-Za-z0-9.-]{4,20}$/, mensajePatron: 'Solo letras, números, puntos y guiones (4 a 20).' };
+@@ -17,7 +18,9 @@ const REGLAS = {
+   alumno_apellidos: { requerido: true, max: 100 },
+   alumno_cedula: { max: 20, ...CEDULA },
+   alumno_fecha_nacimiento: { tipo: 'fechaPasada', requerido: true, min: '1990-01-01' },
+-  grado_solicitado: { requerido: true, max: 60 },
++  // Con invitación el nivel lo fija el servidor (nivel_asignado) y el campo puede no llegar: la obligatoriedad se evalúa en prepararInscripcion.
++  grado_solicitado: { max: 60 },
++  invitacion: { max: 48, patron: /^[a-f0-9]{48}$/, mensajePatron: 'El enlace de invitación no es válido.' },
+   colegio_procedencia: { max: 150 },
+   ultimo_grado_aprobado: { max: 60 },
+   tipo_sangre: { tipo: 'enum', valores: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'] },
+@@ -49,6 +52,9 @@ function prepararInscripcion(body, files) {
+     if (err instanceof AppError) detalles.push(...err.detalles); else throw err;
+   }
+ 
++  // Sin invitación el nivel lo elige la familia (obligatorio). Se lee del cuerpo crudo: si `validar` falló, `datos` está vacío y no debe duplicar errores.
++  if (!body.invitacion && !String(body.grado_solicitado ?? '').trim()) detalles.push({ campo: 'grado_solicitado', mensaje: 'Es obligatorio.' });
++
+   const unir = (campo, ...partes) => {
+     try {
+       return sanitizarTelefono(...partes);
+@@ -97,10 +103,15 @@ const cargaArchivos = multer({
+ 
+ const config = asyncHandler(async (_req, res) => ok(res, await admisiones.configPublica()));
+ 
++/** GET /api/public/admisiones/invitacion/:token → sede, cuentas de cobro de la sede y nivel_asignado (bloqueado). 410 si el enlace no sirve. */
++const invitacion = asyncHandler(async (req, res) => ok(res, await admisiones.configInvitacion(req.params.token)));
++
+ const inscribir = asyncHandler(async (req, res) => {
+   const { datos, archivos } = prepararInscripcion(req.body || {}, req.files);
+-  const resultado = await admisiones.registrarInscripcion({ datos, archivos });
++  // Con enlace de invitación: se resuelve en el servidor (sede + nivel). Lo que el cliente haya puesto en el campo de nivel se descarta.
++  const inv = datos.invitacion ? await invitaciones.resolver(datos.invitacion) : null;
++  const resultado = await admisiones.registrarInscripcion({ datos, archivos, invitacion: inv });
+   ok(res, resultado, 201);
+ });
+ 
+-module.exports = { config, inscribir, limitarConcurrencia, cargaArchivos, prepararInscripcion };
++module.exports = { config, invitacion, inscribir, limitarConcurrencia, cargaArchivos, prepararInscripcion };
+diff --git a/controllers/auth.controller.js b/controllers/auth.controller.js
+index deffe47..6376f23 100644
+--- a/controllers/auth.controller.js
++++ b/controllers/auth.controller.js
+@@ -12,11 +12,11 @@ const HASH_SENTINELA = bcrypt.hashSync('sentinela-no-es-una-clave-real', 12);
+ const login = asyncHandler(async (req, res) => {
+   const { email, password } = validar(req.body, { email: { tipo: 'email', requerido: true, max: 160 }, password: { requerido: true, max: 200 } });
+   // `validar` ya normaliza el correo a minúsculas y crear-admin lo guarda así (PostgreSQL compara con distinción de mayúsculas).
+-  const r = await ejecutar('SELECT id, nombre, email, password_hash, rol FROM usuarios_admin WHERE email = $1 AND activo = TRUE', [email]);
++  const r = await ejecutar('SELECT id, nombre, email, password_hash, rol, sede_id FROM usuarios_admin WHERE email = $1 AND activo = TRUE', [email]);
+   const u = r.rows[0];
+   const coincide = await bcrypt.compare(password, u ? u.password_hash : HASH_SENTINELA);
+   if (!u || !coincide) throw e.noAutenticado('Correo o contraseña incorrectos.');
+-  ok(res, { token: firmarToken(u), usuario: { id: u.id, nombre: u.nombre, email: u.email, rol: u.rol } });
++  ok(res, { token: firmarToken(u), usuario: { id: u.id, nombre: u.nombre, email: u.email, rol: u.rol, sede_id: u.sede_id } });
+ });
+ 
+ const me = asyncHandler(async (req, res) => ok(res, { usuario: req.usuario }));
+diff --git a/controllers/configuracion.controller.js b/controllers/configuracion.controller.js
+index 71e541d..60de882 100644
+--- a/controllers/configuracion.controller.js
++++ b/controllers/configuracion.controller.js
+@@ -11,10 +11,11 @@ const REGLAS_CUENTA = {
+   titular: { requerido: true, max: 150 },
+   detalle: { requerido: true, max: 500 },
+   activa: { tipo: 'booleano', defecto: true },
++  sede_id: { tipo: 'entero', min: 1 }, // NULL = cuenta común a todas las sedes
+ };
+ 
+ const obtener = asyncHandler(async (_req, res) => {
+-  const cuentas = await ejecutar('SELECT id, metodo, titular, detalle, activa FROM cuentas_pago ORDER BY metodo, id');
++  const cuentas = await ejecutar('SELECT id, metodo, titular, detalle, activa, sede_id FROM cuentas_pago ORDER BY metodo, id');
+   ok(res, { matricula_usd: Number(await parametros.obtener('MATRICULA_USD')), cuentas: cuentas.rows });
+ });
+ 
+@@ -27,8 +28,8 @@ const fijarMatricula = asyncHandler(async (req, res) => {
+ const crearCuenta = asyncHandler(async (req, res) => {
+   const d = validar(req.body, REGLAS_CUENTA);
+   const r = await ejecutar(
+-    'INSERT INTO cuentas_pago (metodo, titular, detalle, activa) VALUES ($1, $2, $3, $4) RETURNING id',
+-    [d.metodo, d.titular, d.detalle, d.activa]);
++    'INSERT INTO cuentas_pago (metodo, titular, detalle, activa, sede_id) VALUES ($1, $2, $3, $4, $5) RETURNING id',
++    [d.metodo, d.titular, d.detalle, d.activa, d.sede_id]);
+   ok(res, { id: r.rows[0].id }, 201);
+ });
+ 
+@@ -36,8 +37,8 @@ const actualizarCuenta = asyncHandler(async (req, res) => {
+   const id = idParam(req.params.id);
+   const d = validar(req.body, REGLAS_CUENTA);
+   const r = await ejecutar(
+-    'UPDATE cuentas_pago SET metodo = $2, titular = $3, detalle = $4, activa = $5 WHERE id = $1 RETURNING id',
+-    [id, d.metodo, d.titular, d.detalle, d.activa]);
++    'UPDATE cuentas_pago SET metodo = $2, titular = $3, detalle = $4, activa = $5, sede_id = $6 WHERE id = $1 RETURNING id',
++    [id, d.metodo, d.titular, d.detalle, d.activa, d.sede_id]);
+   if (!r.rowCount) throw e.noEncontrado('La cuenta');
+   ok(res, { id });
+ });
+diff --git a/controllers/contabilidad.controller.js b/controllers/contabilidad.controller.js
+index ce9a0ce..24e60ef 100644
+--- a/controllers/contabilidad.controller.js
++++ b/controllers/contabilidad.controller.js
+@@ -5,6 +5,7 @@ const { sanitizarTelefono } = require('../utils/telefono');
+ const { periodoActual, esPeriodoValido } = require('../utils/fechas');
+ const { e } = require('../errors/AppError');
+ const { asyncHandler, ok } = require('../utils/http');
++const { alcanceDe } = require('../utils/alcance');
+ 
+ const REGLAS_PERSONAL = {
+   nombres: { requerido: true, max: 100 },
+@@ -78,17 +79,18 @@ const crearEgreso = asyncHandler(async (req, res) => {
+     descripcion: { requerido: true, max: 300 },
+     monto_usd: { tipo: 'decimal', requerido: true, positivo: true, max: 999999999 },
+     referencia: { max: 60 },
++    sede_id: { tipo: 'entero', min: 1 }, // solo lo respeta el acceso consolidado; un usuario de sede siempre registra en la suya
+   });
+-  ok(res, await conta.crearEgreso(d), 201);
++  ok(res, await conta.crearEgreso(d, alcanceDe(req.usuario)), 201);
+ });
+ 
+ const listarEgresos = asyncHandler(async (req, res) => {
+   const pag = paginacion(req.query);
+-  const r = await conta.listarEgresos({ periodo: req.query.periodo ? periodoDe(req.query.periodo) : null, offset: pag.offset, limite: pag.limite });
++  const r = await conta.listarEgresos({ periodo: req.query.periodo ? periodoDe(req.query.periodo) : null, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario) });
+   ok(res, r.items, 200, { paginacion: { pagina: pag.pagina, limite: pag.limite, total: r.total }, total_usd: r.total_usd });
+ });
+ 
+-const balance = asyncHandler(async (req, res) => ok(res, await conta.balance(periodoDe(req.query.periodo))));
++const balance = asyncHandler(async (req, res) => ok(res, await conta.balance(periodoDe(req.query.periodo), alcanceDe(req.usuario))));
+ 
+ module.exports = {
+   crearPersonal, actualizarPersonal, desactivarPersonal, reactivarPersonal, obtenerPersonal, listarPersonal,
+diff --git a/controllers/crm.controller.js b/controllers/crm.controller.js
+index 252d978..d94c05c 100644
+--- a/controllers/crm.controller.js
++++ b/controllers/crm.controller.js
+@@ -2,23 +2,24 @@
+ const crm = require('../services/crm.service');
+ const { validar, paginacion, idParam } = require('../utils/validar');
+ const { asyncHandler, ok } = require('../utils/http');
++const { alcanceDe } = require('../utils/alcance');
+ 
+-const resumen = asyncHandler(async (_req, res) => ok(res, await crm.resumen()));
++const resumen = asyncHandler(async (req, res) => ok(res, await crm.resumen(alcanceDe(req.usuario))));
+ 
+ const listar = asyncHandler(async (req, res) => {
+   const { estado, q } = validar(req.query, { estado: { tipo: 'enum', valores: crm.ESTADOS }, q: { max: 100 } });
+   const pag = paginacion(req.query);
+-  const r = await crm.listar({ estado, q, offset: pag.offset, limite: pag.limite });
++  const r = await crm.listar({ estado, q, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario) });
+   ok(res, r.items, 200, { paginacion: { pagina: pag.pagina, limite: pag.limite, total: r.total } });
+ });
+ 
+-const detalle = asyncHandler(async (req, res) => ok(res, await crm.detalle(idParam(req.params.id))));
++const detalle = asyncHandler(async (req, res) => ok(res, await crm.detalle(idParam(req.params.id), alcanceDe(req.usuario))));
+ 
+ const retirar = asyncHandler(async (req, res) => {
+   const d = validar(req.body, { motivo: { max: 300 }, fecha_retiro: { tipo: 'fechaPasada' } });
+-  ok(res, await crm.retirar({ id: idParam(req.params.id), motivo: d.motivo, fecha: d.fecha_retiro }));
++  ok(res, await crm.retirar({ id: idParam(req.params.id), motivo: d.motivo, fecha: d.fecha_retiro, sedeId: alcanceDe(req.usuario) }));
+ });
+ 
+-const reactivar = asyncHandler(async (req, res) => ok(res, await crm.reactivar({ id: idParam(req.params.id) })));
++const reactivar = asyncHandler(async (req, res) => ok(res, await crm.reactivar({ id: idParam(req.params.id), sedeId: alcanceDe(req.usuario) })));
+ 
+ module.exports = { resumen, listar, detalle, retirar, reactivar };
+diff --git a/controllers/exportaciones.controller.js b/controllers/exportaciones.controller.js
+index a8ea7ec..5eb3152 100644
+--- a/controllers/exportaciones.controller.js
++++ b/controllers/exportaciones.controller.js
+@@ -1,15 +1,17 @@
+ 'use strict';
+ const { exportarLibro, hojasContabilidad, hojasFacturacion } = require('../services/exportacion.service');
+ const { asyncHandler } = require('../utils/http');
++const { alcanceDe } = require('../utils/alcance');
+ 
+ const contabilidad = asyncHandler(async (_req, res) => {
+   const { nombre, hojas } = hojasContabilidad();
+   await exportarLibro(res, nombre, hojas);
+ });
+ 
+-const facturacion = asyncHandler(async (_req, res) => {
++const facturacion = asyncHandler(async (req, res) => {
++  const sedeId = alcanceDe(req.usuario); // se resuelve ANTES de abrir el stream: un 403 sigue siendo JSON
+   const { nombre, hojas } = hojasFacturacion();
+-  await exportarLibro(res, nombre, hojas);
++  await exportarLibro(res, nombre, hojas, sedeId);
+ });
+ 
+ module.exports = { contabilidad, facturacion };
+diff --git a/controllers/facturacion.controller.js b/controllers/facturacion.controller.js
+index 586a688..30ee51c 100644
+--- a/controllers/facturacion.controller.js
++++ b/controllers/facturacion.controller.js
+@@ -5,6 +5,7 @@ const { validar, paginacion, idParam } = require('../utils/validar');
+ const { periodoActual, esPeriodoValido } = require('../utils/fechas');
+ const { e } = require('../errors/AppError');
+ const { asyncHandler, ok } = require('../utils/http');
++const { alcanceDe } = require('../utils/alcance');
+ 
+ const ESTADOS_PAGO = ['Por Validar', 'Aprobada', 'Rechazada'];
+ const ESTADOS_CUOTA = ['Pendiente', 'En Revisión', 'Pagada', 'Anulada'];
+@@ -21,29 +22,29 @@ function periodoDe(query) {
+  * referencias_por_validar, cobrado_por_dia[] } }. Los errores (validación, base de datos) los traduce middlewares/errorHandler a
+  * { ok:false, error:{ codigo, mensaje, detalles?, requestId } }.
+  */
+-const tablero = asyncHandler(async (req, res) => ok(res, await facturacion.tablero(periodoDe(req.query))));
++const tablero = asyncHandler(async (req, res) => ok(res, await facturacion.tablero(periodoDe(req.query), alcanceDe(req.usuario))));
+ 
+ const auditoria = asyncHandler(async (req, res) => {
+   const { estado } = validar(req.query, { estado: { tipo: 'enum', valores: ESTADOS_PAGO, defecto: 'Por Validar' } });
+   const pag = paginacion(req.query);
+-  const r = await pagos.bandeja({ estado, offset: pag.offset, limite: pag.limite });
++  const r = await pagos.bandeja({ estado, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario) });
+   ok(res, r.items, 200, { paginacion: { pagina: pag.pagina, limite: pag.limite, total: r.total } });
+ });
+ 
+ const aprobar = asyncHandler(async (req, res) => {
+   const { nota } = validar(req.body, { nota: { max: 300 } });
+-  ok(res, await pagos.aprobar({ pagoId: idParam(req.params.id), usuarioId: req.usuario.id, nota }));
++  ok(res, await pagos.aprobar({ pagoId: idParam(req.params.id), usuarioId: req.usuario.id, nota, sedeId: alcanceDe(req.usuario) }));
+ });
+ 
+ const rechazar = asyncHandler(async (req, res) => {
+   const { nota } = validar(req.body, { nota: { requerido: true, max: 300 } });
+-  ok(res, await pagos.rechazar({ pagoId: idParam(req.params.id), usuarioId: req.usuario.id, nota }));
++  ok(res, await pagos.rechazar({ pagoId: idParam(req.params.id), usuarioId: req.usuario.id, nota, sedeId: alcanceDe(req.usuario) }));
+ });
+ 
+ const listarCuotas = asyncHandler(async (req, res) => {
+   const f = validar(req.query, { estudiante_id: { tipo: 'entero', min: 1 }, estado: { tipo: 'enum', valores: ESTADOS_CUOTA } });
+   const pag = paginacion(req.query);
+-  const r = await facturacion.listarCuotas({ estudianteId: f.estudiante_id, estado: f.estado, offset: pag.offset, limite: pag.limite });
++  const r = await facturacion.listarCuotas({ estudianteId: f.estudiante_id, estado: f.estado, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario) });
+   ok(res, r.items, 200, { paginacion: { pagina: pag.pagina, limite: pag.limite, total: r.total } });
+ });
+ 
+@@ -55,7 +56,7 @@ const crearCuota = asyncHandler(async (req, res) => {
+     monto_usd: { tipo: 'decimal', requerido: true, positivo: true, max: 99999999 },
+     fecha_vencimiento: { tipo: 'fecha', requerido: true },
+   });
+-  ok(res, await facturacion.crearCuota(d), 201);
++  ok(res, await facturacion.crearCuota(d, alcanceDe(req.usuario)), 201);
+ });
+ 
+ const generarMensualidades = asyncHandler(async (req, res) => {
+@@ -64,7 +65,7 @@ const generarMensualidades = asyncHandler(async (req, res) => {
+     monto_usd: { tipo: 'decimal', requerido: true, positivo: true, max: 99999999 },
+     fecha_vencimiento: { tipo: 'fecha', requerido: true },
+   });
+-  ok(res, await facturacion.generarMensualidades(d), 201);
++  ok(res, await facturacion.generarMensualidades(d, alcanceDe(req.usuario)), 201);
+ });
+ 
+ module.exports = { tablero, auditoria, aprobar, rechazar, listarCuotas, crearCuota, generarMensualidades };
+diff --git a/controllers/notificaciones.controller.js b/controllers/notificaciones.controller.js
+index 7401531..3327a7f 100644
+--- a/controllers/notificaciones.controller.js
++++ b/controllers/notificaciones.controller.js
+@@ -2,18 +2,19 @@
+ const notificaciones = require('../services/notificaciones.service');
+ const { validar, paginacion, idParam } = require('../utils/validar');
+ const { asyncHandler, ok } = require('../utils/http');
++const { alcanceDe } = require('../utils/alcance');
+ 
+ /** Alertas MANUALES e individuales. `?enviar=true` envía por la API de Meta; sin él solo se genera el texto y el enlace wa.me. */
+ const generar = (tipo) => asyncHandler(async (req, res) => {
+   const { enviar } = validar({ ...req.query, ...req.body }, { enviar: { tipo: 'booleano', defecto: false } });
+-  const r = await notificaciones.generarAlerta({ tipo, estudianteId: idParam(req.params.estudianteId, 'estudianteId'), enviar, usuarioId: req.usuario.id });
++  const r = await notificaciones.generarAlerta({ tipo, estudianteId: idParam(req.params.estudianteId, 'estudianteId'), enviar, usuarioId: req.usuario.id, sedeId: alcanceDe(req.usuario) });
+   ok(res, r, 201);
+ });
+ 
+ const historial = asyncHandler(async (req, res) => {
+   const f = validar(req.query, { estudiante_id: { tipo: 'entero', min: 1 } });
+   const pag = paginacion(req.query);
+-  const r = await notificaciones.historial({ estudianteId: f.estudiante_id, offset: pag.offset, limite: pag.limite });
++  const r = await notificaciones.historial({ estudianteId: f.estudiante_id, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario) });
+   ok(res, r.items, 200, { paginacion: { pagina: pag.pagina, limite: pag.limite, total: r.total } });
+ });
+ 
+diff --git a/controllers/sedes.controller.js b/controllers/sedes.controller.js
+new file mode 100644
+index 0000000..c625842
+--- /dev/null
++++ b/controllers/sedes.controller.js
+@@ -0,0 +1,47 @@
++'use strict';
++const sedes = require('../services/sedes.service');
++const invitaciones = require('../services/invitaciones.service');
++const { validar, paginacion, idParam } = require('../utils/validar');
++const { e } = require('../errors/AppError');
++const { asyncHandler, ok } = require('../utils/http');
++const { alcanceDe } = require('../utils/alcance');
++
++const listar = asyncHandler(async (req, res) => ok(res, await sedes.listar(alcanceDe(req.usuario))));
++
++/** Solo acceso consolidado (la ruta ya exige requireConsolidado). */
++const crear = asyncHandler(async (req, res) => {
++  const d = validar(req.body, { nombre: { requerido: true, max: 120 } });
++  ok(res, await sedes.crear(d), 201);
++});
++
++const cambiarActiva = (activa) => asyncHandler(async (req, res) => ok(res, await sedes.cambiarActiva(idParam(req.params.id), activa)));
++
++// ── Invitaciones de inscripción (nivel y sede blindados) ────────────────────────────────────────
++const ESTADOS_INVITACION = ['Pendiente', 'Usada', 'Revocada', 'Vencida'];
++
++/**
++ * POST /api/invitaciones — { nivel_asignado, dias?, sede_id? }. Un usuario de sede SIEMPRE invita a su sede (sede_id del cuerpo ignorado);
++ * el acceso consolidado debe indicar la sede.
++ */
++const crearInvitacion = asyncHandler(async (req, res) => {
++  const d = validar(req.body, {
++    nivel_asignado: { requerido: true, max: 60 },
++    dias: { tipo: 'entero', min: 1, max: 60, defecto: invitaciones.DIAS_VIGENCIA_DEFECTO },
++    sede_id: { tipo: 'entero', min: 1 },
++  });
++  const alcance = alcanceDe(req.usuario);
++  const sedeId = alcance ?? d.sede_id;
++  if (!sedeId) throw e.validacion([{ campo: 'sede_id', mensaje: 'Es obligatorio para el acceso consolidado.' }]);
++  ok(res, await invitaciones.crear({ sedeId, nivel: d.nivel_asignado, dias: d.dias, creadoPor: req.usuario.id }), 201);
++});
++
++const listarInvitaciones = asyncHandler(async (req, res) => {
++  const { estado } = validar(req.query, { estado: { tipo: 'enum', valores: ESTADOS_INVITACION } });
++  const pag = paginacion(req.query);
++  const r = await invitaciones.listar({ sedeId: alcanceDe(req.usuario), estado, offset: pag.offset, limite: pag.limite });
++  ok(res, r.items, 200, { paginacion: { pagina: pag.pagina, limite: pag.limite, total: r.total } });
++});
++
++const revocarInvitacion = asyncHandler(async (req, res) => ok(res, await invitaciones.revocar(idParam(req.params.id), alcanceDe(req.usuario))));
++
++module.exports = { listar, crear, activar: cambiarActiva(true), desactivar: cambiarActiva(false), crearInvitacion, listarInvitaciones, revocarInvitacion };
+diff --git a/database/migrations/005_multisede.sql b/database/migrations/005_multisede.sql
+new file mode 100644
+index 0000000..5cc4929
+--- /dev/null
++++ b/database/migrations/005_multisede.sql
+@@ -0,0 +1,122 @@
++-- 005_multisede.sql — Infraestructura multi-sede (PostgreSQL 15+ · Supabase). Idempotente: se puede re-ejecutar sin efectos.
++-- Modelo de alcance:
++--   · sede_id NULL en un USUARIO  → acceso consolidado/global (SuperAdmin). sede_id con valor → solo esa sede (secretaria/recepción).
++--   · sede_id NULL en un DATO     → dato "global" (sin sede asignada): solo lo ve el acceso consolidado.
++-- Los esquemas viven en `public` (Supabase); no existe el esquema `dbo` de MSSQL.
++
++CREATE TABLE IF NOT EXISTS sedes (
++  id        SERIAL       NOT NULL CONSTRAINT pk_sedes PRIMARY KEY,
++  nombre    VARCHAR(120) NOT NULL CONSTRAINT uq_sedes_nombre UNIQUE,
++  activa    BOOLEAN      NOT NULL DEFAULT TRUE,
++  creado_en TIMESTAMPTZ  NOT NULL DEFAULT NOW()
++);
++
++-- sede_id NULLABLE en las tablas que se segmentan por sede. ADD COLUMN IF NOT EXISTS omite la cláusula completa (incluida la FK)
++-- si la columna ya existe, de modo que re-ejecutar no duplica restricciones.
++ALTER TABLE usuarios_admin     ADD COLUMN IF NOT EXISTS sede_id INTEGER NULL CONSTRAINT fk_usuarios_admin_sede     REFERENCES sedes(id);
++ALTER TABLE estudiantes        ADD COLUMN IF NOT EXISTS sede_id INTEGER NULL CONSTRAINT fk_estudiantes_sede        REFERENCES sedes(id);
++ALTER TABLE cuotas             ADD COLUMN IF NOT EXISTS sede_id INTEGER NULL CONSTRAINT fk_cuotas_sede             REFERENCES sedes(id);
++ALTER TABLE egresos            ADD COLUMN IF NOT EXISTS sede_id INTEGER NULL CONSTRAINT fk_egresos_sede            REFERENCES sedes(id);
++ALTER TABLE pagos_referencias  ADD COLUMN IF NOT EXISTS sede_id INTEGER NULL CONSTRAINT fk_pagos_referencias_sede  REFERENCES sedes(id);
++-- Cuentas de cobro por sede (el portal de invitación muestra las de SU sede). NULL = cuenta común a todas las sedes.
++ALTER TABLE cuentas_pago       ADD COLUMN IF NOT EXISTS sede_id INTEGER NULL CONSTRAINT fk_cuentas_pago_sede       REFERENCES sedes(id);
++
++CREATE INDEX IF NOT EXISTS ix_usuarios_admin_sede    ON usuarios_admin (sede_id);
++CREATE INDEX IF NOT EXISTS ix_estudiantes_sede       ON estudiantes (sede_id, estatus_academico);
++CREATE INDEX IF NOT EXISTS ix_cuotas_sede_estado     ON cuotas (sede_id, estado, fecha_vencimiento);
++CREATE INDEX IF NOT EXISTS ix_egresos_sede_fecha     ON egresos (sede_id, fecha);
++CREATE INDEX IF NOT EXISTS ix_pagos_sede_bandeja     ON pagos_referencias (sede_id, estado, declarado_en);
++CREATE INDEX IF NOT EXISTS ix_cuentas_pago_sede      ON cuentas_pago (sede_id);
++
++-- ───────────────────────── Herencia automática de sede ─────────────────────────
++-- Cuotas y pagos pertenecen a la sede de su estudiante. Un trigger BEFORE INSERT lo garantiza aunque algún camino de código
++-- olvide enviar sede_id (el filtro por sede nunca depende de la memoria del programador).
++CREATE OR REPLACE FUNCTION fn_heredar_sede_estudiante() RETURNS trigger
++LANGUAGE plpgsql
++SET search_path = public, pg_temp   -- Supabase advisor: función sin search_path fijo es vulnerable a secuestro de esquema
++AS $$
++BEGIN
++  IF NEW.sede_id IS NULL AND NEW.estudiante_id IS NOT NULL THEN
++    SELECT e.sede_id INTO NEW.sede_id FROM estudiantes AS e WHERE e.id = NEW.estudiante_id;
++  END IF;
++  RETURN NEW;
++END
++$$;
++
++-- La función solo la ejecuta el motor como trigger: se cierra a PUBLIC (anon/authenticated no deben poder invocarla por la API REST).
++REVOKE ALL ON FUNCTION fn_heredar_sede_estudiante() FROM PUBLIC;
++
++DROP TRIGGER IF EXISTS trg_cuotas_heredar_sede ON cuotas;
++CREATE TRIGGER trg_cuotas_heredar_sede BEFORE INSERT ON cuotas
++  FOR EACH ROW EXECUTE FUNCTION fn_heredar_sede_estudiante();
++
++DROP TRIGGER IF EXISTS trg_pagos_heredar_sede ON pagos_referencias;
++CREATE TRIGGER trg_pagos_heredar_sede BEFORE INSERT ON pagos_referencias
++  FOR EACH ROW EXECUTE FUNCTION fn_heredar_sede_estudiante();
++
++-- Relleno de lo ya existente (idempotente: solo toca filas aún sin sede cuyo estudiante sí la tiene).
++UPDATE cuotas AS c SET sede_id = e.sede_id
++  FROM estudiantes AS e
++ WHERE c.estudiante_id = e.id AND c.sede_id IS NULL AND e.sede_id IS NOT NULL;
++UPDATE pagos_referencias AS p SET sede_id = e.sede_id
++  FROM estudiantes AS e
++ WHERE p.estudiante_id = e.id AND p.sede_id IS NULL AND e.sede_id IS NOT NULL;
++
++-- ───────────────────────── Vista con sede ─────────────────────────
++-- Misma definición de 002 + sede_id AL FINAL (CREATE OR REPLACE VIEW solo admite columnas nuevas al final).
++CREATE OR REPLACE VIEW vw_estudiantes_estado WITH (security_invoker = true) AS
++SELECT
++  e.id,
++  e.representante_id,
++  e.nombres,
++  e.apellidos,
++  e.grado_solicitado,
++  e.estatus_academico,
++  CASE
++    WHEN e.estatus_academico = 'Fuera de la Academia'                    THEN 'Fuera de la Academia'
++    WHEN e.estatus_academico = 'Pendiente por Validación Administrativa' THEN 'Pendiente por Validación Administrativa'
++    WHEN COALESCE(m.cuotas_vencidas, 0) > 0                              THEN 'Moroso'
++    ELSE 'Activo'
++  END::VARCHAR(45) AS estado_dinamico,
++  CASE
++    WHEN e.estatus_academico = 'Fuera de la Academia'                    THEN 'N/A'
++    WHEN e.estatus_academico = 'Pendiente por Validación Administrativa' THEN 'Pendiente de Validación'
++    WHEN COALESCE(m.cuotas_vencidas, 0) > 0                              THEN 'Moroso'
++    ELSE 'Al día'
++  END::VARCHAR(45) AS estatus_pago,
++  COALESCE(m.cuotas_vencidas, 0)::INTEGER             AS cuotas_vencidas,
++  COALESCE(m.deuda_vencida_usd, 0)::NUMERIC(12,2)     AS deuda_vencida_usd,
++  m.proximo_vencimiento,
++  e.sede_id                                           AS sede_id
++FROM estudiantes AS e
++CROSS JOIN LATERAL (SELECT (NOW() AT TIME ZONE 'America/Caracas')::DATE AS hoy) AS h
++LEFT JOIN LATERAL (
++  SELECT
++    COUNT(*) FILTER (WHERE c.fecha_vencimiento < h.hoy)                       AS cuotas_vencidas,
++    SUM(c.monto_usd) FILTER (WHERE c.fecha_vencimiento < h.hoy)               AS deuda_vencida_usd,
++    MIN(c.fecha_vencimiento)                                                  AS proximo_vencimiento
++  FROM cuotas AS c
++  WHERE c.estudiante_id = e.id
++    AND c.estado IN ('Pendiente', 'En Revisión')
++) AS m ON TRUE;
++
++-- ───────────────────────── Seguridad Supabase (misma política que 004) ─────────────────────────
++-- 004 ya está aplicada en producción y no se vuelve a ejecutar: la tabla nueva cierra su propio acceso aquí.
++DO $$
++DECLARE
++  rol TEXT;
++  secuencia TEXT;
++BEGIN
++  ALTER TABLE sedes ENABLE ROW LEVEL SECURITY;
++  FOREACH rol IN ARRAY ARRAY['anon', 'authenticated'] LOOP
++    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rol) THEN
++      EXECUTE format('REVOKE ALL ON TABLE sedes FROM %I', rol);
++      secuencia := pg_get_serial_sequence('public.sedes', 'id');
++      IF secuencia IS NOT NULL THEN
++        EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM %I', secuencia, rol);
++      END IF;
++      EXECUTE format('REVOKE ALL ON TABLE vw_estudiantes_estado FROM %I', rol);
++    END IF;
++  END LOOP;
++END
++$$;
+diff --git a/database/migrations/006_invitaciones_inscripcion.sql b/database/migrations/006_invitaciones_inscripcion.sql
+new file mode 100644
+index 0000000..132af22
+--- /dev/null
++++ b/database/migrations/006_invitaciones_inscripcion.sql
+@@ -0,0 +1,36 @@
++-- 006_invitaciones_inscripcion.sql — Portal de invitaciones: un enlace de un solo uso que fija SEDE y NIVEL de la inscripción.
++-- El token en claro (48 hex) solo viaja en el enlace; en la base se guarda su SHA-256 (igual que portal_tokens).
++-- El bloqueo del nivel lo impone el SERVIDOR al inscribir (el CSS del formulario es solo la señal visual).
++
++CREATE TABLE IF NOT EXISTS invitaciones_inscripcion (
++  id             SERIAL       NOT NULL CONSTRAINT pk_invitaciones_inscripcion PRIMARY KEY,
++  token_hash     CHAR(64)     NOT NULL CONSTRAINT uq_invitaciones_token UNIQUE,
++  sede_id        INTEGER      NOT NULL CONSTRAINT fk_invitaciones_sede REFERENCES sedes(id),
++  nivel_asignado VARCHAR(60)  NOT NULL,
++  estado         VARCHAR(10)  NOT NULL DEFAULT 'Pendiente'
++                 CONSTRAINT ck_invitaciones_estado CHECK (estado IN ('Pendiente', 'Usada', 'Revocada')),
++  expira_en      TIMESTAMPTZ  NOT NULL,
++  creado_por     INTEGER      NULL CONSTRAINT fk_invitaciones_creador REFERENCES usuarios_admin(id),
++  estudiante_id  INTEGER      NULL CONSTRAINT fk_invitaciones_estudiante REFERENCES estudiantes(id),
++  usada_en       TIMESTAMPTZ  NULL,
++  creado_en      TIMESTAMPTZ  NOT NULL DEFAULT NOW()
++);
++CREATE INDEX IF NOT EXISTS ix_invitaciones_sede_estado ON invitaciones_inscripcion (sede_id, estado, expira_en);
++
++DO $$
++DECLARE
++  rol TEXT;
++  secuencia TEXT;
++BEGIN
++  ALTER TABLE invitaciones_inscripcion ENABLE ROW LEVEL SECURITY;
++  FOREACH rol IN ARRAY ARRAY['anon', 'authenticated'] LOOP
++    IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = rol) THEN
++      EXECUTE format('REVOKE ALL ON TABLE invitaciones_inscripcion FROM %I', rol);
++      secuencia := pg_get_serial_sequence('public.invitaciones_inscripcion', 'id');
++      IF secuencia IS NOT NULL THEN
++        EXECUTE format('REVOKE ALL ON SEQUENCE %s FROM %I', secuencia, rol);
++      END IF;
++    END IF;
++  END LOOP;
++END
++$$;
+diff --git a/database/migrations/007_prueba_premium.sql b/database/migrations/007_prueba_premium.sql
+new file mode 100644
+index 0000000..2a65251
+--- /dev/null
++++ b/database/migrations/007_prueba_premium.sql
+@@ -0,0 +1,19 @@
++-- 007_prueba_premium.sql — Prueba gratuita de 15 días de los módulos Premium.
++-- La prueba se escribe en modulos_premium (prueba_inicio / prueba_expira_en). El guard (modules/premium/guard.js) deja pasar
++-- mientras `habilitado` sea TRUE (contratado) O la prueba siga vigente (NOW() < prueba_expira_en); al vencer se bloquea solo,
++-- sin tareas de limpieza. `prueba_usada` impide reactivar la prueba una y otra vez (una prueba por módulo).
++
++ALTER TABLE modulos_premium ADD COLUMN IF NOT EXISTS prueba_inicio    TIMESTAMPTZ NULL;
++ALTER TABLE modulos_premium ADD COLUMN IF NOT EXISTS prueba_expira_en TIMESTAMPTZ NULL;
++ALTER TABLE modulos_premium ADD COLUMN IF NOT EXISTS prueba_usada     BOOLEAN     NOT NULL DEFAULT FALSE;
++
++-- Coherencia de la ventana de prueba (se añade una sola vez: ADD CONSTRAINT no admite IF NOT EXISTS).
++DO $$
++BEGIN
++  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'ck_modulos_prueba_ventana') THEN
++    ALTER TABLE modulos_premium ADD CONSTRAINT ck_modulos_prueba_ventana CHECK (
++      (prueba_inicio IS NULL AND prueba_expira_en IS NULL)
++      OR (prueba_inicio IS NOT NULL AND prueba_expira_en IS NOT NULL AND prueba_expira_en > prueba_inicio));
++  END IF;
++END
++$$;
+diff --git a/frontend/src/admin.ts b/frontend/src/admin.ts
+index 5c861fd..5cfffc7 100644
+--- a/frontend/src/admin.ts
++++ b/frontend/src/admin.ts
+@@ -26,6 +26,7 @@ import type {
+   ReferenciaAuditoria,
+   RespuestaLogin,
+   RespuestaMe,
++  RespuestaPrueba,
+   ResultadoRevision,
+   TableroFacturacion,
+   TipoAlertaWhatsapp,
+@@ -823,16 +824,55 @@ function vistaPremium(ctx: Contexto, codigo: string): void {
+     return;
+   }
+   if (m.bloqueado) {
+-    montar(ctx.zona, seccionBloqueada(m));
++    // Prueba gratuita de 15 días: solo el acceso consolidado (admin sin sede) puede abrirla, una vez por módulo.
++    const ofrecerPrueba = m.prueba_disponible === true && esConsolidado();
++    montar(
++      ctx.zona,
++      html`${seccionBloqueada(m)}${ofrecerPrueba
++        ? html`<div class="mt-6">${aviso('info', html`<p>Prueba este módulo sin costo durante 15 días. Al vencer se bloquea solo.</p>
++            <button type="button" id="activar-prueba" class="${boton(CLS.btnPrimario, 'mt-3')}">${icono('check', 'h-4 w-4')}<span>Activar prueba gratuita de 15 días</span></button>`, 'Prueba gratuita disponible')}</div>`
++        : null}`,
++    );
++    const activar = buscar('#activar-prueba', HTMLButtonElement);
++    activar?.addEventListener('click', () => {
++      void conBotonOcupado(activar, () => activarPrueba(m)).catch((e: unknown) => notificar('bad', mensajeDeError(e)));
++    });
+     return;
+   }
++  const hasta = m.en_prueba === true && m.prueba_expira_en ? m.prueba_expira_en : null;
+   montar(
+     ctx.zona,
+     html`${encabezado(m.nombre, m.descripcion)}
+-    <div class="${CLS.tarjeta} p-6">${aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}</div>`,
++    <div class="${CLS.tarjeta} flex flex-col gap-4 p-6">
++      ${hasta ? aviso('warn', `Prueba gratuita vigente hasta el ${fechaHora(hasta)}. Después de esa fecha el módulo se bloquea automáticamente.`, 'Estás en periodo de prueba') : null}
++      ${aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}
++    </div>`,
+   );
+ }
+ 
++/** Admin sin sede asignada (SuperAdmin): único perfil que contrata/prueba módulos de la academia. */
++const esConsolidado = (): boolean => estado.usuario?.rol === 'admin' && (estado.usuario.sede_id ?? null) === null;
++
++/** Redibuja SOLO el ítem del menú de un módulo (quita/pone el candado) sin reconstruir el panel. */
++function refrescarItemPremium(m: ModuloPremium): void {
++  const actual = buscar(`[data-nav="premium:${m.codigo}"]`, HTMLElement);
++  if (!actual) return;
++  const nuevo = document.createElement('div');
++  montar(nuevo, itemNav({ id: `premium:${m.codigo}`, titulo: m.nombre, icono: ICONO_MODULO[m.codigo] ?? 'chat', tooltip: m.bloqueado ? `${m.nombre} · ${m.tooltip ?? AVISO_PREMIUM}` : m.nombre, bloqueado: m.bloqueado }));
++  const item = nuevo.firstElementChild;
++  if (item) actual.replaceWith(item);
++}
++
++/** POST /api/premium/activar-prueba → vuelve a leer el catálogo (el servidor es la fuente de verdad) y abre el módulo. */
++async function activarPrueba(m: ModuloPremium): Promise<void> {
++  await bma.post<RespuestaPrueba>('/premium/activar-prueba', { modulo: m.codigo });
++  const modulos = await bma.get<readonly ModuloPremium[]>('/premium/modulos');
++  actualizar({ modulos });
++  for (const x of modulos) refrescarItemPremium(x);
++  notificar('ok', 'Prueba gratuita de 15 días activada.');
++  await navegar(`premium:${m.codigo}`);
++}
++
+ /** Si el servidor responde 403 MODULO_PREMIUM_DESHABILITADO para cualquier sección, se muestra el mismo candado. */
+ function pintarCandadoDesdeServidor(zona: HTMLElement, d: DetalleModuloPremium): void {
+   const m = estado.modulos.find((x) => x.codigo === d.modulo);
+diff --git a/frontend/src/admisiones.ts b/frontend/src/admisiones.ts
+index d29e619..c16b964 100644
+--- a/frontend/src/admisiones.ts
++++ b/frontend/src/admisiones.ts
+@@ -11,9 +11,11 @@ import { html, montar, raw, type HtmlSeguro } from './lib/html';
+ import { icono } from './lib/icons';
+ import { bs, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
+ import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
++import { esConfigInvitacion } from './types/index';
+ import type {
+   CampoArchivoAdmision,
+   ConfigAdmisiones,
++  ConfigInvitacion,
+   CuentaPago,
+   MetodoPago,
+   RespuestaAdmision,
+@@ -31,6 +33,28 @@ const TIPOS_SANGRE: readonly TipoSangre[] = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-
+ const RE_CEDULA = /^[A-Za-z0-9.-]{4,20}$/;
+ const RE_REFERENCIA = /^[A-Za-z0-9-]{4,40}$/;
+ const RE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
++const RE_INVITACION = /^[a-f0-9]{48}$/;
++
++/**
++ * Señal visual del nivel bloqueado (el bloqueo REAL lo impone el servidor: ignora el grado enviado y usa `nivel_asignado`).
++ * `pointer-events-none` impide el clic, `select-none` la selección y `bg-slate-100` lo muestra como no editable.
++ */
++export const CLASES_NIVEL_BLOQUEADO = 'bg-slate-100 pointer-events-none select-none';
++
++/** Invitación presente en la URL (`?invitacion=<48 hex>`). Un parámetro mal formado NO habilita el formulario libre. */
++export type InvitacionDeUrl =
++  | { readonly tipo: 'ninguna' }
++  | { readonly tipo: 'invalida' }
++  | { readonly tipo: 'token'; readonly token: string };
++
++export function leerInvitacion(busqueda: string): InvitacionDeUrl {
++  const v = new URLSearchParams(busqueda).get('invitacion');
++  if (v === null) return { tipo: 'ninguna' };
++  return RE_INVITACION.test(v) ? { tipo: 'token', token: v } : { tipo: 'invalida' };
++}
++
++const INVITACION: InvitacionDeUrl = leerInvitacion(window.location.search);
++const MENSAJE_INVITACION_INVALIDA = 'El enlace de invitación no es válido, ya fue utilizado o venció. Solicita uno nuevo a la academia.';
+ 
+ /** Quita TODO espacio en blanco (pegar «0012 3456» o «ABC 123» deja una referencia válida). */
+ export function sanearReferencia(valor: string): string {
+@@ -324,8 +348,9 @@ export function leerTextos(formulario: HTMLFormElement): SolicitudAdmisionTexto
+ }
+ 
+ /** FormData transaccional: solo los campos del contrato (omite los opcionales vacíos) + los 3 archivos ya validados. */
+-export function construirFormData(textos: SolicitudAdmisionTexto, archivos: ReadonlyMap<CampoArchivoAdmision, File>): FormData {
++export function construirFormData(textos: SolicitudAdmisionTexto, archivos: ReadonlyMap<CampoArchivoAdmision, File>, invitacion: string | null = null): FormData {
+   const datos = new FormData();
++  if (invitacion !== null) datos.append('invitacion', invitacion); // el servidor resuelve sede y nivel a partir del enlace
+   for (const def of CAMPOS) {
+     const valor = textos[def.nombre];
+     if (valor !== '' || def.requerido) datos.append(def.nombre, valor);
+@@ -346,9 +371,14 @@ interface EstadoPantalla {
+   readonly errorConfig: string | null;
+   readonly cargandoConfig: boolean;
+   readonly enviando: boolean;
++  /** Mensaje del servidor cuando rechazó el enlace de invitación (410): la planilla queda deshabilitada. */
++  readonly invitacionRechazada: string | null;
+ }
+ 
+-let estado: EstadoPantalla = { config: null, consultadoEn: null, errorConfig: null, cargandoConfig: true, enviando: false };
++let estado: EstadoPantalla = {
++  config: null, consultadoEn: null, errorConfig: null, cargandoConfig: true, enviando: false,
++  invitacionRechazada: INVITACION.tipo === 'invalida' ? MENSAJE_INVITACION_INVALIDA : null,
++};
+ 
+ function actualizar(parcial: Partial<EstadoPantalla>): void {
+   estado = { ...estado, ...parcial };
+@@ -410,6 +440,8 @@ function esqueleto(): HtmlSeguro {
+       </div>
+     </header>
+ 
++    <div id="invitacion"></div>
++
+     <section id="costo" class="${CLS.tarjetaCristal} p-6" aria-labelledby="t-costo"></section>
+ 
+     <div id="resumen-errores" tabindex="-1"></div>
+@@ -451,12 +483,57 @@ function costoHtml(): HtmlSeguro {
+     <p class="mt-4 text-sm text-slate-700">Las cuentas autorizadas y los pasos para pagar están en el <a href="#t-pago" class="font-semibold text-slate-900 underline">paso 5 · Pago de la matrícula</a>.</p>`;
+ }
+ 
++/** Aplica el bloqueo visual del campo «Grado a cursar» con el nivel asignado por la invitación (idempotente). */
++function aplicarNivelBloqueado(nivel: string): void {
++  const control = buscar('#f-grado_solicitado', HTMLInputElement);
++  if (!control) return;
++  control.value = nivel;
++  control.readOnly = true;
++  control.tabIndex = -1;
++  control.setAttribute('aria-readonly', 'true');
++  control.classList.remove('bg-white');
++  control.classList.add(...CLASES_NIVEL_BLOQUEADO.split(' '));
++  if (!buscar('#a-grado_solicitado', HTMLElement)) {
++    const nota = document.createElement('p');
++    nota.id = 'a-grado_solicitado';
++    nota.className = CLS.ayuda;
++    nota.textContent = 'Nivel asignado por la academia en tu invitación; no se puede cambiar.';
++    control.insertAdjacentElement('afterend', nota);
++    control.setAttribute('aria-describedby', 'a-grado_solicitado e-grado_solicitado');
++  }
++}
++
++/** Banner de la invitación (sede + nivel) o, si el enlace no sirve, el aviso de error y la planilla deshabilitada. */
++function pintarInvitacion(): void {
++  const zona = obtener('#invitacion', HTMLElement);
++  const planilla = obtener('#planilla', HTMLElement);
++  const costo = obtener('#costo', HTMLElement);
++  if (estado.invitacionRechazada !== null) {
++    montar(zona, aviso('bad', estado.invitacionRechazada, 'Invitación no válida'));
++    planilla.hidden = true;
++    costo.hidden = true;
++    return;
++  }
++  planilla.hidden = false;
++  costo.hidden = false;
++  if (INVITACION.tipo === 'token' && esConfigInvitacion(estado.config)) {
++    const c = estado.config;
++    montar(zona, aviso('info', html`Inscripción en <strong>${c.sede.nombre}</strong> · Nivel asignado: <strong>${c.nivel_asignado}</strong>`, 'Invitación válida'));
++    aplicarNivelBloqueado(c.nivel_asignado);
++  } else if (INVITACION.tipo === 'token') {
++    montar(zona, html`<p class="text-sm text-slate-600" role="status">Validando tu invitación…</p>`);
++  } else {
++    montar(zona, html``);
++  }
++}
++
+ function pintarCosto(): void {
+   const zona = obtener('#costo', HTMLElement);
+   montar(zona, costoHtml());
+   buscar('#reintentar', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
+   buscar('#actualizar-tasa', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
+   pintarCuentas();
++  pintarInvitacion();
+ }
+ 
+ // ───────────────────────── Cuentas autorizadas (instrucciones de pago dinámicas) ─────────────────────────
+@@ -570,12 +647,19 @@ async function refrescarConfig(silencioso: boolean): Promise<boolean> {
+     actualizar({ cargandoConfig: true, errorConfig: null });
+     if (!estado.config) pintarCosto();
+   }
++  if (estado.invitacionRechazada !== null) return false; // enlace inválido: no hay nada que consultar
++  const ruta = INVITACION.tipo === 'token' ? `/public/admisiones/invitacion/${INVITACION.token}` : '/public/admisiones/config';
+   try {
+-    const config = await bma.get<ConfigAdmisiones>('/public/admisiones/config', undefined, { sinAuth: true });
++    const config = await bma.get<ConfigAdmisiones | ConfigInvitacion>(ruta, undefined, { sinAuth: true });
+     actualizar({ config, consultadoEn: new Date(), errorConfig: null, cargandoConfig: false });
+     pintarCosto();
+     return true;
+   } catch (e: unknown) {
++    if (INVITACION.tipo === 'token' && e instanceof BmaApiError && e.estado === 410) {
++      actualizar({ cargandoConfig: false, config: null, invitacionRechazada: e.message });
++      pintarCosto();
++      return false;
++    }
+     actualizar({ cargandoConfig: false, errorConfig: estado.config ? null : mensajeDeError(e) });
+     if (!silencioso || !estado.config) pintarCosto();
+     return false;
+@@ -628,6 +712,7 @@ function mostrarExito(r: RespuestaAdmision): void {
+       </div>
+       <dl class="mt-6 grid gap-4 text-sm sm:grid-cols-2">
+         <div><dt class="text-slate-600">Estatus</dt><dd class="font-semibold text-slate-900">${r.estatus}</dd></div>
++        ${r.grado_solicitado ? html`<div><dt class="text-slate-600">Nivel asignado</dt><dd class="font-semibold text-slate-900">${r.grado_solicitado}</dd></div>` : null}
+         <div><dt class="text-slate-600">Método</dt><dd class="font-semibold text-slate-900">${nombreMetodo(r.metodo_pago)}</dd></div>
+         <div><dt class="text-slate-600">Referencia declarada</dt><dd class="break-all font-semibold text-slate-900">${r.referencia}</dd></div>
+         <div><dt class="text-slate-600">Monto de la matrícula</dt><dd class="font-semibold text-slate-900">${usd(r.monto_usd)} · ${bs(r.monto_bs)}</dd></div>
+@@ -646,6 +731,10 @@ async function alEnviar(formulario: HTMLFormElement): Promise<void> {
+   if (estado.enviando) return;
+   limpiarErrores();
+ 
++  if (INVITACION.tipo === 'token' && !esConfigInvitacion(estado.config)) {
++    mostrarErrores([{ campo: '', mensaje: 'Estamos validando tu invitación. Intenta de nuevo en unos segundos.' }], 'Un momento');
++    return;
++  }
+   const textos = leerTextos(formulario);
+   const inspeccion = inspeccionarArchivos(formulario);
+   const errores = [...validarTextos(textos), ...inspeccion.errores];
+@@ -672,7 +761,17 @@ async function alEnviar(formulario: HTMLFormElement): Promise<void> {
+         );
+         return;
+       }
+-      const datos = construirFormData(textos, inspeccion.archivos);
++      if (estado.invitacionRechazada !== null) {
++        mostrarErrores([{ campo: '', mensaje: estado.invitacionRechazada }], 'Invitación no válida');
++        return;
++      }
++      // Con invitación el nivel es el asignado por el servidor (el campo bloqueado ya lo muestra; esto cierra cualquier edición por consola).
++      const nivelAsignado = esConfigInvitacion(estado.config) ? estado.config.nivel_asignado : null;
++      const datos = construirFormData(
++        nivelAsignado !== null ? { ...textos, grado_solicitado: nivelAsignado } : textos,
++        inspeccion.archivos,
++        INVITACION.tipo === 'token' ? INVITACION.token : null,
++      );
+       const respuesta = await bma.post<RespuestaAdmision>('/public/admisiones', datos, { sinAuth: true, timeoutMs: 120_000 });
+       mostrarExito(respuesta);
+     });
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 4217e5a..f35aecf 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -13,6 +13,8 @@ export interface Usuario {
+   readonly nombre: string;
+   readonly email: string;
+   readonly rol: RolUsuario;
++  /** NULL = acceso consolidado (SuperAdmin); un número fija al usuario a esa sede. */
++  readonly sede_id?: number | null;
+ }
+ 
+ export type EstadoDinamico =
+@@ -145,6 +147,25 @@ export interface ConfigAdmisiones {
+   readonly cuentas: readonly CuentaPago[];
+ }
+ 
++/** Sede fijada por un enlace de invitación. */
++export interface SedeInvitacion {
++  readonly id: number;
++  readonly nombre: string;
++}
++
++/**
++ * `GET /api/public/admisiones/invitacion/:token` — la misma configuración del formulario (con las cuentas de cobro de ESA sede) más
++ * la sede y el nivel asignado, que el servidor vuelve a imponer al inscribir. 410 INVITACION_NO_VALIDA si el enlace no sirve.
++ */
++export interface ConfigInvitacion extends ConfigAdmisiones {
++  readonly sede: SedeInvitacion;
++  readonly nivel_asignado: string;
++}
++
++export function esConfigInvitacion(c: ConfigAdmisiones | null): c is ConfigInvitacion {
++  return c !== null && 'nivel_asignado' in c && typeof (c as { nivel_asignado?: unknown }).nivel_asignado === 'string';
++}
++
+ export type TipoSangre = 'A+' | 'A-' | 'B+' | 'B-' | 'AB+' | 'AB-' | 'O+' | 'O-';
+ 
+ /** Campos de texto del formulario `POST /api/public/admisiones` (multipart). */
+@@ -184,6 +205,9 @@ export interface RespuestaAdmision {
+   readonly monto_bs: number;
+   readonly tasa_bcv: number;
+   readonly tasa_desactualizada: boolean;
++  /** Solo con enlace de invitación: sede y nivel que el servidor impuso. */
++  readonly sede_id?: number | null;
++  readonly grado_solicitado?: string;
+ }
+ 
+ // ───────────────────────── Portal del representante ─────────────────────────
+@@ -316,7 +340,20 @@ export interface ModuloPremium {
+   readonly vista: string;
+   readonly habilitado: boolean;
+   readonly bloqueado: boolean;
+-  readonly tooltip: string;
++  readonly tooltip: string | null;
++  /** Prueba gratuita de 15 días: vigente, cuándo vence y si todavía puede activarse. */
++  readonly en_prueba?: boolean;
++  readonly prueba_expira_en?: string | null;
++  readonly prueba_disponible?: boolean;
++}
++
++/** `POST /api/premium/activar-prueba` */
++export interface RespuestaPrueba {
++  readonly modulo: CodigoModuloPremium;
++  readonly nombre: string;
++  readonly dias: number;
++  readonly prueba_inicio: string;
++  readonly prueba_expira_en: string;
+ }
+ 
+ // ───────────────────────── Estado de la interfaz ─────────────────────────
+diff --git a/middlewares/auth.js b/middlewares/auth.js
+index 81ff295..90dc73d 100644
+--- a/middlewares/auth.js
++++ b/middlewares/auth.js
+@@ -4,20 +4,21 @@ const cfg = require('../config/env');
+ const { e } = require('../errors/AppError');
+ 
+ function firmarToken(usuario) {
+-  return jwt.sign({ sub: usuario.id, rol: usuario.rol, nombre: usuario.nombre }, cfg.jwt.secret, {
++  // sede_id: NULL = acceso consolidado (SuperAdmin); un entero fija al usuario a esa sede (ver utils/alcance.js).
++  return jwt.sign({ sub: usuario.id, rol: usuario.rol, nombre: usuario.nombre, sede_id: usuario.sede_id ?? null }, cfg.jwt.secret, {
+     algorithm: 'HS256',
+     expiresIn: cfg.jwt.expiraEn,
+   });
+ }
+ 
+-/** Exige `Authorization: Bearer <jwt>`. Fija req.usuario = { id, rol, nombre }. */
++/** Exige `Authorization: Bearer <jwt>`. Fija req.usuario = { id, rol, nombre, sede_id }. */
+ function requireAuth(req, _res, next) {
+   const cabecera = req.get('authorization') || '';
+   const m = /^Bearer\s+(.+)$/i.exec(cabecera);
+   if (!m) return next(e.noAutenticado());
+   try {
+     const p = jwt.verify(m[1], cfg.jwt.secret, { algorithms: ['HS256'] });
+-    req.usuario = { id: Number(p.sub), rol: p.rol, nombre: p.nombre };
++    req.usuario = { id: Number(p.sub), rol: p.rol, nombre: p.nombre, sede_id: p.sede_id === undefined || p.sede_id === null ? null : Number(p.sede_id) };
+     return next();
+   } catch (err) {
+     return next(e.noAutenticado(err.name === 'TokenExpiredError' ? 'La sesión expiró. Inicia sesión de nuevo.' : 'Token inválido.'));
+diff --git a/middlewares/errorHandler.js b/middlewares/errorHandler.js
+index 147f6c5..47ee2e5 100644
+--- a/middlewares/errorHandler.js
++++ b/middlewares/errorHandler.js
+@@ -82,7 +82,7 @@ function notFound(req, _res, next) {
+ // eslint-disable-next-line no-unused-vars
+ function errorHandler(err, req, res, next) {
+   const r = normalizar(err);
+-  if (r.status >= 500) console.error(`[error] ${req.id || '-'} ${req.method} ${req.originalUrl}`, err);
++  if (r.status >= 500) console.error(`[error] ${req.id || '-'} ${req.method} ${String(req.originalUrl ?? '').replace(/(invitacion|portal)\/[a-f0-9]{48}/g, '$1/<token>').replace(/([?&]invitacion=)[^&]*/g, '$1<token>')}`, err);
+   // Si ya se enviaron cabeceras (p. ej. un .xlsx a medias) no se puede enviar JSON: se corta la conexión.
+   if (res.headersSent) return res.destroy(err);
+   // Si el error ocurrió antes del primer byte de una descarga (.xlsx), el navegador no debe guardar el JSON como archivo.
+diff --git a/modules/premium/guard.js b/modules/premium/guard.js
+index 0636b80..f0d144e 100644
+--- a/modules/premium/guard.js
++++ b/modules/premium/guard.js
+@@ -5,28 +5,54 @@ const { TOOLTIP_BLOQUEADO, porCodigo } = require('./catalogo');
+ 
+ const repoSql = {
+   async leer(codigo) {
+-    const r = await ejecutar('SELECT nombre, precio_usd, habilitado FROM modulos_premium WHERE codigo = $1', [codigo]);
++    const r = await ejecutar('SELECT nombre, precio_usd, habilitado, prueba_expira_en, prueba_usada FROM modulos_premium WHERE codigo = $1', [codigo]);
+     return r.rows[0] || null;
+   },
+   async leerTodos() {
+-    return (await ejecutar('SELECT codigo, nombre, descripcion, precio_usd, habilitado, habilitado_en FROM modulos_premium ORDER BY precio_usd')).rows;
++    return (await ejecutar('SELECT codigo, nombre, descripcion, precio_usd, habilitado, habilitado_en, prueba_inicio, prueba_expira_en, prueba_usada FROM modulos_premium ORDER BY precio_usd')).rows;
+   },
+ };
+ 
+ /**
+- * Candado de módulos premium. El estado se lee de la base (cache de 15 s para no consultar en cada petición).
+- * Deshabilitado → 403 MODULO_PREMIUM_DESHABILITADO (con precio y tooltip para la UI). Si el codigo no existe, también se bloquea.
++ * Estado de acceso de un módulo a partir de su fila. Función pura: `ahora` (ms) se evalúa en CADA petición, de modo que una prueba
++ * gratuita se bloquea sola en el instante exacto de su vencimiento aunque la fila siga en caché.
++ *   contratado  = habilitado (Astra lo activó tras la contratación)
++ *   enPrueba    = prueba_expira_en en el futuro
++ *   activo      = contratado || enPrueba   ← lo que decide el candado
++ */
++function evaluarAcceso(fila, ahora) {
++  if (!fila) return { activo: false, contratado: false, enPrueba: false, pruebaExpiraEn: null, pruebaUsada: false };
++  const expira = fila.prueba_expira_en ? new Date(fila.prueba_expira_en).getTime() : null;
++  const contratado = Boolean(fila.habilitado);
++  const enPrueba = !contratado && expira !== null && expira > ahora;
++  return {
++    activo: contratado || enPrueba, contratado, enPrueba,
++    pruebaExpiraEn: expira !== null ? new Date(expira).toISOString() : null,
++    pruebaUsada: Boolean(fila.prueba_usada),
++  };
++}
++
++/**
++ * Candado de módulos premium. La fila se lee de la base (cache de 15 s para no consultar en cada petición) pero la VIGENCIA de la
++ * prueba se calcula en vivo. Inactivo → 403 MODULO_PREMIUM_DESHABILITADO (con precio y tooltip para la UI; si hubo prueba, también
++ * `prueba_expirada_en`). Si el codigo no existe, también se bloquea.
+  */
+ function crearGuard({ repo = repoSql, ttlMs = 15_000, ahora = () => Date.now() } = {}) {
+   const cache = new Map();
+ 
+   async function estado(codigo) {
+-    const c = cache.get(codigo);
+-    if (c && ahora() - c.en < ttlMs) return c.valor;
+-    const fila = await repo.leer(codigo);
+-    const valor = fila ? { habilitado: Boolean(fila.habilitado), nombre: fila.nombre, precioUsd: Number(fila.precio_usd) } : { habilitado: false, nombre: codigo, precioUsd: null };
+-    cache.set(codigo, { valor, en: ahora() });
+-    return valor;
++    let c = cache.get(codigo);
++    if (!c || ahora() - c.en >= ttlMs) {
++      c = { fila: await repo.leer(codigo), en: ahora() };
++      cache.set(codigo, c);
++    }
++    const acceso = evaluarAcceso(c.fila, ahora());
++    return {
++      ...acceso,
++      habilitado: acceso.activo, // compatibilidad: "habilitado" para el candado = contratado o en prueba vigente
++      nombre: c.fila ? c.fila.nombre : codigo,
++      precioUsd: c.fila ? Number(c.fila.precio_usd) : null,
++    };
+   }
+ 
+   function requireModulo(codigo) {
+@@ -34,8 +60,10 @@ function crearGuard({ repo = repoSql, ttlMs = 15_000, ahora = () => Date.now() }
+     return async (_req, _res, next) => {
+       try {
+         const m = await estado(codigo);
+-        if (!m.habilitado) {
+-          return next(new AppError(403, 'MODULO_PREMIUM_DESHABILITADO', TOOLTIP_BLOQUEADO, { modulo: codigo, nombre: m.nombre, precio_usd: m.precioUsd }));
++        if (!m.activo) {
++          const detalles = { modulo: codigo, nombre: m.nombre, precio_usd: m.precioUsd };
++          if (m.pruebaExpiraEn) detalles.prueba_expiro_en = m.pruebaExpiraEn; // hubo prueba y ya venció
++          return next(new AppError(403, 'MODULO_PREMIUM_DESHABILITADO', TOOLTIP_BLOQUEADO, detalles));
+         }
+         return next();
+       } catch (err) {
+@@ -48,4 +76,4 @@ function crearGuard({ repo = repoSql, ttlMs = 15_000, ahora = () => Date.now() }
+   return { requireModulo, estado, invalidar, repo };
+ }
+ 
+-module.exports = { crearGuard, guard: crearGuard() };
++module.exports = { crearGuard, evaluarAcceso, guard: crearGuard() };
+diff --git a/modules/premium/premium.routes.js b/modules/premium/premium.routes.js
+index 13df2bb..68541bd 100644
+--- a/modules/premium/premium.routes.js
++++ b/modules/premium/premium.routes.js
+@@ -1,8 +1,11 @@
+ 'use strict';
+ const express = require('express');
+-const { guard } = require('./guard');
++const { guard, evaluarAcceso } = require('./guard');
+ const { CATALOGO, TOOLTIP_BLOQUEADO } = require('./catalogo');
+-const { requireAuth } = require('../../middlewares/auth');
++const { requireAuth, requireRol } = require('../../middlewares/auth');
++const { requireConsolidado } = require('../../utils/alcance');
++const { activarPrueba } = require('./prueba.service');
++const { validar } = require('../../utils/validar');
+ const { AppError } = require('../../errors/AppError');
+ const { asyncHandler, ok } = require('../../utils/http');
+ 
+@@ -20,14 +23,27 @@ catalogoRouter.get('/modulos', requireAuth, asyncHandler(async (_req, res) => {
+   const porCod = new Map(filas.map((f) => [f.codigo, f]));
+   ok(res, CATALOGO.map((m) => {
+     const f = porCod.get(m.codigo);
+-    const habilitado = Boolean(f && f.habilitado);
++    const acceso = evaluarAcceso(f, Date.now());
+     return {
+       codigo: m.codigo, nombre: m.nombre, descripcion: f ? f.descripcion : '', precio_usd: f ? Number(f.precio_usd) : m.precioUsd,
+-      vista: m.vista, habilitado, bloqueado: !habilitado, tooltip: habilitado ? null : TOOLTIP_BLOQUEADO,
++      vista: m.vista,
++      habilitado: acceso.activo, bloqueado: !acceso.activo, tooltip: acceso.activo ? null : TOOLTIP_BLOQUEADO,
++      // Prueba gratuita de 15 días: vigente (en_prueba), cuándo vence, y si todavía puede activarse.
++      en_prueba: acceso.enPrueba, prueba_expira_en: acceso.pruebaExpiraEn,
++      prueba_disponible: Boolean(f) && !acceso.contratado && !acceso.pruebaUsada,
+     };
+   }));
+ }));
+ 
++/**
++ * POST /api/premium/activar-prueba — { modulo? } (por defecto WHATSAPP_AUTOMATICO). Abre 15 días de prueba. Solo admin con acceso
++ * consolidado: el módulo se contrata por academia, no por sede.
++ */
++catalogoRouter.post('/activar-prueba', requireAuth, requireRol('admin'), requireConsolidado, asyncHandler(async (req, res) => {
++  const { modulo } = validar(req.body, { modulo: { tipo: 'enum', valores: CATALOGO.map((m) => m.codigo), defecto: 'WHATSAPP_AUTOMATICO' } });
++  ok(res, await activarPrueba(modulo), 201);
++}));
++
+ // ── Módulo: Atención al Cliente por IA y Clasificación Temática (US$ 200) ───────────────────────
+ const ia = express.Router();
+ ia.use(requireAuth, guard.requireModulo('IA_ATENCION'));
+diff --git a/modules/premium/prueba.service.js b/modules/premium/prueba.service.js
+new file mode 100644
+index 0000000..8f857b6
+--- /dev/null
++++ b/modules/premium/prueba.service.js
+@@ -0,0 +1,31 @@
++'use strict';
++const { ejecutar } = require('../../config/db');
++const { e } = require('../../errors/AppError');
++const { guard: guardGlobal } = require('./guard');
++
++const DIAS_PRUEBA = 15;
++
++/**
++ * Activa la prueba gratuita de 15 días de un módulo Premium: escribe la ventana [NOW(), NOW() + 15 días) en modulos_premium.
++ * Un solo UPDATE condicional y atómico: solo prospera si el módulo NO está contratado y la prueba NO se usó antes (una por módulo),
++ * así dos clics simultáneos no extienden la ventana. El vencimiento no necesita tarea de limpieza: el guard compara contra NOW().
++ */
++async function activarPrueba(codigo, { guard = guardGlobal, dias = DIAS_PRUEBA } = {}) {
++  const r = await ejecutar(
++    `UPDATE modulos_premium
++        SET prueba_inicio = NOW(), prueba_expira_en = NOW() + make_interval(days => $2::int), prueba_usada = TRUE, actualizado_en = NOW()
++      WHERE codigo = $1 AND habilitado = FALSE AND prueba_usada = FALSE
++      RETURNING codigo, nombre, prueba_inicio, prueba_expira_en`,
++    [codigo, dias]);
++  if (!r.rowCount) {
++    const m = await ejecutar('SELECT habilitado, prueba_expira_en FROM modulos_premium WHERE codigo = $1', [codigo]);
++    if (!m.rowCount) throw e.noEncontrado('El módulo');
++    if (m.rows[0].habilitado) throw e.conflicto('MODULO_YA_CONTRATADO', 'El módulo ya está contratado: no necesita prueba.');
++    throw e.conflicto('PRUEBA_YA_UTILIZADA', 'La prueba gratuita de este módulo ya fue utilizada.', { prueba_expira_en: m.rows[0].prueba_expira_en });
++  }
++  guard.invalidar(); // el candado debe ver la prueba de inmediato (no esperar el TTL de la caché)
++  const f = r.rows[0];
++  return { modulo: f.codigo, nombre: f.nombre, dias, prueba_inicio: f.prueba_inicio, prueba_expira_en: f.prueba_expira_en };
++}
++
++module.exports = { activarPrueba, DIAS_PRUEBA };
+diff --git a/modules/premium/whatsapp-cron.js b/modules/premium/whatsapp-cron.js
+new file mode 100644
+index 0000000..b2a6b33
+--- /dev/null
++++ b/modules/premium/whatsapp-cron.js
+@@ -0,0 +1,147 @@
++'use strict';
++/**
++ * Módulo Premium WHATSAPP_AUTOMATICO — tarea programada diaria (08:00, hora de Caracas) que despacha, sede por sede y de forma
++ * SECUENCIAL, las alertas Preventiva (3–5 días antes del vencimiento) y de Morosidad a las familias, con una pausa de 1,5 s entre
++ * mensajes para no saturar la API de Meta. Sin dependencias nuevas: un temporizador en proceso + una reclamación diaria atómica en la
++ * base de datos, de modo que varias instancias del servidor (o un reinicio a las 08:00) envían UNA sola vez al día.
++ *
++ *   · El candado Premium se evalúa en cada ciclo: si la prueba de 15 días venció (o el módulo no está contratado) no se envía nada.
++ *   · Reutiliza notificaciones.service.generarAlerta (mismas reglas, plantillas, tasa BCV fresca y registro en notificaciones_whatsapp).
++ *   · Un fallo individual (teléfono inválido, Meta caída) se cuenta y se sigue con la siguiente familia.
++ */
++const { ejecutar } = require('../../config/db');
++const cfg = require('../../config/env');
++const { AppError } = require('../../errors/AppError');
++const { aFechaSql, hoyCaracas, proximaEjecucionCaracas } = require('../../utils/fechas');
++const { guard: guardGlobal } = require('./guard');
++const notificaciones = require('../../services/notificaciones.service');
++
++const MODULO = 'WHATSAPP_AUTOMATICO';
++const CLAVE_ULTIMO_DIA = 'CRON_WA_ULTIMO_DIA';
++const PAUSA_MS_DEFECTO = 1500;
++const MAX_TIMEOUT_MS = 2_147_483_647;
++
++const dormir = (ms) => new Promise((r) => { setTimeout(r, ms); });
++
++/**
++ * Reclama el día `hoy` ('AAAA-MM-DD'): el INSERT … ON CONFLICT … WHERE solo escribe (y devuelve fila) si el valor guardado es OTRO día.
++ * Dos instancias a la vez: la segunda no obtiene fila → no envía. Devuelve true si este proceso es el que debe ejecutar el ciclo.
++ */
++async function reclamarDia(hoy) {
++  const r = await ejecutar(
++    `INSERT INTO parametros (clave, valor) VALUES ($1, $2)
++     ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_en = NOW()
++       WHERE parametros.valor <> EXCLUDED.valor
++     RETURNING valor`,
++    [CLAVE_ULTIMO_DIA, hoy]);
++  return r.rowCount > 0;
++}
++
++/**
++ * Estudiantes de una sede (NULL = estudiantes sin sede asignada) con alerta pendiente de enviar hoy: en el estado dinámico pedido, con
++ * (opcional) una cuota por vencer en la ventana, y SIN una notificación de ese tipo ya generada hoy (evita duplicar con envíos manuales).
++ */
++async function candidatos({ sedeId, estado, tipo, hoy, ventana }) {
++  const conVentana = Boolean(ventana);
++  const r = await ejecutar(
++    `SELECT v.id FROM vw_estudiantes_estado v
++      WHERE v.estado_dinamico = $2::text
++        AND v.sede_id IS NOT DISTINCT FROM $1::int
++        AND ($3::boolean = FALSE OR EXISTS (
++              SELECT 1 FROM cuotas c
++               WHERE c.estudiante_id = v.id AND c.estado = 'Pendiente' AND c.fecha_vencimiento BETWEEN $4::date AND $5::date))
++        AND NOT EXISTS (
++              SELECT 1 FROM notificaciones_whatsapp n
++               WHERE n.estudiante_id = v.id AND n.tipo = $6::text AND n.estado <> 'FALLIDA'
++                 AND (n.creado_en AT TIME ZONE 'America/Caracas')::date = $7::date)
++      ORDER BY v.id`,
++    [sedeId, estado, conVentana, ventana ? aFechaSql(ventana.desde) : null, ventana ? aFechaSql(ventana.hasta) : null, tipo, aFechaSql(hoy)]);
++  return r.rows.map((f) => f.id);
++}
++
++/** Suma `dias` a una fecha 'AAAA-MM-DD' (calendario, sin huso). */
++function sumarDias(fecha, dias) {
++  const [y, m, d] = fecha.split('-').map(Number);
++  return new Date(Date.UTC(y, m - 1, d + dias)).toISOString().slice(0, 10);
++}
++
++/**
++ * Un ciclo completo. `forzar: true` omite la reclamación diaria (reejecución manual; el control anti-duplicado por estudiante sigue vigente).
++ * Devuelve el resumen { omitido? , sedes, enviadas, omitidas, fallidas }.
++ */
++async function ejecutarCiclo({ ahora = Date.now, forzar = false, guard = guardGlobal, servicio = notificaciones, pausaMs = cfg.cron.pausaMs, esperar = dormir, log = console } = {}) {
++  const hoy = hoyCaracas(ahora());
++  const modulo = await guard.estado(MODULO);
++  if (!modulo.activo) {
++    log.log(`[cron-whatsapp] ${hoy}: módulo ${MODULO} inactivo (no contratado o prueba vencida); no se envía nada.`);
++    return { omitido: 'MODULO_INACTIVO', enviadas: 0, omitidas: 0, fallidas: 0 };
++  }
++  if (!forzar && !(await reclamarDia(hoy))) {
++    log.log(`[cron-whatsapp] ${hoy}: el ciclo de hoy ya fue reclamado por otra ejecución.`);
++    return { omitido: 'YA_EJECUTADO_HOY', enviadas: 0, omitidas: 0, fallidas: 0 };
++  }
++
++  const sedes = (await ejecutar('SELECT id FROM sedes WHERE activa = TRUE ORDER BY id')).rows.map((s) => s.id);
++  const resumen = { sedes: 0, enviadas: 0, omitidas: 0, fallidas: 0 };
++  const ventana = { desde: sumarDias(hoy, notificaciones.VENTANA_PREVENTIVA.min), hasta: sumarDias(hoy, notificaciones.VENTANA_PREVENTIVA.max) };
++
++  // [...sedes, null]: el último pase atiende a las familias aún sin sede asignada (datos anteriores a la migración multi-sede).
++  for (const sedeId of [...sedes, null]) {
++    resumen.sedes += 1;
++    const pasos = [
++      { tipo: 'PREVENTIVA', estado: 'Activo', ventana },
++      { tipo: 'MOROSIDAD', estado: 'Moroso', ventana: null },
++    ];
++    for (const paso of pasos) {
++      const ids = await candidatos({ sedeId, estado: paso.estado, tipo: paso.tipo, hoy, ventana: paso.ventana });
++      for (const estudianteId of ids) {
++        let intentoEnvio = true;
++        try {
++          await servicio.generarAlerta({ tipo: paso.tipo, estudianteId, enviar: true, usuarioId: null, sedeId });
++          resumen.enviadas += 1;
++        } catch (err) {
++          if (err instanceof AppError && err.status === 422) {
++            resumen.omitidas += 1; // regla de negocio (fuera de ventana, pago en revisión…): no hubo mensaje
++            intentoEnvio = false;
++          } else {
++            resumen.fallidas += 1;
++            log.error(`[cron-whatsapp] ${paso.tipo} estudiante ${estudianteId} (sede ${sedeId ?? 'sin sede'}): ${err.detalles?.motivo || err.message}`);
++          }
++        }
++        if (intentoEnvio) await esperar(pausaMs); // 1,5 s entre mensajes
++      }
++    }
++  }
++  log.log(`[cron-whatsapp] ${hoy}: enviadas=${resumen.enviadas} omitidas=${resumen.omitidas} fallidas=${resumen.fallidas}`);
++  return resumen;
++}
++
++/**
++ * Programa el ciclo diario a las `hora`:00 de Caracas. Devuelve { detener, proxima() }. El temporizador no mantiene vivo el proceso.
++ * Tras cada disparo recalcula la siguiente ocurrencia desde el reloj real (no acumula deriva).
++ */
++function iniciarCron({ ahora = Date.now, hora = cfg.cron.hora, ciclo = ejecutarCiclo, programar = setTimeout, cancelar = clearTimeout, log = console } = {}) {
++  let temporizador = null;
++  let detenido = false;
++  const proxima = () => proximaEjecucionCaracas(ahora(), hora, 0);
++
++  function armar() {
++    if (detenido) return;
++    const espera = Math.max(0, Math.min(proxima() - ahora(), MAX_TIMEOUT_MS));
++    temporizador = programar(async () => {
++      try {
++        await ciclo({ ahora });
++      } catch (err) {
++        log.error('[cron-whatsapp] El ciclo diario falló:', err.message);
++      } finally {
++        armar();
++      }
++    }, espera);
++    if (temporizador && typeof temporizador.unref === 'function') temporizador.unref();
++  }
++  armar();
++  log.log(`[cron-whatsapp] Programado: diario a las ${String(hora).padStart(2, '0')}:00 (hora de Caracas). Próxima: ${new Date(proxima()).toISOString()}`);
++  return { detener() { detenido = true; if (temporizador) cancelar(temporizador); }, proxima };
++}
++
++module.exports = { ejecutarCiclo, iniciarCron, reclamarDia, candidatos, sumarDias, MODULO, CLAVE_ULTIMO_DIA, PAUSA_MS_DEFECTO };
+diff --git a/package.json b/package.json
+index ff18c9e..b9dc460 100644
+--- a/package.json
++++ b/package.json
+@@ -11,6 +11,7 @@
+     "dev": "nodemon server.js",
+     "migrate": "node scripts/migrate.js",
+     "crear-admin": "node scripts/crear-admin.js",
++    "cron:whatsapp": "node scripts/cron-whatsapp.js",
+     "test": "node --test tests/*.test.js",
+     "test:integracion": "node --test tests/integracion.pg.test.js",
+     "frontend:install": "npm --prefix frontend install",
+diff --git a/routes/index.js b/routes/index.js
+index e865e2e..736ff41 100644
+--- a/routes/index.js
++++ b/routes/index.js
+@@ -1,6 +1,7 @@
+ 'use strict';
+ const express = require('express');
+ const { requireAuth, requireRol } = require('../middlewares/auth');
++const { requireConsolidado } = require('../utils/alcance');
+ const { crearLimitador } = require('../middlewares/limitador');
+ const { ejecutar } = require('../config/db');
+ const { asyncHandler, ok } = require('../utils/http');
+@@ -13,10 +14,13 @@ const facturacion = require('../controllers/facturacion.controller');
+ const conta = require('../controllers/contabilidad.controller');
+ const notif = require('../controllers/notificaciones.controller');
+ const cfg = require('../controllers/configuracion.controller');
++const sedes = require('../controllers/sedes.controller');
+ const exportaciones = require('../controllers/exportaciones.controller');
+ const premium = require('../modules/premium/premium.routes');
+ 
+ const soloAdmin = requireRol('admin');
++// Datos SIN sede (personal, horas, nómina) o ajustes globales: solo admin con acceso consolidado (sede_id NULL).
++const soloConsolidado = [requireRol('admin'), requireConsolidado];
+ const api = express.Router();
+ 
+ // ── Salud ───────────────────────────────────────────────────────────────────────────────────────
+@@ -33,6 +37,8 @@ api.get('/auth/me', requireAuth, auth.me);
+ // ── PÚBLICO: Admisiones (formulario de inscripción) ─────────────────────────────────────────────
+ const limiteAdmision = crearLimitador({ ventanaMs: 60 * 60_000, max: 15, codigo: 'DEMASIADAS_INSCRIPCIONES', mensaje: 'Demasiados envíos desde esta red. Intenta más tarde.' });
+ api.get('/public/admisiones/config', crearLimitador({ ventanaMs: 60_000, max: 60 }), admisiones.config);
++// Enlace de invitación: devuelve sede, cuentas de cobro de la sede y el nivel asignado (bloqueado). El nivel lo vuelve a imponer el POST.
++api.get('/public/admisiones/invitacion/:token', crearLimitador({ ventanaMs: 60_000, max: 60 }), admisiones.invitacion);
+ api.post('/public/admisiones', limiteAdmision, admisiones.limitarConcurrencia, admisiones.cargaArchivos, admisiones.inscribir);
+ 
+ // ── PÚBLICO: Portal privado del representante (acceso por enlace único) ─────────────────────────
+@@ -59,36 +65,45 @@ api.get('/facturacion/auditoria', facturacion.auditoria);
+ api.post('/facturacion/auditoria/:id/aprobar', facturacion.aprobar);
+ api.post('/facturacion/auditoria/:id/rechazar', facturacion.rechazar);
+ 
+-// Contabilidad interna (solo admin)
+-api.get('/contabilidad/personal', soloAdmin, conta.listarPersonal);
+-api.post('/contabilidad/personal', soloAdmin, conta.crearPersonal);
+-api.get('/contabilidad/personal/:id', soloAdmin, conta.obtenerPersonal);
+-api.put('/contabilidad/personal/:id', soloAdmin, conta.actualizarPersonal);
+-api.post('/contabilidad/personal/:id/desactivar', soloAdmin, conta.desactivarPersonal);
+-api.post('/contabilidad/personal/:id/reactivar', soloAdmin, conta.reactivarPersonal);
+-api.get('/contabilidad/horas', soloAdmin, conta.listarHoras);
+-api.post('/contabilidad/horas', soloAdmin, conta.registrarHoras);
+-api.post('/contabilidad/nomina/calcular', soloAdmin, conta.calcularNomina);
+-api.get('/contabilidad/nomina', soloAdmin, conta.listarNomina);
+-api.post('/contabilidad/nomina/:id/pagar', soloAdmin, conta.pagarNomina);
++// Contabilidad interna (solo admin). Personal/horas/nómina no tienen sede → solo acceso consolidado; egresos y balance respetan la sede.
++api.get('/contabilidad/personal', ...soloConsolidado, conta.listarPersonal);
++api.post('/contabilidad/personal', ...soloConsolidado, conta.crearPersonal);
++api.get('/contabilidad/personal/:id', ...soloConsolidado, conta.obtenerPersonal);
++api.put('/contabilidad/personal/:id', ...soloConsolidado, conta.actualizarPersonal);
++api.post('/contabilidad/personal/:id/desactivar', ...soloConsolidado, conta.desactivarPersonal);
++api.post('/contabilidad/personal/:id/reactivar', ...soloConsolidado, conta.reactivarPersonal);
++api.get('/contabilidad/horas', ...soloConsolidado, conta.listarHoras);
++api.post('/contabilidad/horas', ...soloConsolidado, conta.registrarHoras);
++api.post('/contabilidad/nomina/calcular', ...soloConsolidado, conta.calcularNomina);
++api.get('/contabilidad/nomina', ...soloConsolidado, conta.listarNomina);
++api.post('/contabilidad/nomina/:id/pagar', ...soloConsolidado, conta.pagarNomina);
+ api.get('/contabilidad/egresos', soloAdmin, conta.listarEgresos);
+ api.post('/contabilidad/egresos', soloAdmin, conta.crearEgreso);
+ api.get('/contabilidad/balance', soloAdmin, conta.balance);
+ 
+ // Exportación a Excel (.xlsx)
+-api.get('/exportaciones/contabilidad.xlsx', soloAdmin, exportaciones.contabilidad);
++api.get('/exportaciones/contabilidad.xlsx', ...soloConsolidado, exportaciones.contabilidad);
+ api.get('/exportaciones/facturacion.xlsx', soloAdmin, exportaciones.facturacion);
+ 
++// Sedes e invitaciones de inscripción (nivel y sede blindados)
++api.get('/sedes', sedes.listar);
++api.post('/sedes', ...soloConsolidado, sedes.crear);
++api.post('/sedes/:id/activar', ...soloConsolidado, sedes.activar);
++api.post('/sedes/:id/desactivar', ...soloConsolidado, sedes.desactivar);
++api.get('/invitaciones', sedes.listarInvitaciones);
++api.post('/invitaciones', sedes.crearInvitacion);
++api.post('/invitaciones/:id/revocar', sedes.revocarInvitacion);
++
+ // Notificaciones por WhatsApp (manuales, una por una)
+ api.post('/notificaciones/whatsapp/preventiva/:estudianteId', notif.preventiva);
+ api.post('/notificaciones/whatsapp/morosidad/:estudianteId', notif.morosidad);
+ api.get('/notificaciones/whatsapp', notif.historial);
+ 
+ // Configuración de la academia
+-api.get('/configuracion', soloAdmin, cfg.obtener);
+-api.put('/configuracion/matricula', soloAdmin, cfg.fijarMatricula);
+-api.post('/configuracion/cuentas', soloAdmin, cfg.crearCuenta);
+-api.put('/configuracion/cuentas/:id', soloAdmin, cfg.actualizarCuenta);
++api.get('/configuracion', ...soloConsolidado, cfg.obtener);
++api.put('/configuracion/matricula', ...soloConsolidado, cfg.fijarMatricula);
++api.post('/configuracion/cuentas', ...soloConsolidado, cfg.crearCuenta);
++api.put('/configuracion/cuentas/:id', ...soloConsolidado, cfg.actualizarCuenta);
+ 
+ // Fase 2 — módulos premium (candados): el catálogo alimenta los candados/tooltips del panel
+ api.use('/premium', premium.catalogoRouter);
+diff --git a/scripts/crear-admin.js b/scripts/crear-admin.js
+index a2e51e7..9b278ac 100644
+--- a/scripts/crear-admin.js
++++ b/scripts/crear-admin.js
+@@ -1,22 +1,29 @@
+ 'use strict';
+ // Crea (o reactiva) el primer usuario administrador SIN pasar contraseñas por el chat ni por el código:
+ //   ADMIN_NOMBRE="..." ADMIN_EMAIL=... ADMIN_PASSWORD=... npm run crear-admin
++// Multi-sede (opcional): ADMIN_ROL=secretaria ADMIN_SEDE_ID=<id> crea un usuario atado a una sede. Sin ADMIN_SEDE_ID el usuario
++// tiene acceso consolidado (SuperAdmin) y solo el rol 'admin' puede quedar sin sede (una secretaria sin sede no puede operar).
+ require('dotenv').config({ path: require('path').resolve(__dirname, '..', '.env') });
+ const bcrypt = require('bcryptjs');
+ const { ejecutar, closePool } = require('../config/db');
+ 
+ async function main() {
+-  const { ADMIN_NOMBRE = 'Administrador', ADMIN_EMAIL, ADMIN_PASSWORD } = process.env;
++  const { ADMIN_NOMBRE = 'Administrador', ADMIN_EMAIL, ADMIN_PASSWORD, ADMIN_ROL = 'admin', ADMIN_SEDE_ID } = process.env;
+   if (!ADMIN_EMAIL || !ADMIN_PASSWORD) throw new Error('Define ADMIN_EMAIL y ADMIN_PASSWORD en el entorno.');
+   if (ADMIN_PASSWORD.length < 12) throw new Error('ADMIN_PASSWORD debe tener al menos 12 caracteres.');
++  if (!['admin', 'secretaria'].includes(ADMIN_ROL)) throw new Error("ADMIN_ROL debe ser 'admin' o 'secretaria'.");
++  const sedeId = ADMIN_SEDE_ID ? Number(ADMIN_SEDE_ID) : null;
++  if (ADMIN_SEDE_ID && (!Number.isInteger(sedeId) || sedeId <= 0)) throw new Error('ADMIN_SEDE_ID debe ser un entero positivo.');
++  if (ADMIN_ROL === 'secretaria' && !sedeId) throw new Error('Una secretaria requiere ADMIN_SEDE_ID (la sede en la que opera).');
+   const hash = await bcrypt.hash(ADMIN_PASSWORD, 12);
+   // Upsert atómico por la restricción UNIQUE del correo: si existe, solo se actualiza la clave/nombre y se reactiva (el rol no se toca).
+   await ejecutar(
+-    `INSERT INTO usuarios_admin (nombre, email, password_hash, rol)
+-     VALUES ($1, $2, $3, 'admin')
++    `INSERT INTO usuarios_admin (nombre, email, password_hash, rol, sede_id)
++     VALUES ($1, $2, $3, $4, $5)
+      ON CONFLICT (email) DO UPDATE
+-        SET password_hash = EXCLUDED.password_hash, nombre = EXCLUDED.nombre, activo = TRUE`,
+-    [ADMIN_NOMBRE, ADMIN_EMAIL.trim().toLowerCase(), hash]);
++        SET password_hash = EXCLUDED.password_hash, nombre = EXCLUDED.nombre, activo = TRUE,
++            sede_id = COALESCE(EXCLUDED.sede_id, usuarios_admin.sede_id)`,
++    [ADMIN_NOMBRE, ADMIN_EMAIL.trim().toLowerCase(), hash, ADMIN_ROL, sedeId]);
+   console.log(`Administrador listo: ${ADMIN_EMAIL}`);
+ }
+ 
+diff --git a/scripts/cron-whatsapp.js b/scripts/cron-whatsapp.js
+new file mode 100644
+index 0000000..cedeb5c
+--- /dev/null
++++ b/scripts/cron-whatsapp.js
+@@ -0,0 +1,13 @@
++'use strict';
++// Ejecuta UN ciclo de alertas automáticas de WhatsApp (módulo premium WHATSAPP_AUTOMATICO) y termina.
++// Pensado para un programador externo (cron del sistema, Supabase pg_cron → webhook, Render/Railway cron) en lugar del temporizador
++// interno (CRON_WHATSAPP=false en el servidor). Uso:
++//   npm run cron:whatsapp                 # respeta la reclamación diaria: no repite el mismo día
++//   npm run cron:whatsapp -- --forzar     # reejecuta hoy (el control anti-duplicado por estudiante sigue vigente)
++const { ejecutarCiclo } = require('../modules/premium/whatsapp-cron');
++const { closePool } = require('../config/db');
++
++ejecutarCiclo({ forzar: process.argv.includes('--forzar') })
++  .then((r) => { console.log(JSON.stringify(r)); })
++  .catch((err) => { console.error('Ciclo fallido:', err.message); process.exitCode = 1; })
++  .finally(() => closePool());
+diff --git a/server.js b/server.js
+index cdb2edf..2940b72 100644
+--- a/server.js
++++ b/server.js
+@@ -2,12 +2,15 @@
+ const cfg = require('./config/env');
+ const { crearApp } = require('./app');
+ const { closePool, getPool } = require('./config/db');
++const { iniciarCron } = require('./modules/premium/whatsapp-cron');
+ 
+ const app = crearApp();
++let cron = null;
+ const server = app.listen(cfg.puerto, () => {
+   console.log(`Brilliant Minds Academy · Core Base escuchando en http://localhost:${cfg.puerto}`);
+   console.log(`  Admisiones: /admisiones   Panel: /admin   Salud: /api/health`);
+   // Verifica la base al arrancar (no bloquea el servidor: /api/health/db informa el estado después).
++  if (cfg.cron.whatsappActivo) cron = iniciarCron();
+   getPool().then(() => console.log('  Base de datos PostgreSQL (Supabase) conectada.')).catch((e) => console.error('  ⚠ PostgreSQL no disponible:', e.message));
+ });
+ 
+@@ -20,6 +23,7 @@ function shutdown(codigo = 0) {
+   if (cerrando) return;
+   cerrando = true;
+   console.log('Cerrando servidor…');
++  if (cron) cron.detener();
+   const forzar = setTimeout(() => process.exit(codigo || 1), 10_000);
+   forzar.unref();
+   server.close(async () => {
+diff --git a/services/admisiones.service.js b/services/admisiones.service.js
+index 20327f0..021259b 100644
+--- a/services/admisiones.service.js
++++ b/services/admisiones.service.js
+@@ -7,6 +7,7 @@ const { bcv } = require('./bcv.service');
+ const { drive } = require('./drive.service');
+ const parametros = require('./parametros.service');
+ const pagos = require('./pagos.service');
++const invitaciones = require('./invitaciones.service');
+ 
+ /** Datos que necesita el formulario público: costo en USD y Bs. a la tasa BCV del día + cuentas de la academia. */
+ async function configPublica({ bcvSvc = bcv } = {}) {
+@@ -20,15 +21,37 @@ async function configPublica({ bcvSvc = bcv } = {}) {
+   };
+ }
+ 
++/**
++ * Configuración del formulario para un enlace de invitación: nivel BLINDADO (`nivel_asignado`), sede y las cuentas de cobro de ESA sede.
++ * El token se valida en cada llamada (un solo uso, vigencia, sede activa); la respuesta no incluye datos de otras sedes.
++ */
++async function configInvitacion(token, { bcvSvc = bcv } = {}) {
++  const inv = await invitaciones.resolver(token);
++  const [matricula, tasa, cuentas] = await Promise.all([parametros.matriculaUsd(), bcvSvc.obtenerTasa(), parametros.cuentasActivas(undefined, inv.sede_id)]);
++  return {
++    sede: { id: inv.sede_id, nombre: inv.sede },
++    nivel_asignado: inv.nivel_asignado,
++    matricula_usd: matricula,
++    tasa_bcv: tasa.tasa,
++    tasa_desactualizada: tasa.desactualizada,
++    matricula_bs: usdABs(matricula, tasa.tasa),
++    cuentas,
++  };
++}
++
+ /**
+  * Inscripción completa en UNA transacción:
+  *   1) representante (upsert por cédula) → 2) estudiante "Pendiente por Validación Administrativa"
+  *   3) cuota de matrícula + referencia bancaria "Por Validar" a la tasa BCV del momento
+  *   4) carpeta 'Nombre_Apellido_ID' en Drive con los 3 documentos → 5) COMMIT.
++ * Con `invitacion` ({ id, sede_id, nivel_asignado } ya resuelta por el controlador) el SERVIDOR impone el nivel y la sede (se ignora el
++ * grado enviado por el cliente) y consume el enlace de forma atómica en esta misma transacción.
+  * Si Drive falla, TODO se revierte (no quedan estudiantes sin expediente). Si la transacción falla después de subir a Drive
+  * (error en una consulta posterior o en el COMMIT), la carpeta se envía a la papelera (compensación) para no dejar huérfanos.
+  */
+-async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSvc = drive } = {}) {
++async function registrarInscripcion({ datos, archivos, invitacion = null }, { bcvSvc = bcv, driveSvc = drive } = {}) {
++  const gradoSolicitado = invitacion ? invitacion.nivel_asignado : datos.grado_solicitado;
++  const sedeId = invitacion ? invitacion.sede_id : null;
+   const tasa = await bcvSvc.obtenerTasa();
+   const matricula = await parametros.matriculaUsd();
+   let carpetaCreada = null;
+@@ -38,6 +61,9 @@ async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSv
+ 
+   try {
+     return await conTransaccion(async (tx) => {
++      // El enlace se consume PRIMERO: si otro envío lo usó entre tanto, falla aquí (410) antes de tocar Drive ni crear nada.
++      if (invitacion) await invitaciones.consumir(tx, invitacion.id);
++
+       // Upsert atómico por cédula (UNIQUE): sin ventana de carrera entre SELECT e INSERT. El correo existente no se borra si llega vacío.
+       const rep = await ejecutar(
+         `INSERT INTO representantes (nombres, apellidos, cedula, email, telefono)
+@@ -54,16 +80,18 @@ async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSv
+       const est = await ejecutar(
+         `INSERT INTO estudiantes
+            (representante_id, nombres, apellidos, cedula_identidad, fecha_nacimiento, grado_solicitado, colegio_procedencia, ultimo_grado_aprobado,
+-            tipo_sangre, alergias, condiciones_medicas, medicamentos, emergencia_nombre, emergencia_telefono)
+-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
++            tipo_sangre, alergias, condiciones_medicas, medicamentos, emergencia_nombre, emergencia_telefono, sede_id)
++         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+          RETURNING id`,
+         [
+           representanteId, datos.alumno_nombres, datos.alumno_apellidos, datos.alumno_cedula ? datos.alumno_cedula.toUpperCase() : null,
+-          aFechaSql(datos.alumno_fecha_nacimiento), datos.grado_solicitado, datos.colegio_procedencia, datos.ultimo_grado_aprobado,
++          aFechaSql(datos.alumno_fecha_nacimiento), gradoSolicitado, datos.colegio_procedencia, datos.ultimo_grado_aprobado,
+           datos.tipo_sangre, datos.alergias, datos.condiciones_medicas, datos.medicamentos, datos.emergencia_nombre, datos.emergencia_telefono,
++          sedeId,
+         ], tx);
+       const estudianteId = est.rows[0].id;
+       estudianteIdCreado = estudianteId;
++      if (invitacion) await invitaciones.vincularEstudiante(tx, invitacion.id, estudianteId);
+ 
+       const cuota = await ejecutar(
+         `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento)
+@@ -94,6 +122,8 @@ async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSv
+       resultado = {
+         estudiante_id: estudianteId,
+         estatus: 'Pendiente por Validación Administrativa',
++        sede_id: sedeId,
++        grado_solicitado: gradoSolicitado,
+         carpeta_drive: expediente.carpetaUrl,
+         referencia: datos.referencia_bancaria,
+         metodo_pago: datos.metodo_pago,
+@@ -148,4 +178,4 @@ async function compensarDrive(driveSvc, carpetaId) {
+   }
+ }
+ 
+-module.exports = { configPublica, registrarInscripcion };
++module.exports = { configPublica, configInvitacion, registrarInscripcion };
+diff --git a/services/contabilidad.service.js b/services/contabilidad.service.js
+index 0197ae0..80fa988 100644
+--- a/services/contabilidad.service.js
++++ b/services/contabilidad.service.js
+@@ -159,33 +159,39 @@ async function pagarNomina({ id }) {
+ }
+ 
+ // ───────── Egresos y balance ─────────
+-async function crearEgreso({ fecha, categoria, descripcion, monto_usd, referencia }) {
++/**
++ * Egreso con sede. Un usuario de sede SIEMPRE registra en la suya (el `sede_id` del cuerpo se ignora); el acceso consolidado puede
++ * indicar una sede o dejarlo en NULL (gasto general de la academia, visible solo en vista consolidada).
++ */
++async function crearEgreso({ fecha, categoria, descripcion, monto_usd, referencia, sede_id }, sedeId = null) {
++  const sede = sedeId ?? sede_id ?? null;
+   const r = await ejecutar(
+-    'INSERT INTO egresos (fecha, categoria, descripcion, monto_usd, referencia) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+-    [aFechaSql(fecha), categoria, descripcion, monto_usd, referencia]);
++    'INSERT INTO egresos (fecha, categoria, descripcion, monto_usd, referencia, sede_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
++    [aFechaSql(fecha), categoria, descripcion, monto_usd, referencia, sede]);
+   return { id: r.rows[0].id };
+ }
+ 
+-async function listarEgresos({ periodo, offset, limite }) {
++async function listarEgresos({ periodo, offset, limite, sedeId = null }) {
+   const lim = periodo ? limitesPeriodo(periodo) : null;
+-  const filtroParams = [lim ? aFechaSql(lim.desde) : null, lim ? aFechaSql(lim.hasta) : null];
+-  const filtro = 'WHERE ($1::date IS NULL OR fecha >= $1::date) AND ($2::date IS NULL OR fecha <= $2::date)';
++  const filtroParams = [lim ? aFechaSql(lim.desde) : null, lim ? aFechaSql(lim.hasta) : null, sedeId];
++  const filtro = 'WHERE ($1::date IS NULL OR fecha >= $1::date) AND ($2::date IS NULL OR fecha <= $2::date) AND ($3::int IS NULL OR sede_id = $3::int)';
+   const [items, total] = await Promise.all([
+-    ejecutar(`SELECT id, fecha, categoria, descripcion, monto_usd, referencia, nomina_pago_id FROM egresos ${filtro}
+-              ORDER BY fecha DESC, id DESC LIMIT $3 OFFSET $4`, [...filtroParams, limite, offset]),
++    ejecutar(`SELECT id, fecha, categoria, descripcion, monto_usd, referencia, nomina_pago_id, sede_id FROM egresos ${filtro}
++              ORDER BY fecha DESC, id DESC LIMIT $4 OFFSET $5`, [...filtroParams, limite, offset]),
+     ejecutar(`SELECT COUNT(*)::int AS n, COALESCE(SUM(monto_usd), 0) AS total_usd FROM egresos ${filtro}`, filtroParams),
+   ]);
+   return { items: items.rows, total: total.rows[0].n, total_usd: Number(total.rows[0].total_usd) };
+ }
+ 
+ /** Balance neto del período = ingresos cobrados (referencias aprobadas ese mes, hora de Caracas) − egresos del mes. */
+-async function balance(periodo) {
++async function balance(periodo, sedeId = null) {
+   const lim = limitesPeriodo(periodo);
+   const r = await ejecutar(
+     `SELECT
+-       (SELECT COALESCE(SUM(monto_usd), 0) FROM pagos_referencias WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz) AS ingresos_usd,
+-       (SELECT COALESCE(SUM(monto_usd), 0) FROM egresos WHERE fecha BETWEEN $3::date AND $4::date) AS egresos_usd`,
+-    [aInstanteSql(lim.inicioUtc), aInstanteSql(lim.finUtc), aFechaSql(lim.desde), aFechaSql(lim.hasta)]);
++       (SELECT COALESCE(SUM(monto_usd), 0) FROM pagos_referencias WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz
++          AND ($5::int IS NULL OR sede_id = $5::int)) AS ingresos_usd,
++       (SELECT COALESCE(SUM(monto_usd), 0) FROM egresos WHERE fecha BETWEEN $3::date AND $4::date AND ($5::int IS NULL OR sede_id = $5::int)) AS egresos_usd`,
++    [aInstanteSql(lim.inicioUtc), aInstanteSql(lim.finUtc), aFechaSql(lim.desde), aFechaSql(lim.hasta), sedeId]);
+   const ingresos = Number(r.rows[0].ingresos_usd);
+   const egresos = Number(r.rows[0].egresos_usd);
+   return { periodo, ingresos_usd: ingresos, egresos_usd: egresos, neto_usd: sumar(ingresos, -egresos) };
+diff --git a/services/crm.service.js b/services/crm.service.js
+index ca9c1ff..a102326 100644
+--- a/services/crm.service.js
++++ b/services/crm.service.js
+@@ -5,9 +5,12 @@ const { aFechaSql, hoyCaracas } = require('../utils/fechas');
+ 
+ const ESTADOS = ['Activo', 'Moroso', 'Fuera de la Academia', 'Pendiente por Validación Administrativa'];
+ 
++// Alcance multi-sede: `sedeId` NULL = consolidado; un entero restringe a esa sede (patrón `($n::int IS NULL OR x.sede_id = $n::int)`).
++// Los controladores lo obtienen con utils/alcance.js (fail-closed).
++
+ /** Conteo en tiempo real de las tres clasificaciones críticas (+ pendientes de validación). */
+-async function resumen() {
+-  const r = await ejecutar('SELECT estado_dinamico, COUNT(*)::int AS n FROM vw_estudiantes_estado GROUP BY estado_dinamico');
++async function resumen(sedeId = null) {
++  const r = await ejecutar('SELECT estado_dinamico, COUNT(*)::int AS n FROM vw_estudiantes_estado WHERE ($1::int IS NULL OR sede_id = $1::int) GROUP BY estado_dinamico', [sedeId]);
+   const base = { Activo: 0, Moroso: 0, 'Fuera de la Academia': 0, 'Pendiente por Validación Administrativa': 0 };
+   for (const row of r.rows) base[row.estado_dinamico] = row.n;
+   return {
+@@ -19,12 +22,13 @@ async function resumen() {
+   };
+ }
+ 
+-async function listar({ estado, q, offset, limite }) {
++async function listar({ estado, q, offset, limite, sedeId = null }) {
+   // Escapa los comodines de LIKE (\ % _) y busca sin distinguir mayúsculas (ILIKE; el esquema anterior era insensible por colación).
+   const busqueda = q ? `%${q.replace(/[\\%_]/g, '\\$&')}%` : null;
+-  const filtroParams = [estado || null, busqueda];
++  const filtroParams = [estado || null, busqueda, sedeId];
+   const filtro = `WHERE ($1::text IS NULL OR v.estado_dinamico = $1::text)
+-                    AND ($2::text IS NULL OR v.nombres ILIKE $2::text OR v.apellidos ILIKE $2::text OR r.cedula ILIKE $2::text OR r.apellidos ILIKE $2::text)`;
++                    AND ($2::text IS NULL OR v.nombres ILIKE $2::text OR v.apellidos ILIKE $2::text OR r.cedula ILIKE $2::text OR r.apellidos ILIKE $2::text)
++                    AND ($3::int IS NULL OR v.sede_id = $3::int)`;
+   const [items, total] = await Promise.all([
+     ejecutar(
+       `SELECT v.id, v.nombres, v.apellidos, v.grado_solicitado, v.estado_dinamico, v.estatus_pago, v.cuotas_vencidas, v.deuda_vencida_usd,
+@@ -33,13 +37,13 @@ async function listar({ estado, q, offset, limite }) {
+        FROM vw_estudiantes_estado v JOIN representantes r ON r.id = v.representante_id
+        ${filtro}
+        ORDER BY v.apellidos, v.nombres, v.id
+-       LIMIT $3 OFFSET $4`, [...filtroParams, limite, offset]),
++       LIMIT $4 OFFSET $5`, [...filtroParams, limite, offset]),
+     ejecutar(`SELECT COUNT(*)::int AS n FROM vw_estudiantes_estado v JOIN representantes r ON r.id = v.representante_id ${filtro}`, filtroParams),
+   ]);
+   return { items: items.rows, total: total.rows[0].n };
+ }
+ 
+-async function detalle(id) {
++async function detalle(id, sedeId = null) {
+   const [est, cuotas, docs, pagos] = await Promise.all([
+     ejecutar(
+       `SELECT e.*, v.estado_dinamico, v.estatus_pago, v.deuda_vencida_usd,
+@@ -47,7 +51,7 @@ async function detalle(id) {
+        FROM estudiantes e
+        JOIN vw_estudiantes_estado v ON v.id = e.id
+        JOIN representantes r ON r.id = e.representante_id
+-       WHERE e.id = $1`, [id]),
++       WHERE e.id = $1 AND ($2::int IS NULL OR e.sede_id = $2::int)`, [id, sedeId]),
+     ejecutar('SELECT id, tipo, concepto, monto_usd, fecha_vencimiento, estado FROM cuotas WHERE estudiante_id = $1 ORDER BY fecha_vencimiento DESC, id DESC', [id]),
+     ejecutar('SELECT id, tipo, nombre_archivo, mime_type, tamano_bytes, drive_url, subido_en FROM documentos_estudiante WHERE estudiante_id = $1', [id]),
+     ejecutar('SELECT id, cuota_id, referencia, metodo_pago, monto_usd, monto_bs, tasa_bcv, estado, declarado_en FROM pagos_referencias WHERE estudiante_id = $1 ORDER BY declarado_en DESC', [id]),
+@@ -58,15 +62,15 @@ async function detalle(id) {
+ }
+ 
+ /** Pasa al estudiante a "Fuera de la Academia" (retirado/inactivo). Las cuotas pendientes quedan anuladas para no generar morosidad. */
+-async function retirar({ id, motivo, fecha }) {
++async function retirar({ id, motivo, fecha, sedeId = null }) {
+   return conTransaccion(async (tx) => {
+     const r = await ejecutar(
+       `UPDATE estudiantes SET estatus_academico = 'Fuera de la Academia', fecha_retiro = $2, motivo_retiro = $3, actualizado_en = NOW()
+-        WHERE id = $1 AND estatus_academico <> 'Fuera de la Academia'
++        WHERE id = $1 AND estatus_academico <> 'Fuera de la Academia' AND ($4::int IS NULL OR sede_id = $4::int)
+         RETURNING id`,
+-      [id, aFechaSql(fecha || hoyCaracas()), motivo || null], tx);
++      [id, aFechaSql(fecha || hoyCaracas()), motivo || null, sedeId], tx);
+     if (!r.rowCount) {
+-      const existe = await ejecutar('SELECT 1 AS x FROM estudiantes WHERE id = $1', [id], tx);
++      const existe = await ejecutar('SELECT 1 AS x FROM estudiantes WHERE id = $1 AND ($2::int IS NULL OR sede_id = $2::int)', [id, sedeId], tx);
+       if (!existe.rowCount) throw e.noEncontrado('El estudiante');
+       throw e.conflicto('YA_RETIRADO', 'El estudiante ya está fuera de la academia.');
+     }
+@@ -75,11 +79,11 @@ async function retirar({ id, motivo, fecha }) {
+   });
+ }
+ 
+-async function reactivar({ id }) {
++async function reactivar({ id, sedeId = null }) {
+   const r = await ejecutar(
+     `UPDATE estudiantes SET estatus_academico = 'Activo', fecha_retiro = NULL, motivo_retiro = NULL, actualizado_en = NOW()
+-      WHERE id = $1 AND estatus_academico = 'Fuera de la Academia'
+-      RETURNING id`, [id]);
++      WHERE id = $1 AND estatus_academico = 'Fuera de la Academia' AND ($2::int IS NULL OR sede_id = $2::int)
++      RETURNING id`, [id, sedeId]);
+   if (!r.rowCount) throw e.conflicto('NO_REACTIVABLE', 'Solo se puede reactivar a un estudiante que esté fuera de la academia.');
+   return { id, estatus_academico: 'Activo' };
+ }
+diff --git a/services/exportacion.service.js b/services/exportacion.service.js
+index 2b0d667..d22c1c9 100644
+--- a/services/exportacion.service.js
++++ b/services/exportacion.service.js
+@@ -12,8 +12,9 @@ const FMT_USD = '#,##0.00';
+  * hoja = { nombre, columnas:[{header,key,width,fmt?}], sql } — `sql` DEBE usar `... WHERE x.id > $2 ORDER BY x.id LIMIT $1` ($1 = tamaño del lote,
+  * $2 = último id leído) y devolver `id`.
+  * hoja.fijo = true → consulta única sin paginar (resúmenes pequeños).
++ * hoja.porSede = true → la consulta añade `$3` = sede (NULL = consolidado) para filtrar con `($3::int IS NULL OR x.sede_id = $3::int)`.
+  */
+-async function exportarLibro(res, nombreArchivo, hojas) {
++async function exportarLibro(res, nombreArchivo, hojas, sedeId = null) {
+   res.set({
+     'Content-Type': MIME_XLSX,
+     'Content-Disposition': `attachment; filename="${nombreArchivo}"`,
+@@ -35,7 +36,7 @@ async function exportarLibro(res, nombreArchivo, hojas) {
+     } else {
+       let ultimo = 0;
+       for (;;) {
+-        const { rows } = await ejecutar(h.sql, [LOTE, ultimo]);
++        const { rows } = await ejecutar(h.sql, h.porSede ? [LOTE, ultimo, sedeId] : [LOTE, ultimo]);
+         if (!rows.length) break;
+         for (const fila of rows) ws.addRow(fila).commit();
+         ultimo = rows[rows.length - 1].id;
+@@ -130,7 +131,8 @@ function hojasFacturacion() {
+         sql: `SELECT c.id, s.nombres || ' ' || s.apellidos AS estudiante, r.nombres || ' ' || r.apellidos AS representante, r.cedula AS rep_cedula,
+                      c.tipo, c.concepto, c.monto_usd, c.fecha_vencimiento, c.estado
+               FROM cuotas c JOIN estudiantes s ON s.id = c.estudiante_id JOIN representantes r ON r.id = s.representante_id
+-              WHERE c.id > $2 ORDER BY c.id LIMIT $1`,
++              WHERE c.id > $2 AND ($3::int IS NULL OR c.sede_id = $3::int) ORDER BY c.id LIMIT $1`,
++        porSede: true,
+       },
+       {
+         nombre: 'Pagos y referencias',
+@@ -142,7 +144,9 @@ function hojasFacturacion() {
+         ],
+         sql: `SELECT p.id, p.declarado_en, s.nombres || ' ' || s.apellidos AS estudiante, p.referencia, p.metodo_pago, p.monto_usd, p.tasa_bcv, p.monto_bs,
+                      p.estado, p.revisado_en, p.nota_revision
+-              FROM pagos_referencias p JOIN estudiantes s ON s.id = p.estudiante_id WHERE p.id > $2 ORDER BY p.id LIMIT $1`,
++              FROM pagos_referencias p JOIN estudiantes s ON s.id = p.estudiante_id
++              WHERE p.id > $2 AND ($3::int IS NULL OR p.sede_id = $3::int) ORDER BY p.id LIMIT $1`,
++        porSede: true,
+       },
+     ],
+   };
+diff --git a/services/facturacion.service.js b/services/facturacion.service.js
+index ce67ef7..444ac1e 100644
+--- a/services/facturacion.service.js
++++ b/services/facturacion.service.js
+@@ -6,7 +6,7 @@ const { hoyCaracas, aFechaSql, aInstanteSql, limitesPeriodo } = require('../util
+ // ── Tablero financiero ──────────────────────────────────────────────────────────────────────────
+ // Parámetros posicionales compartidos por las consultas del tablero:
+ //   $1/$2 = intervalo [inicio, fin) del mes como instantes TIMESTAMPTZ (medianoche de Caracas, expresada en UTC)
+-//   $3/$4 = primer y último día del mes (DATE)   ·   $5 = hoy en Caracas (DATE)
++//   $3/$4 = primer y último día del mes (DATE)   ·   $5 = hoy en Caracas (DATE)   ·   $6 = sede (INT, NULL = consolidado)
+ // `pagos_referencias.revisado_en` es TIMESTAMPTZ: se compara contra instantes (sin desfase) y, para agrupar por día, se
+ // proyecta a la hora de pared de Caracas con `AT TIME ZONE` antes de truncar a DATE.
+ 
+@@ -14,26 +14,34 @@ const { hoyCaracas, aFechaSql, aInstanteSql, limitesPeriodo } = require('../util
+ const SQL_KPI = `
+   SELECT
+     (SELECT COALESCE(SUM(monto_usd), 0) FROM pagos_referencias
+-      WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz)  AS cobrado_usd,
++      WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz
++        AND ($6::int IS NULL OR sede_id = $6::int))                                                    AS cobrado_usd,
+     (SELECT COUNT(*)::int FROM pagos_referencias
+-      WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz)  AS cobrado_n,
++      WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz
++        AND ($6::int IS NULL OR sede_id = $6::int))                                                    AS cobrado_n,
+     (SELECT COALESCE(SUM(monto_usd), 0) FROM cuotas
+-      WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento < $5::date)                   AS vencido_usd,
++      WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento < $5::date
++        AND ($6::int IS NULL OR sede_id = $6::int))                                                    AS vencido_usd,
+     (SELECT COUNT(*)::int FROM cuotas
+-      WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento < $5::date)                   AS vencido_n,
++      WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento < $5::date
++        AND ($6::int IS NULL OR sede_id = $6::int))                                                    AS vencido_n,
+     (SELECT COALESCE(SUM(monto_usd), 0) FROM cuotas
+       WHERE estado IN ('Pendiente', 'En Revisión')
+-        AND fecha_vencimiento BETWEEN $3::date AND $4::date AND fecha_vencimiento >= $5::date)         AS pendiente_usd,
++        AND fecha_vencimiento BETWEEN $3::date AND $4::date AND fecha_vencimiento >= $5::date
++        AND ($6::int IS NULL OR sede_id = $6::int))                                                    AS pendiente_usd,
+     (SELECT COUNT(*)::int FROM cuotas
+       WHERE estado IN ('Pendiente', 'En Revisión')
+-        AND fecha_vencimiento BETWEEN $3::date AND $4::date AND fecha_vencimiento >= $5::date)         AS pendiente_n,
+-    (SELECT COUNT(*)::int FROM pagos_referencias WHERE estado = 'Por Validar')                         AS por_validar_n`;
++        AND fecha_vencimiento BETWEEN $3::date AND $4::date AND fecha_vencimiento >= $5::date
++        AND ($6::int IS NULL OR sede_id = $6::int))                                                    AS pendiente_n,
++    (SELECT COUNT(*)::int FROM pagos_referencias WHERE estado = 'Por Validar'
++        AND ($6::int IS NULL OR sede_id = $6::int))                                                    AS por_validar_n`;
+ 
+ /** Barras de recaudación diaria: SUM(monto_usd) por día calendario de Caracas (DATE → 'YYYY-MM-DD' por el parser de config/db). */
+ const SQL_COBRADO_POR_DIA = `
+   SELECT (revisado_en AT TIME ZONE 'America/Caracas')::date AS dia, SUM(monto_usd) AS monto_usd
+     FROM pagos_referencias
+    WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz
++     AND ($3::int IS NULL OR sede_id = $3::int)
+    GROUP BY 1
+    ORDER BY dia`;
+ 
+@@ -43,13 +51,13 @@ const SQL_COBRADO_POR_DIA = `
+  *   cuentas_pendientes = cuotas del mes que aún no vencen y siguen sin pagar · referencias_por_validar = bandeja de auditoría
+  * Contrato de salida (estable, consumido por el panel y por `graphify`): ver CAMBIOS_BMA_FACTURACION.md.
+  */
+-async function tablero(periodo) {
++async function tablero(periodo, sedeId = null) {
+   const lim = limitesPeriodo(periodo);
+-  const p = [aInstanteSql(lim.inicioUtc), aInstanteSql(lim.finUtc), aFechaSql(lim.desde), aFechaSql(lim.hasta), aFechaSql(hoyCaracas())];
++  const p = [aInstanteSql(lim.inicioUtc), aInstanteSql(lim.finUtc), aFechaSql(lim.desde), aFechaSql(lim.hasta), aFechaSql(hoyCaracas()), sedeId];
+   // Las dos consultas son independientes: viajan en paralelo (cada una toma su propia conexión del pool).
+   const [kpi, porDia] = await Promise.all([
+     ejecutar(SQL_KPI, p),
+-    ejecutar(SQL_COBRADO_POR_DIA, p.slice(0, 2)),
++    ejecutar(SQL_COBRADO_POR_DIA, [p[0], p[1], sedeId]),
+   ]);
+   const k = kpi.rows[0];
+   return {
+@@ -62,21 +70,22 @@ async function tablero(periodo) {
+   };
+ }
+ 
+-async function listarCuotas({ estudianteId, estado, offset, limite }) {
+-  const filtroParams = [estudianteId || null, estado || null];
+-  const filtro = 'WHERE ($1::int IS NULL OR c.estudiante_id = $1::int) AND ($2::text IS NULL OR c.estado = $2::text)';
++async function listarCuotas({ estudianteId, estado, offset, limite, sedeId = null }) {
++  const filtroParams = [estudianteId || null, estado || null, sedeId];
++  const filtro = 'WHERE ($1::int IS NULL OR c.estudiante_id = $1::int) AND ($2::text IS NULL OR c.estado = $2::text) AND ($3::int IS NULL OR c.sede_id = $3::int)';
+   const [items, total] = await Promise.all([
+     ejecutar(`SELECT c.id, c.estudiante_id, s.nombres || ' ' || s.apellidos AS estudiante, c.tipo, c.concepto, c.monto_usd,
+                      c.fecha_vencimiento, c.estado
+               FROM cuotas c JOIN estudiantes s ON s.id = c.estudiante_id ${filtro}
+-              ORDER BY c.fecha_vencimiento DESC, c.id DESC LIMIT $3 OFFSET $4`, [...filtroParams, limite, offset]),
++              ORDER BY c.fecha_vencimiento DESC, c.id DESC LIMIT $4 OFFSET $5`, [...filtroParams, limite, offset]),
+     ejecutar(`SELECT COUNT(*)::int AS n FROM cuotas c ${filtro}`, filtroParams),
+   ]);
+   return { items: items.rows, total: total.rows[0].n };
+ }
+ 
+-async function crearCuota({ estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento }) {
+-  const est = await ejecutar('SELECT estatus_academico FROM estudiantes WHERE id = $1', [estudiante_id]);
++async function crearCuota({ estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento }, sedeId = null) {
++  // Un usuario de sede solo ve (y por tanto solo puede facturar) a los estudiantes de su sede; fuera de ella → 404.
++  const est = await ejecutar('SELECT estatus_academico FROM estudiantes WHERE id = $1 AND ($2::int IS NULL OR sede_id = $2::int)', [estudiante_id, sedeId]);
+   if (!est.rowCount) throw e.noEncontrado('El estudiante');
+   if (est.rows[0].estatus_academico === 'Fuera de la Academia') {
+     throw e.reglaNegocio('ESTUDIANTE_FUERA', 'No se pueden crear cuotas a un estudiante que está fuera de la academia.');
+@@ -91,14 +100,14 @@ async function crearCuota({ estudiante_id, tipo, concepto, monto_usd, fecha_venc
+  * Genera la mensualidad de todos los estudiantes Activos que aún no la tengan (idempotente por concepto).
+  * La idempotencia la garantiza el índice único parcial ux_cuotas_mensualidad_concepto: dos ejecuciones simultáneas no duplican.
+  */
+-async function generarMensualidades({ concepto, monto_usd, fecha_vencimiento }) {
++async function generarMensualidades({ concepto, monto_usd, fecha_vencimiento }, sedeId = null) {
+   const r = await ejecutar(
+     `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento)
+      SELECT s.id, 'MENSUALIDAD', $1::varchar, $2::numeric, $3::date
+        FROM estudiantes s
+-      WHERE s.estatus_academico = 'Activo'
++      WHERE s.estatus_academico = 'Activo' AND ($4::int IS NULL OR s.sede_id = $4::int)
+      ON CONFLICT (estudiante_id, concepto) WHERE tipo = 'MENSUALIDAD' AND estado <> 'Anulada' DO NOTHING`,
+-    [concepto, monto_usd, aFechaSql(fecha_vencimiento)]);
++    [concepto, monto_usd, aFechaSql(fecha_vencimiento), sedeId]);
+   return { creadas: r.rowCount };
+ }
+ 
+diff --git a/services/invitaciones.service.js b/services/invitaciones.service.js
+new file mode 100644
+index 0000000..f02bdac
+--- /dev/null
++++ b/services/invitaciones.service.js
+@@ -0,0 +1,89 @@
++'use strict';
++const crypto = require('node:crypto');
++const { ejecutar } = require('../config/db');
++const cfg = require('../config/env');
++const { AppError, e } = require('../errors/AppError');
++
++const TOKEN_RE = /^[a-f0-9]{48}$/;
++const DIAS_VIGENCIA_DEFECTO = 7;
++const sha256 = (t) => crypto.createHash('sha256').update(t).digest('hex');
++
++/**
++ * Crea una invitación de inscripción de un solo uso. El token en claro (48 hex = 192 bits) solo se devuelve aquí, una vez; en la base
++ * queda su SHA-256. `sedeId` es la sede que la invitación fija: el controlador la toma del alcance del usuario (utils/alcance.js).
++ */
++async function crear({ sedeId, nivel, dias = DIAS_VIGENCIA_DEFECTO, creadoPor }) {
++  const sede = await ejecutar('SELECT activa FROM sedes WHERE id = $1', [sedeId]);
++  if (!sede.rowCount) throw e.noEncontrado('La sede');
++  if (!sede.rows[0].activa) throw e.reglaNegocio('SEDE_INACTIVA', 'La sede está inactiva: no admite invitaciones nuevas.');
++  const token = crypto.randomBytes(24).toString('hex');
++  const r = await ejecutar(
++    `INSERT INTO invitaciones_inscripcion (token_hash, sede_id, nivel_asignado, expira_en, creado_por)
++     VALUES ($1, $2, $3, NOW() + make_interval(days => $4::int), $5)
++     RETURNING id, expira_en`,
++    [sha256(token), sedeId, nivel, dias, creadoPor || null]);
++  return {
++    id: r.rows[0].id, sede_id: sedeId, nivel_asignado: nivel, expira_en: r.rows[0].expira_en,
++    token, enlace: `${cfg.portalBaseUrl}/admisiones/?invitacion=${token}`,
++  };
++}
++
++/** Listado (sin token ni hash). El estado efectivo distingue "Vencida" de "Pendiente" según el reloj de la base de datos. */
++async function listar({ sedeId = null, estado = null, offset, limite }) {
++  const filtro = `($1::int IS NULL OR i.sede_id = $1::int)
++    AND ($2::text IS NULL OR (CASE WHEN i.estado = 'Pendiente' AND i.expira_en <= NOW() THEN 'Vencida' ELSE i.estado END) = $2::text)`;
++  const [items, total] = await Promise.all([
++    ejecutar(
++      `SELECT i.id, i.sede_id, s.nombre AS sede, i.nivel_asignado, i.expira_en, i.usada_en, i.estudiante_id, i.creado_en,
++              (CASE WHEN i.estado = 'Pendiente' AND i.expira_en <= NOW() THEN 'Vencida' ELSE i.estado END) AS estado
++       FROM invitaciones_inscripcion i JOIN sedes s ON s.id = i.sede_id
++       WHERE ${filtro} ORDER BY i.creado_en DESC, i.id DESC LIMIT $3 OFFSET $4`, [sedeId, estado, limite, offset]),
++    ejecutar(`SELECT COUNT(*)::int AS n FROM invitaciones_inscripcion i WHERE ${filtro}`, [sedeId, estado]),
++  ]);
++  return { items: items.rows, total: total.rows[0].n };
++}
++
++async function revocar(id, sedeId = null) {
++  const r = await ejecutar(
++    `UPDATE invitaciones_inscripcion SET estado = 'Revocada'
++      WHERE id = $1 AND estado = 'Pendiente' AND ($2::int IS NULL OR sede_id = $2::int)
++      RETURNING id`, [id, sedeId]);
++  if (r.rowCount) return { id, estado: 'Revocada' };
++  const existe = await ejecutar('SELECT estado FROM invitaciones_inscripcion WHERE id = $1 AND ($2::int IS NULL OR sede_id = $2::int)', [id, sedeId]);
++  if (!existe.rowCount) throw e.noEncontrado('La invitación');
++  throw e.conflicto('INVITACION_NO_REVOCABLE', `La invitación ya está en estado "${existe.rows[0].estado}".`);
++}
++
++const invitacionInvalida = () =>
++  new AppError(410, 'INVITACION_NO_VALIDA', 'La invitación no existe, ya fue utilizada, fue revocada o venció. Solicita una nueva a la academia.');
++
++/** Resuelve un token en claro a { id, sede_id, sede, nivel_asignado }. Mismo error para inexistente / usada / revocada / vencida / sede inactiva. */
++async function resolver(token, ejecutor) {
++  if (!TOKEN_RE.test(String(token))) throw invitacionInvalida();
++  const r = await ejecutar(
++    `SELECT i.id, i.sede_id, s.nombre AS sede, i.nivel_asignado
++       FROM invitaciones_inscripcion i JOIN sedes s ON s.id = i.sede_id
++      WHERE i.token_hash = $1 AND i.estado = 'Pendiente' AND i.expira_en > NOW() AND s.activa = TRUE`,
++    [sha256(token)], ejecutor);
++  if (!r.rowCount) throw invitacionInvalida();
++  return r.rows[0];
++}
++
++/**
++ * Consumo ATÓMICO dentro de la transacción de la inscripción: el UPDATE condicionado a estado = 'Pendiente' toma el bloqueo de la
++ * fila; dos envíos simultáneos con el mismo enlace se serializan y el segundo ya no encuentra la fila → 410, sin doble inscripción.
++ * Si la inscripción falla después, el ROLLBACK devuelve la invitación a "Pendiente".
++ */
++async function consumir(tx, invitacionId) {
++  const r = await ejecutar(
++    `UPDATE invitaciones_inscripcion SET estado = 'Usada', usada_en = NOW()
++      WHERE id = $1 AND estado = 'Pendiente' AND expira_en > NOW()
++      RETURNING id`, [invitacionId], tx);
++  if (!r.rowCount) throw invitacionInvalida();
++}
++
++async function vincularEstudiante(tx, invitacionId, estudianteId) {
++  await ejecutar('UPDATE invitaciones_inscripcion SET estudiante_id = $2 WHERE id = $1', [invitacionId, estudianteId], tx);
++}
++
++module.exports = { crear, listar, revocar, resolver, consumir, vincularEstudiante, DIAS_VIGENCIA_DEFECTO };
+diff --git a/services/notificaciones.service.js b/services/notificaciones.service.js
+index 3d3156e..bd1c079 100644
+--- a/services/notificaciones.service.js
++++ b/services/notificaciones.service.js
+@@ -13,10 +13,11 @@ const { plantillaPreventiva, plantillaMorosidad } = require('./plantillas.whatsa
+ const ACADEMIA = process.env.ACADEMIA_NOMBRE || 'Brilliant Minds Academy';
+ const VENTANA_PREVENTIVA = { min: 3, max: 5 };
+ 
+-async function cargarEstudiante(id) {
++async function cargarEstudiante(id, sedeId = null) {
+   const r = await ejecutar(
+-    `SELECT v.id, v.nombres, v.apellidos, v.estado_dinamico, r.nombres AS rep_nombres, r.apellidos AS rep_apellidos, r.telefono
+-     FROM vw_estudiantes_estado v JOIN representantes r ON r.id = v.representante_id WHERE v.id = $1`, [id]);
++    `SELECT v.id, v.sede_id, v.nombres, v.apellidos, v.estado_dinamico, r.nombres AS rep_nombres, r.apellidos AS rep_apellidos, r.telefono
++     FROM vw_estudiantes_estado v JOIN representantes r ON r.id = v.representante_id
++     WHERE v.id = $1 AND ($2::int IS NULL OR v.sede_id = $2::int)`, [id, sedeId]);
+   if (!r.rowCount) throw e.noEncontrado('El estudiante');
+   return r.rows[0];
+ }
+@@ -62,9 +63,9 @@ async function prepararMorosidad(est, hoy) {
+  * Genera (y opcionalmente envía) una alerta MANUAL-INDIVIDUAL. La tasa BCV se consulta en ese instante
+  * (`fresca: true`); si no se logra obtener, NO se genera nada (503) para no cobrar con una tasa vieja.
+  */
+-async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId }, { bcvSvc = bcv, waSvc = whatsapp, ahora = Date.now } = {}) {
++async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId, sedeId = null }, { bcvSvc = bcv, waSvc = whatsapp, ahora = Date.now } = {}) {
+   const hoy = hoyCaracas(ahora());
+-  const est = await cargarEstudiante(estudianteId);
++  const est = await cargarEstudiante(estudianteId, sedeId);
+   const datos = tipo === 'PREVENTIVA' ? await prepararPreventiva(est, hoy) : await prepararMorosidad(est, hoy);
+ 
+   const tasa = await bcvSvc.obtenerTasa({ fresca: true });
+@@ -81,7 +82,7 @@ async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId },
+     ? plantillaPreventiva({ academia: ACADEMIA, representante, estudiante, concepto: datos.concepto, montoUsd: datos.montoUsd, montoBs, tasa: tasa.tasa,
+         fechaVencimiento: datos.fechaVencimiento, diasRestantes: datos.diasRestantes, enlacePortal })
+     : plantillaMorosidad({ academia: ACADEMIA, representante, estudiante, montoUsd: datos.montoUsd, montoBs, tasa: tasa.tasa,
+-        cuentas: await parametros.cuentasActivas(), diasMora: datos.diasMora, enlacePortal });
++        cuentas: await parametros.cuentasActivas(undefined, est.sede_id), diasMora: datos.diasMora, enlacePortal });
+ 
+   const ins = await ejecutar(
+     `INSERT INTO notificaciones_whatsapp (estudiante_id, cuota_id, tipo, telefono, mensaje, monto_usd, tasa_bcv, monto_bs, estado, creado_por)
+@@ -110,13 +111,13 @@ async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId },
+   };
+ }
+ 
+-async function historial({ estudianteId, offset, limite }) {
+-  const filtro = '($1::int IS NULL OR n.estudiante_id = $1::int)';
++async function historial({ estudianteId, offset, limite, sedeId = null }) {
++  const filtro = '($1::int IS NULL OR n.estudiante_id = $1::int) AND ($2::int IS NULL OR s.sede_id = $2::int)';
+   const [items, total] = await Promise.all([
+     ejecutar(`SELECT n.id, n.estudiante_id, s.nombres || ' ' || s.apellidos AS estudiante, n.tipo, n.estado, n.monto_usd, n.monto_bs, n.tasa_bcv, n.error, n.creado_en
+               FROM notificaciones_whatsapp n JOIN estudiantes s ON s.id = n.estudiante_id
+-              WHERE ${filtro} ORDER BY n.creado_en DESC, n.id DESC LIMIT $2 OFFSET $3`, [estudianteId || null, limite, offset]),
+-    ejecutar(`SELECT COUNT(*)::int AS n FROM notificaciones_whatsapp n WHERE ${filtro}`, [estudianteId || null]),
++              WHERE ${filtro} ORDER BY n.creado_en DESC, n.id DESC LIMIT $3 OFFSET $4`, [estudianteId || null, sedeId, limite, offset]),
++    ejecutar(`SELECT COUNT(*)::int AS n FROM notificaciones_whatsapp n JOIN estudiantes s ON s.id = n.estudiante_id WHERE ${filtro}`, [estudianteId || null, sedeId]),
+   ]);
+   return { items: items.rows, total: total.rows[0].n };
+ }
+diff --git a/services/pagos.service.js b/services/pagos.service.js
+index ec2157c..0945dc7 100644
+--- a/services/pagos.service.js
++++ b/services/pagos.service.js
+@@ -36,8 +36,8 @@ async function declararReferencia({ estudianteId, cuotaId, referencia, metodo, t
+ }
+ 
+ /** Bandeja de auditoría: cronológica (la más antigua primero) para validar rápido contra las cuentas. */
+-async function bandeja({ estado = 'Por Validar', offset, limite }) {
+-  const filtro = '($1::text IS NULL OR p.estado = $1::text)';
++async function bandeja({ estado = 'Por Validar', offset, limite, sedeId = null }) {
++  const filtro = '($1::text IS NULL OR p.estado = $1::text) AND ($2::int IS NULL OR p.sede_id = $2::int)';
+   const [items, total] = await Promise.all([
+     ejecutar(
+       `SELECT p.id, p.referencia, p.metodo_pago, p.monto_usd, p.tasa_bcv, p.monto_bs, p.estado, p.declarado_en, p.revisado_en, p.nota_revision,
+@@ -50,18 +50,19 @@ async function bandeja({ estado = 'Por Validar', offset, limite }) {
+        JOIN cuotas c ON c.id = p.cuota_id
+        WHERE ${filtro}
+        ORDER BY p.declarado_en ASC, p.id ASC
+-       LIMIT $2 OFFSET $3`,
+-      [estado || null, limite, offset]),
+-    ejecutar(`SELECT COUNT(*)::int AS n FROM pagos_referencias p WHERE ${filtro}`, [estado || null]),
++       LIMIT $3 OFFSET $4`,
++      [estado || null, sedeId, limite, offset]),
++    ejecutar(`SELECT COUNT(*)::int AS n FROM pagos_referencias p WHERE ${filtro}`, [estado || null, sedeId]),
+   ]);
+   return { items: items.rows, total: total.rows[0].n };
+ }
+ 
+ /** Bloquea la fila del pago (FOR UPDATE) mientras dura la transacción: dos auditores no pueden procesar el mismo pago a la vez. */
+-async function cargarPendiente(tx, pagoId) {
++async function cargarPendiente(tx, pagoId, sedeId = null) {
++  // Un pago de otra sede se comporta como inexistente (404): no se revela que existe.
+   const r = await ejecutar(
+-    'SELECT id, estado, cuota_id, estudiante_id FROM pagos_referencias WHERE id = $1 FOR UPDATE',
+-    [pagoId], tx);
++    'SELECT id, estado, cuota_id, estudiante_id FROM pagos_referencias WHERE id = $1 AND ($2::int IS NULL OR sede_id = $2::int) FOR UPDATE',
++    [pagoId, sedeId], tx);
+   const p = r.rows[0];
+   if (!p) throw e.noEncontrado('El pago');
+   if (p.estado !== 'Por Validar') throw e.conflicto('PAGO_YA_PROCESADO', `Este pago ya fue ${p.estado.toLowerCase()}.`);
+@@ -73,9 +74,9 @@ async function cargarPendiente(tx, pagoId) {
+  * "Pendiente por Validación Administrativa" a "Activo". Devuelve el estatus de pago recalculado en tiempo real
+  * ("Al día" solo si no quedan otras cuotas vencidas).
+  */
+-async function aprobar({ pagoId, usuarioId, nota }) {
++async function aprobar({ pagoId, usuarioId, nota, sedeId = null }) {
+   return conTransaccion(async (tx) => {
+-    const p = await cargarPendiente(tx, pagoId);
++    const p = await cargarPendiente(tx, pagoId, sedeId);
+     await ejecutar(
+       `UPDATE pagos_referencias SET estado = 'Aprobada', revisado_por = $2, revisado_en = NOW(), nota_revision = $3 WHERE id = $1`,
+       [pagoId, usuarioId, nota || null], tx);
+@@ -93,9 +94,9 @@ async function aprobar({ pagoId, usuarioId, nota }) {
+ }
+ 
+ /** Rechaza la referencia (motivo obligatorio) y devuelve la cuota a "Pendiente" para que se pueda declarar otra. */
+-async function rechazar({ pagoId, usuarioId, nota }) {
++async function rechazar({ pagoId, usuarioId, nota, sedeId = null }) {
+   return conTransaccion(async (tx) => {
+-    const p = await cargarPendiente(tx, pagoId);
++    const p = await cargarPendiente(tx, pagoId, sedeId);
+     await ejecutar(
+       `UPDATE pagos_referencias SET estado = 'Rechazada', revisado_por = $2, revisado_en = NOW(), nota_revision = $3 WHERE id = $1`,
+       [pagoId, usuarioId, nota], tx);
+diff --git a/services/parametros.service.js b/services/parametros.service.js
+index 22be0a6..3774144 100644
+--- a/services/parametros.service.js
++++ b/services/parametros.service.js
+@@ -25,8 +25,14 @@ async function matriculaUsd(ejecutor) {
+   return v;
+ }
+ 
+-async function cuentasActivas(ejecutor) {
+-  const r = await ejecutar('SELECT id, metodo, titular, detalle FROM cuentas_pago WHERE activa = TRUE ORDER BY metodo, id', [], ejecutor);
++/**
++ * Cuentas de cobro VISIBLES para una sede: las comunes (sede_id NULL) + las propias de esa sede. Con `sedeId` NULL solo las comunes:
++ * jamás se exponen las cuentas de una sede a quien no pertenece a ella (formulario público sin invitación, etc.).
++ */
++async function cuentasActivas(ejecutor, sedeId = null) {
++  const r = await ejecutar(
++    'SELECT id, metodo, titular, detalle FROM cuentas_pago WHERE activa = TRUE AND (sede_id IS NULL OR sede_id = $1::int) ORDER BY metodo, id',
++    [sedeId], ejecutor);
+   return r.rows;
+ }
+ 
+diff --git a/services/portal.service.js b/services/portal.service.js
+index f63d933..01f910f 100644
+--- a/services/portal.service.js
++++ b/services/portal.service.js
+@@ -23,7 +23,7 @@ async function emitirToken(estudianteId, ejecutor) {
+ async function resolverToken(token) {
+   if (!TOKEN_RE.test(String(token))) throw e.noEncontrado('El enlace');
+   const r = await ejecutar(
+-    `SELECT t.estudiante_id, v.nombres, v.apellidos, v.estado_dinamico, v.estatus_pago
++    `SELECT t.estudiante_id, v.sede_id, v.nombres, v.apellidos, v.estado_dinamico, v.estatus_pago
+      FROM portal_tokens t JOIN vw_estudiantes_estado v ON v.id = t.estudiante_id
+      WHERE t.token_hash = $1 AND t.expira_en > NOW()`, [sha256(token)]);
+   // Mismo mensaje para "no existe" y "vencido": no se revela cuáles tokens existieron.
+@@ -35,7 +35,7 @@ async function vista(token, { bcvSvc = bcv } = {}) {
+   const est = await resolverToken(token);
+   const [tasa, cuentas, cuotas] = await Promise.all([
+     bcvSvc.obtenerTasa(),
+-    parametros.cuentasActivas(),
++    parametros.cuentasActivas(undefined, est.sede_id),
+     ejecutar(
+       `SELECT id, concepto, monto_usd, fecha_vencimiento, estado
+        FROM cuotas WHERE estudiante_id = $1 AND estado IN ('Pendiente', 'En Revisión') ORDER BY fecha_vencimiento, id`,
+diff --git a/services/sedes.service.js b/services/sedes.service.js
+new file mode 100644
+index 0000000..5192e69
+--- /dev/null
++++ b/services/sedes.service.js
+@@ -0,0 +1,29 @@
++'use strict';
++const { ejecutar } = require('../config/db');
++const { e } = require('../errors/AppError');
++
++/** Sedes visibles: el acceso consolidado (sedeId NULL) ve todas; un usuario de sede solo la suya. */
++async function listar(sedeId = null) {
++  const r = await ejecutar(
++    'SELECT id, nombre, activa, creado_en FROM sedes WHERE ($1::int IS NULL OR id = $1::int) ORDER BY nombre, id',
++    [sedeId]);
++  return r.rows;
++}
++
++async function crear({ nombre }) {
++  // Upsert por la restricción UNIQUE del nombre: crear dos veces la misma sede es un 409 legible, no un error técnico.
++  const r = await ejecutar(
++    'INSERT INTO sedes (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING RETURNING id',
++    [nombre]);
++  if (!r.rowCount) throw e.conflicto('SEDE_DUPLICADA', 'Ya existe una sede con ese nombre.');
++  return { id: r.rows[0].id, nombre };
++}
++
++/** Cambia el estado activo/inactivo. Una sede inactiva no admite invitaciones nuevas ni envíos automáticos. */
++async function cambiarActiva(id, activa) {
++  const r = await ejecutar('UPDATE sedes SET activa = $2 WHERE id = $1 RETURNING id', [id, Boolean(activa)]);
++  if (!r.rowCount) throw e.noEncontrado('La sede');
++  return { id, activa: Boolean(activa) };
++}
++
++module.exports = { listar, crear, cambiarActiva };
+diff --git a/tests/facturacion-tablero.test.js b/tests/facturacion-tablero.test.js
+index feb131f..cda12f9 100644
+--- a/tests/facturacion-tablero.test.js
++++ b/tests/facturacion-tablero.test.js
+@@ -30,14 +30,14 @@ function programarTablero({ kpi, dias = [] } = {}) {
+ }
+ 
+ /** Simula (req, res, next) de Express para invocar el handler del controlador directamente. */
+-async function invocar(handler, query = {}) {
++async function invocar(handler, query = {}, usuario = { id: 1, rol: 'admin', nombre: 'Admin', sede_id: null }) {
+   const salida = { status: null, cuerpo: null, error: null };
+   const res = { status(c) { salida.status = c; return this; }, json(b) { salida.cuerpo = b; return this; } };
+   await new Promise((resolve) => {
+     const next = (err) => { salida.error = err || null; resolve(); };
+     const original = res.json.bind(res);
+     res.json = (b) => { original(b); resolve(); return res; };
+-    handler({ query }, res, next);
++    handler({ query, usuario }, res, next);
+   });
+   return salida;
+ }
+@@ -74,8 +74,8 @@ test('tablero: dos consultas parametrizadas ($1…$n posicionales, sin concatena
+   assert.equal(estado.maxEnVuelo, 2, 'las consultas del tablero deben viajar a la vez (Promise.all)');
+ 
+   const [kpi, porDia] = db.llamadas;
+-  assert.ok(Array.isArray(kpi.params) && kpi.params.length === 5);
+-  assert.ok(Array.isArray(porDia.params) && porDia.params.length === 2);
++  assert.ok(Array.isArray(kpi.params) && kpi.params.length === 6); // $1..$5 período + $6 sede (NULL = consolidado)
++  assert.ok(Array.isArray(porDia.params) && porDia.params.length === 3);
+   // Los datos viajan SOLO como parámetros: el texto SQL no contiene fechas ni importes incrustados.
+   for (const l of db.llamadas) assert.doesNotMatch(l.texto, /\d{4}-\d{2}-\d{2}/);
+   // Barras diarias: SUM por día calendario de Caracas con AT TIME ZONE nativo de PostgreSQL.
+@@ -94,6 +94,7 @@ test('tablero: el intervalo del mes son instantes UTC a medianoche de Caracas (U
+   assert.equal(params[2], '2026-10-01');
+   assert.equal(params[3], '2026-10-31');
+   assert.match(params[4], /^\d{4}-\d{2}-\d{2}$/);
++  assert.equal(params[5], null); // sin sede: vista consolidada
+   // Un cobro revisado el 30/sep a las 22:30 en Caracas (= 2026-10-01T02:30Z) pertenece a septiembre, no a octubre.
+   const lim = limitesPeriodo('2026-10');
+   assert.ok(Date.parse('2026-10-01T02:30:00Z') < lim.inicioUtc.getTime());
+diff --git a/tests/integracion.pg.test.js b/tests/integracion.pg.test.js
+index f09cd48..7aa8a08 100644
+--- a/tests/integracion.pg.test.js
++++ b/tests/integracion.pg.test.js
+@@ -63,13 +63,13 @@ const inscripcion = (ov = {}) => ({
+ });
+ 
+ /** Siembra directa (sin pasar por los servicios) un representante + estudiante + cuota. */
+-async function sembrar({ estatus = 'Activo', vence = sumarDias(svc.hoy(), 10), monto = 25, estadoCuota = 'Pendiente', nombres = 'Sofía', apellidos = 'Gómez' } = {}) {
++async function sembrar({ estatus = 'Activo', vence = sumarDias(svc.hoy(), 10), monto = 25, estadoCuota = 'Pendiente', nombres = 'Sofía', apellidos = 'Gómez', sedeId = null } = {}) {
+   seq += 1;
+   const rep = await uno(
+     `INSERT INTO representantes (nombres, apellidos, cedula, telefono) VALUES ('Rep', 'Siembra', $1, '584120000000') RETURNING id`, [`V-S${seq}${Date.now() % 100000}`]);
+   const est = await uno(
+-    `INSERT INTO estudiantes (representante_id, nombres, apellidos, fecha_nacimiento, grado_solicitado, estatus_academico)
+-     VALUES ($1, $2, $3, '2014-05-06', '4to grado', $4) RETURNING id`, [rep.id, nombres, apellidos, estatus]);
++    `INSERT INTO estudiantes (representante_id, nombres, apellidos, fecha_nacimiento, grado_solicitado, estatus_academico, sede_id)
++     VALUES ($1, $2, $3, '2014-05-06', '4to grado', $4, $5) RETURNING id`, [rep.id, nombres, apellidos, estatus, sedeId]);
+   const cuota = await uno(
+     `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento, estado) VALUES ($1, 'MENSUALIDAD', $2, $3, $4, $5) RETURNING id`,
+     [est.id, `Mensualidad S${seq}`, monto, vence, estadoCuota]);
+@@ -110,6 +110,11 @@ test.before(async () => {
+     parametros: require('../services/parametros.service'),
+     exportacion: require('../services/exportacion.service'),
+     guard: require('../modules/premium/guard'),
++    sedes: require('../services/sedes.service'),
++    invitaciones: require('../services/invitaciones.service'),
++    alcance: require('../utils/alcance'),
++    prueba: require('../modules/premium/prueba.service'),
++    cron: require('../modules/premium/whatsapp-cron'),
+     bcv: require('../services/bcv.service'),
+     normalizar: require('../middlewares/errorHandler').normalizar,
+   };
+@@ -125,23 +130,23 @@ test.after(async () => {
+ });
+ 
+ // ── Migraciones y scripts ───────────────────────────────────────────────────────────────────────
+-t('migrate.js: aplica las 4 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
++t('migrate.js: aplica las 7 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
+   const primera = hijo('scripts/migrate.js');
+   for (const f of fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql'))) assert.match(primera, new RegExp(`Aplicada ${f}`));
+   const segunda = hijo('scripts/migrate.js');
+   assert.ok(!/Aplicada/.test(segunda), segunda);
+-  assert.equal((segunda.match(/ya aplicada/g) || []).length, 4);
++  assert.equal((segunda.match(/ya aplicada/g) || []).length, 7);
+   assert.match(segunda, /Migraciones al día/);
+ });
+ 
+-t(`el esquema real contiene las 17 tablas + la vista, con RLS activo y la vista con security_invoker (driver: ${origenPg})`, async () => {
++t(`el esquema real contiene las 19 tablas + la vista, con RLS activo y la vista con security_invoker (driver: ${origenPg})`, async () => {
+   const tablas = await filas(`SELECT relname, relrowsecurity FROM pg_class WHERE relkind = 'r' AND relnamespace = 'public'::regnamespace ORDER BY 1`);
+-  assert.equal(tablas.length, 17);
++  assert.equal(tablas.length, 19); // 17 del Core Base + sedes + invitaciones_inscripcion
+   assert.ok(tablas.every((x) => x.relrowsecurity), 'todas las tablas deben tener RLS');
+   const v = await uno(`SELECT array_to_string(reloptions, ',') AS opciones FROM pg_class WHERE relname = 'vw_estudiantes_estado'`);
+   assert.equal(v.opciones, 'security_invoker=true');
+   const reg = await filas('SELECT nombre FROM schema_migrations ORDER BY nombre');
+-  assert.equal(reg.length, 4);
++  assert.equal(reg.length, 7);
+ });
+ 
+ t('crear-admin.js: upsert por correo (ON CONFLICT), normaliza a minúsculas, reactiva y no duplica', async () => {
+@@ -629,13 +634,327 @@ t('premium: 5 módulos sembrados y deshabilitados; el guard bloquea con 403 y se
+   await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE WHERE codigo = 'BANCAMIGA'`);
+ });
+ 
++// ── Multi-sede ──────────────────────────────────────────────────────────────────────────────────
++let sedeA; let sedeB;
++const usuarioAdminId = async () => (await uno('SELECT id FROM usuarios_admin ORDER BY id LIMIT 1')).id;
++
++t('multi-sede: alcanceDe es FAIL-CLOSED (secretaria sin sede ≠ global) y solo el admin sin sede es consolidado', () => {
++  const { alcanceDe } = svc.alcance;
++  assert.equal(alcanceDe({ rol: 'admin', sede_id: null }), null);
++  assert.equal(alcanceDe({ rol: 'admin', sede_id: 3 }), 3);
++  assert.equal(alcanceDe({ rol: 'secretaria', sede_id: 7 }), 7);
++  for (const u of [{ rol: 'secretaria', sede_id: null }, { rol: 'secretaria' }]) {
++    assert.throws(() => alcanceDe(u), (e) => e.status === 403 && e.codigo === 'SEDE_NO_ASIGNADA');
++  }
++  assert.throws(() => alcanceDe({ rol: 'admin', sede_id: 'x' }), (e) => e.status === 403);
++  assert.throws(() => alcanceDe(undefined), (e) => e.status === 401);
++  const out = {};
++  svc.alcance.requireConsolidado({ usuario: { rol: 'admin', sede_id: 2 } }, {}, (e) => { out.sede = e; });
++  svc.alcance.requireConsolidado({ usuario: { rol: 'admin', sede_id: null } }, {}, (e) => { out.global = e; });
++  assert.equal(out.sede.status, 403);
++  assert.equal(out.global, undefined);
++});
++
++t('multi-sede: sedes (nombre único → 409) y el trigger hace que cuotas y pagos HEREDEN la sede del estudiante', async () => {
++  sedeA = (await svc.sedes.crear({ nombre: 'Sede Norte' })).id;
++  sedeB = (await svc.sedes.crear({ nombre: 'Sede Sur' })).id;
++  await assert.rejects(svc.sedes.crear({ nombre: 'Sede Norte' }), (e) => e.status === 409 && e.codigo === 'SEDE_DUPLICADA');
++  assert.deepEqual((await svc.sedes.listar(sedeA)).map((s) => s.nombre), ['Sede Norte']);
++  assert.ok((await svc.sedes.listar(null)).length >= 2);
++
++  const a = await sembrar({ sedeId: sedeA, nombres: 'AlumnoA' });
++  assert.equal((await uno('SELECT sede_id FROM cuotas WHERE id = $1', [a.cuotaId])).sede_id, sedeA);
++  const p = await svc.pagos.declararReferencia({ estudianteId: a.estId, cuotaId: a.cuotaId, referencia: 'HER-1', metodo: 'ZELLE', tasa: 36.5 });
++  assert.equal((await uno('SELECT sede_id FROM pagos_referencias WHERE id = $1', [p.pagoId])).sede_id, sedeA);
++  // una sede explícita no la pisa el trigger
++  const e2 = await uno(`INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento, sede_id) VALUES ($1, 'OTRO', 'Explícita', 5, $2, $3) RETURNING sede_id`, [a.estId, svc.hoy(), sedeB]);
++  assert.equal(e2.sede_id, sedeB);
++  // estudiante sin sede → cuota sin sede (dato "global")
++  const g = await sembrar({ nombres: 'SinSede' });
++  assert.equal((await uno('SELECT sede_id FROM cuotas WHERE id = $1', [g.cuotaId])).sede_id, null);
++});
++
++t('multi-sede: CRM, tablero, cuotas y mensualidades se filtran por sede; sede NULL (SuperAdmin) ve todo; fuera de sede = 404', async () => {
++  const hoy = svc.hoy();
++  const a = await sembrar({ sedeId: sedeA, nombres: 'IsoA', apellidos: 'Norte', vence: sumarDias(hoy, -5) });
++  const b = await sembrar({ sedeId: sedeB, nombres: 'IsoB', apellidos: 'Sur', vence: sumarDias(hoy, -5) });
++  const g = await sembrar({ nombres: 'IsoG', apellidos: 'Global', vence: sumarDias(hoy, -5) });
++  const c = await sembrar({ sedeId: sedeB, nombres: 'IsoC', apellidos: 'Sur' });
++
++  const nombresDe = async (sedeId) => (await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId })).items.map((x) => x.nombres).sort();
++  assert.deepEqual(await nombresDe(sedeA), ['IsoA']);
++  assert.deepEqual(await nombresDe(sedeB), ['IsoB', 'IsoC']);
++  assert.deepEqual(await nombresDe(null), ['IsoA', 'IsoB', 'IsoC', 'IsoG']);
++  assert.equal((await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId: sedeA })).total, 1, 'el conteo respeta la sede');
++
++  assert.equal((await svc.crm.resumen(sedeA)).morosos, 1);
++  assert.equal((await svc.crm.resumen(sedeB)).morosos, 1);
++  assert.ok((await svc.crm.resumen(null)).morosos >= 3);
++
++  await assert.rejects(svc.crm.detalle(b.estId, sedeA), (e) => e.status === 404);
++  await assert.rejects(svc.crm.detalle(g.estId, sedeA), (e) => e.status === 404, 'un dato sin sede NO lo ve un usuario de sede');
++  assert.equal((await svc.crm.detalle(b.estId, sedeB)).nombres, 'IsoB');
++  assert.equal((await svc.crm.detalle(g.estId, null)).nombres, 'IsoG');
++
++  await assert.rejects(svc.crm.retirar({ id: c.estId, sedeId: sedeA }), (e) => e.status === 404);
++  assert.equal((await uno('SELECT estatus_academico FROM estudiantes WHERE id = $1', [c.estId])).estatus_academico, 'Activo');
++  assert.equal((await svc.crm.retirar({ id: c.estId, sedeId: sedeB })).estatus_academico, 'Fuera de la Academia');
++  await assert.rejects(svc.crm.reactivar({ id: c.estId, sedeId: sedeA }), (e) => e.status === 409);
++  assert.equal((await svc.crm.reactivar({ id: c.estId, sedeId: sedeB })).estatus_academico, 'Activo');
++
++  const periodo = svc.periodo();
++  assert.equal((await svc.facturacion.tablero(periodo, sedeA)).saldos_vencidos.cantidad, 1);
++  assert.equal((await svc.facturacion.tablero(periodo, sedeB)).saldos_vencidos.cantidad, 1);
++  assert.ok((await svc.facturacion.tablero(periodo, null)).saldos_vencidos.cantidad >= 3);
++
++  const cuotasA = await svc.facturacion.listarCuotas({ sedeId: sedeA, offset: 0, limite: 100 });
++  assert.ok(cuotasA.items.length >= 2 && cuotasA.items.every((x) => ['AlumnoA', 'IsoA'].includes(x.estudiante.split(' ')[0])));
++
++  await assert.rejects(svc.facturacion.crearCuota({ estudiante_id: b.estId, tipo: 'OTRO', concepto: 'x', monto_usd: 5, fecha_vencimiento: hoy }, sedeA), (e) => e.status === 404);
++  const nueva = await svc.facturacion.crearCuota({ estudiante_id: b.estId, tipo: 'OTRO', concepto: 'Cuota B', monto_usd: 5, fecha_vencimiento: hoy }, sedeB);
++  assert.equal((await uno('SELECT sede_id FROM cuotas WHERE id = $1', [nueva.id])).sede_id, sedeB);
++
++  const activosA = (await uno(`SELECT COUNT(*)::int AS n FROM estudiantes WHERE sede_id = $1 AND estatus_academico = 'Activo'`, [sedeA])).n;
++  const gen = await svc.facturacion.generarMensualidades({ concepto: 'Mens-ISO', monto_usd: 10, fecha_vencimiento: hoy }, sedeA);
++  assert.equal(gen.creadas, activosA);
++  assert.deepEqual((await filas(`SELECT DISTINCT sede_id FROM cuotas WHERE concepto = 'Mens-ISO'`)), [{ sede_id: sedeA }]);
++
++  // notificaciones: un estudiante de otra sede es inexistente (404, antes de consultar tasa BCV ni enviar nada)
++  await assert.rejects(svc.notif.generarAlerta({ tipo: 'MOROSIDAD', estudianteId: b.estId, sedeId: sedeA }, { bcvSvc: bcvFalso, waSvc: { enviarTexto: async () => { throw new Error('no debía enviar'); } } }), (e) => e.status === 404);
++});
++
++t('multi-sede: auditoría de pagos (bandeja, aprobar, rechazar) y egresos/balance respetan la sede', async () => {
++  const usuarioId = await usuarioAdminId();
++  const b = await sembrar({ sedeId: sedeB, nombres: 'PagoB', apellidos: 'Sur' });
++  const pago = await svc.pagos.declararReferencia({ estudianteId: b.estId, cuotaId: b.cuotaId, referencia: 'ISO-B-1', metodo: 'ZELLE', tasa: 36.5 });
++  const ids = async (sedeId) => (await svc.pagos.bandeja({ estado: 'Por Validar', offset: 0, limite: 100, sedeId })).items.map((x) => x.id);
++  assert.ok(!(await ids(sedeA)).includes(pago.pagoId));
++  assert.ok((await ids(sedeB)).includes(pago.pagoId));
++  assert.ok((await ids(null)).includes(pago.pagoId));
++  await assert.rejects(svc.pagos.aprobar({ pagoId: pago.pagoId, usuarioId, sedeId: sedeA }), (e) => e.status === 404);
++  await assert.rejects(svc.pagos.rechazar({ pagoId: pago.pagoId, usuarioId, nota: 'x', sedeId: sedeA }), (e) => e.status === 404);
++  assert.equal((await uno('SELECT estado FROM pagos_referencias WHERE id = $1', [pago.pagoId])).estado, 'Por Validar');
++  assert.equal((await svc.pagos.aprobar({ pagoId: pago.pagoId, usuarioId, sedeId: sedeB })).pagoId, pago.pagoId);
++
++  // el cobro aprobado cuenta en la sede B y no en la A
++  const periodo = svc.periodo();
++  assert.ok((await svc.facturacion.tablero(periodo, sedeB)).cobrado.monto_usd >= 25);
++  assert.equal((await svc.facturacion.tablero(periodo, sedeA)).cobrado.monto_usd, 0);
++
++  // egresos: un usuario de sede siempre registra en la suya (aunque mande otra); el consolidado elige la sede
++  const hoy = svc.hoy();
++  await svc.conta.crearEgreso({ fecha: hoy, categoria: 'IsoCat', descripcion: 'A', monto_usd: 12.5, referencia: null, sede_id: sedeB }, sedeA);
++  await svc.conta.crearEgreso({ fecha: hoy, categoria: 'IsoCat', descripcion: 'B', monto_usd: 7.25, referencia: null, sede_id: sedeB }, null);
++  assert.deepEqual((await filas(`SELECT descripcion, sede_id FROM egresos WHERE categoria = 'IsoCat' ORDER BY id`)), [{ descripcion: 'A', sede_id: sedeA }, { descripcion: 'B', sede_id: sedeB }]);
++  assert.equal((await svc.conta.listarEgresos({ periodo, offset: 0, limite: 50, sedeId: sedeA })).total_usd, 12.5);
++  assert.equal((await svc.conta.balance(periodo, sedeA)).egresos_usd, 12.5);
++  assert.equal((await svc.conta.balance(periodo, sedeB)).egresos_usd, 7.25);
++  assert.ok((await svc.conta.balance(periodo, null)).egresos_usd >= 19.75);
++});
++
++t('multi-sede: cuentas de cobro = comunes + las de la propia sede; sin sede solo las comunes (nunca las de otra sede)', async () => {
++  await db.ejecutar(
++    `INSERT INTO cuentas_pago (metodo, titular, detalle, sede_id) VALUES ('ZELLE', 'Común', 'comun@bma.example', NULL),
++       ('PAYPAL', 'Norte', 'norte@bma.example', $1), ('BINANCE', 'Sur', 'sur@bma.example', $2)`, [sedeA, sedeB]);
++  const titulares = async (sedeId) => (await svc.parametros.cuentasActivas(undefined, sedeId)).map((c) => c.titular);
++  const a = await titulares(sedeA);
++  assert.ok(a.includes('Común') && a.includes('Norte') && !a.includes('Sur'));
++  const sin = await titulares(null);
++  assert.ok(sin.includes('Común') && !sin.includes('Norte') && !sin.includes('Sur'));
++});
++
++// ── Invitaciones de inscripción ─────────────────────────────────────────────────────────────────
++t('invitaciones: token hasheado y de un solo uso; el SERVIDOR impone nivel y sede (el grado del cliente se descarta)', async () => {
++  await svc.parametros.guardar('MATRICULA_USD', '100.00');
++  const inv = await svc.invitaciones.crear({ sedeId: sedeA, nivel: '5to grado', creadoPor: await usuarioAdminId() });
++  assert.match(inv.token, /^[a-f0-9]{48}$/);
++  assert.match(inv.enlace, /\/admisiones\/\?invitacion=[a-f0-9]{48}$/);
++  const fila = await uno('SELECT token_hash, estado FROM invitaciones_inscripcion WHERE id = $1', [inv.id]);
++  assert.match(fila.token_hash, /^[a-f0-9]{64}$/);
++  assert.notEqual(fila.token_hash, inv.token);
++  assert.equal(fila.estado, 'Pendiente');
++
++  const cfgInv = await svc.admisiones.configInvitacion(inv.token, { bcvSvc: bcvFalso });
++  assert.deepEqual(cfgInv.sede, { id: sedeA, nombre: 'Sede Norte' });
++  assert.equal(cfgInv.nivel_asignado, '5to grado');
++  assert.equal(cfgInv.matricula_usd, 100);
++  const titulares = cfgInv.cuentas.map((c) => c.titular);
++  assert.ok(titulares.includes('Norte') && titulares.includes('Común') && !titulares.includes('Sur'));
++
++  const resuelta = await svc.invitaciones.resolver(inv.token);
++  const drive = driveFalso();
++  const r = await svc.admisiones.registrarInscripcion(
++    { datos: inscripcion({ alumno_nombres: 'Invitado', referencia_bancaria: 'INV-0001', representante_cedula: 'V-INV1', grado_solicitado: '1er grado (manipulado)' }), archivos, invitacion: resuelta },
++    { bcvSvc: bcvFalso, driveSvc: drive });
++  assert.equal(r.grado_solicitado, '5to grado');
++  assert.equal(r.sede_id, sedeA);
++  assert.deepEqual(await uno('SELECT grado_solicitado, sede_id FROM estudiantes WHERE id = $1', [r.estudiante_id]), { grado_solicitado: '5to grado', sede_id: sedeA });
++  assert.deepEqual(await uno('SELECT sede_id FROM cuotas WHERE estudiante_id = $1', [r.estudiante_id]), { sede_id: sedeA });
++  assert.deepEqual(await uno('SELECT sede_id FROM pagos_referencias WHERE estudiante_id = $1', [r.estudiante_id]), { sede_id: sedeA });
++  const usada = await uno('SELECT estado, estudiante_id, usada_en IS NOT NULL AS tiene_fecha FROM invitaciones_inscripcion WHERE id = $1', [inv.id]);
++  assert.deepEqual(usada, { estado: 'Usada', estudiante_id: r.estudiante_id, tiene_fecha: true });
++
++  // reutilizar el enlace: 410 (tanto al resolverlo como con el objeto ya resuelto) y sin tocar Drive
++  await assert.rejects(svc.invitaciones.resolver(inv.token), (e) => e.status === 410 && e.codigo === 'INVITACION_NO_VALIDA');
++  const drive2 = driveFalso();
++  await assert.rejects(
++    svc.admisiones.registrarInscripcion({ datos: inscripcion({ alumno_nombres: 'Otro', referencia_bancaria: 'INV-0002', representante_cedula: 'V-INV2' }), archivos, invitacion: resuelta }, { bcvSvc: bcvFalso, driveSvc: drive2 }),
++    (e) => e.status === 410);
++  assert.equal(drive2.subidas.length, 0);
++  assert.equal((await filas(`SELECT 1 FROM estudiantes WHERE nombres = 'Otro'`)).length, 0);
++});
++
++t('invitaciones: si la inscripción falla (Drive) se revierte y el enlace sigue Pendiente; dos envíos simultáneos → una sola inscripción', async () => {
++  const inv = await svc.invitaciones.crear({ sedeId: sedeA, nivel: '2do grado' });
++  const resuelta = await svc.invitaciones.resolver(inv.token);
++  await assert.rejects(
++    svc.admisiones.registrarInscripcion({ datos: inscripcion({ alumno_nombres: 'Caido', referencia_bancaria: 'INV-CAIDO', representante_cedula: 'V-CAIDO' }), archivos, invitacion: resuelta }, { bcvSvc: bcvFalso, driveSvc: driveFalso('falla') }),
++    (e) => e.status === 502);
++  assert.equal((await uno('SELECT estado FROM invitaciones_inscripcion WHERE id = $1', [inv.id])).estado, 'Pendiente');
++
++  const intento = (n) => svc.admisiones.registrarInscripcion(
++    { datos: inscripcion({ alumno_nombres: `Carrera${n}`, referencia_bancaria: `CAR-000${n}`, representante_cedula: `V-CAR${n}` }), archivos, invitacion: resuelta },
++    { bcvSvc: bcvFalso, driveSvc: driveFalso() }).then(() => 'ok', (e) => e.codigo);
++  const resultados = (await Promise.all([intento(1), intento(2)])).sort();
++  assert.deepEqual(resultados, ['INVITACION_NO_VALIDA', 'ok']);
++  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM estudiantes WHERE nombres LIKE 'Carrera%'`)).n, 1);
++});
++
++t('invitaciones: revocada, vencida o de sede inactiva → 410; listado con estado efectivo; revocar fuera de sede → 404', async () => {
++  const i1 = await svc.invitaciones.crear({ sedeId: sedeA, nivel: '1er grado' });
++  assert.equal((await svc.invitaciones.revocar(i1.id, sedeA)).estado, 'Revocada');
++  await assert.rejects(svc.invitaciones.resolver(i1.token), (e) => e.status === 410);
++  await assert.rejects(svc.invitaciones.revocar(i1.id, sedeA), (e) => e.status === 409 && e.codigo === 'INVITACION_NO_REVOCABLE');
++
++  const i2 = await svc.invitaciones.crear({ sedeId: sedeA, nivel: '1er grado' });
++  await db.ejecutar(`UPDATE invitaciones_inscripcion SET expira_en = NOW() - INTERVAL '1 minute' WHERE id = $1`, [i2.id]);
++  await assert.rejects(svc.invitaciones.resolver(i2.token), (e) => e.status === 410);
++  const vencidas = await svc.invitaciones.listar({ sedeId: sedeA, estado: 'Vencida', offset: 0, limite: 50 });
++  assert.ok(vencidas.items.some((x) => x.id === i2.id && x.estado === 'Vencida'));
++
++  const i3 = await svc.invitaciones.crear({ sedeId: sedeB, nivel: '3er grado', dias: 3 });
++  await assert.rejects(svc.invitaciones.revocar(i3.id, sedeA), (e) => e.status === 404);
++  assert.ok(!(await svc.invitaciones.listar({ sedeId: sedeA, offset: 0, limite: 200 })).items.some((x) => x.id === i3.id));
++  await svc.sedes.cambiarActiva(sedeB, false);
++  await assert.rejects(svc.invitaciones.crear({ sedeId: sedeB, nivel: 'x' }), (e) => e.status === 422 && e.codigo === 'SEDE_INACTIVA');
++  await assert.rejects(svc.invitaciones.resolver(i3.token), (e) => e.status === 410);
++  await svc.sedes.cambiarActiva(sedeB, true);
++  assert.equal((await svc.invitaciones.resolver(i3.token)).sede_id, sedeB);
++
++  for (const malo of ['', 'xyz', 'A'.repeat(48), 'a'.repeat(47)]) await assert.rejects(svc.invitaciones.resolver(malo), (e) => e.status === 410);
++});
++
++// ── Prueba premium de 15 días ───────────────────────────────────────────────────────────────────
++t('prueba premium: abre 15 días, el candado la respeta, vence sola (sin tareas de limpieza) y no se puede repetir', async () => {
++  const g = svc.guard.crearGuard();
++  assert.equal((await g.estado('IA_ATENCION')).activo, false);
++  const r = await svc.prueba.activarPrueba('IA_ATENCION', { guard: g });
++  assert.equal(r.dias, 15);
++  const f = await uno(`SELECT prueba_usada, habilitado, EXTRACT(EPOCH FROM (prueba_expira_en - prueba_inicio))::int AS seg FROM modulos_premium WHERE codigo = 'IA_ATENCION'`);
++  assert.equal(f.prueba_usada, true);
++  assert.equal(f.habilitado, false, 'la prueba no marca el módulo como contratado');
++  assert.ok(Math.abs(f.seg - 15 * 86400) <= 3600);
++
++  const est = await g.estado('IA_ATENCION');
++  assert.deepEqual([est.activo, est.enPrueba, est.contratado], [true, true, false]);
++  let salida = 'pendiente';
++  await g.requireModulo('IA_ATENCION')({}, {}, (e) => { salida = e; });
++  assert.equal(salida, undefined);
++
++  // 16 días después: el MISMO dato en la base, pero el candado lo evalúa contra el reloj y bloquea
++  const futuro = svc.guard.crearGuard({ ahora: () => Date.now() + 16 * 86_400_000 });
++  await futuro.requireModulo('IA_ATENCION')({}, {}, (e) => { salida = e; });
++  assert.equal(salida.status, 403);
++  assert.equal(salida.codigo, 'MODULO_PREMIUM_DESHABILITADO');
++  assert.ok(salida.detalles.prueba_expiro_en);
++
++  await assert.rejects(svc.prueba.activarPrueba('IA_ATENCION', { guard: g }), (e) => e.status === 409 && e.codigo === 'PRUEBA_YA_UTILIZADA');
++  await assert.rejects(svc.prueba.activarPrueba('NO_EXISTE', { guard: g }), (e) => e.status === 404);
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE WHERE codigo = 'APP_MOVIL'`);
++  await assert.rejects(svc.prueba.activarPrueba('APP_MOVIL', { guard: g }), (e) => e.status === 409 && e.codigo === 'MODULO_YA_CONTRATADO');
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE WHERE codigo = 'APP_MOVIL'`);
++
++  // dos activaciones simultáneas: solo una abre la ventana
++  const carrera = await Promise.all([1, 2].map(() => svc.prueba.activarPrueba('FACHADA_WEB', { guard: g }).then(() => 'ok', (e) => e.codigo)));
++  assert.deepEqual(carrera.sort(), ['PRUEBA_YA_UTILIZADA', 'ok']);
++  // la ventana incoherente la rechaza el CHECK de la base
++  await assert.rejects(db.ejecutar(`UPDATE modulos_premium SET prueba_inicio = NOW(), prueba_expira_en = NOW() - INTERVAL '1 day' WHERE codigo = 'BANCAMIGA'`), (e) => e.code === '23514');
++});
++
++// ── Cron de WhatsApp ────────────────────────────────────────────────────────────────────────────
++t('cron WhatsApp: candado premium, reclamación diaria atómica, orden por sede (Preventiva → Morosidad), pausa de 1,5 s y sin duplicar', async () => {
++  const hoy = svc.hoy();
++  const g = svc.guard.crearGuard();
++  const llamadas = [];
++  const pausas = [];
++  const servicio = { VENTANA_PREVENTIVA: { min: 3, max: 5 }, generarAlerta: async (a) => { llamadas.push(a); return {}; } };
++  const log = { log() {}, error() {} };
++  const correr = (extra = {}) => svc.cron.ejecutarCiclo({ guard: g, servicio, pausaMs: 1500, esperar: async (ms) => { pausas.push(ms); }, log, ...extra });
++
++  // 1) módulo sin contratar ni prueba: no envía ni consume el día
++  assert.equal((await correr()).omitido, 'MODULO_INACTIVO');
++  assert.equal(llamadas.length, 0);
++  assert.equal((await filas(`SELECT 1 FROM parametros WHERE clave = $1`, [svc.cron.CLAVE_ULTIMO_DIA])).length, 0);
++
++  // 2) con la prueba activa, envía por sede
++  await svc.prueba.activarPrueba('WHATSAPP_AUTOMATICO', { guard: g });
++  const pA = await sembrar({ sedeId: sedeA, nombres: 'CronPrevA', vence: sumarDias(hoy, 4) });
++  const mA = await sembrar({ sedeId: sedeA, nombres: 'CronMorA', vence: sumarDias(hoy, -3) });
++  const pB = await sembrar({ sedeId: sedeB, nombres: 'CronPrevB', vence: sumarDias(hoy, 5) });
++  const mB = await sembrar({ sedeId: sedeB, nombres: 'CronMorB', vence: sumarDias(hoy, -1) });
++  const lejos = await sembrar({ sedeId: sedeA, nombres: 'CronLejos', vence: sumarDias(hoy, 20) });
++  const yaAvisado = await sembrar({ sedeId: sedeA, nombres: 'CronYa', vence: sumarDias(hoy, 3) });
++  await db.ejecutar(
++    `INSERT INTO notificaciones_whatsapp (estudiante_id, cuota_id, tipo, telefono, mensaje, monto_usd, tasa_bcv, monto_bs, estado)
++     VALUES ($1, $2, 'PREVENTIVA', '584120000000', 'ya enviada hoy', 25, 36.5, 912.5, 'ENVIADA')`, [yaAvisado.estId, yaAvisado.cuotaId]);
++
++  const r1 = await correr();
++  assert.equal(r1.omitido, undefined);
++  assert.equal(r1.enviadas, llamadas.length);
++  const mios = new Map([[pA.estId, 'pA'], [mA.estId, 'mA'], [pB.estId, 'pB'], [mB.estId, 'mB'], [lejos.estId, 'lejos'], [yaAvisado.estId, 'yaAvisado']]);
++  const secuencia = llamadas.filter((c) => mios.has(c.estudianteId));
++  assert.deepEqual(secuencia.map((c) => [mios.get(c.estudianteId), c.tipo, c.sedeId, c.enviar]),
++    [['pA', 'PREVENTIVA', sedeA, true], ['mA', 'MOROSIDAD', sedeA, true], ['pB', 'PREVENTIVA', sedeB, true], ['mB', 'MOROSIDAD', sedeB, true]]);
++  assert.equal(pausas.length, llamadas.length, '1 pausa por mensaje');
++  assert.ok(pausas.every((ms) => ms === 1500));
++
++  // 3) el mismo día no se repite (reclamación atómica); `forzar` sí reejecuta
++  const antes = llamadas.length;
++  assert.equal((await correr()).omitido, 'YA_EJECUTADO_HOY');
++  assert.equal(llamadas.length, antes);
++  assert.equal((await correr({ forzar: true })).omitido, undefined);
++  assert.ok(llamadas.length > antes);
++  const reclamos = await Promise.all([1, 2, 3].map(() => svc.cron.reclamarDia('2099-01-01')));
++  assert.equal(reclamos.filter(Boolean).length, 1, 'tres instancias a la vez: solo una reclama el día');
++
++  // 4) un fallo (Meta caída) cuenta y sigue; una regla de negocio (422) se omite sin pausa ni mensaje
++  pausas.length = 0;
++  const fallando = { ...servicio, generarAlerta: async (a) => {
++    if (a.estudianteId === pA.estId) throw new Error('meta caída');
++    if (a.estudianteId === mA.estId) throw svc.AppError(422, 'PAGO_EN_REVISION', 'x');
++    return {};
++  } };
++  const r2 = await correr({ forzar: true, servicio: fallando, log });
++  assert.ok(r2.fallidas >= 1 && r2.omitidas >= 1);
++  assert.equal(pausas.length, r2.enviadas + r2.fallidas);
++
++  // 5) vencida la prueba (15 días), el candado cierra el ciclo automático sin tocar nada más
++  await db.ejecutar(`UPDATE modulos_premium SET prueba_inicio = NOW() - INTERVAL '15 days', prueba_expira_en = NOW() - INTERVAL '1 second' WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
++  const despues = llamadas.length;
++  assert.equal((await correr({ guard: svc.guard.crearGuard(), forzar: true })).omitido, 'MODULO_INACTIVO');
++  assert.equal(llamadas.length, despues);
++});
++
+ // ── Supabase: RLS ───────────────────────────────────────────────────────────────────────────────
+ t('Supabase: con los privilegios por defecto de anon/authenticated, la migración 004 les cierra el acceso (RLS + REVOKE)', async () => {
+   await db.ejecutar('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated');
+   await db.ejecutar('GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated');
+-  await db.ejecutarScript(fs.readFileSync(path.join(RAIZ, 'database', 'migrations', '004_seguridad_supabase.sql'), 'utf8'));
++  // 004 (Core Base) + 005/006 (sedes e invitaciones: su propio bloque RLS/REVOKE; además prueban que re-ejecutarlas es inocuo).
++  for (const m of ['004_seguridad_supabase.sql', '005_multisede.sql', '006_invitaciones_inscripcion.sql']) {
++    await db.ejecutarScript(fs.readFileSync(path.join(RAIZ, 'database', 'migrations', m), 'utf8'));
++  }
+   for (const rol of ['anon', 'authenticated']) {
+-    for (const objeto of ['estudiantes', 'pagos_referencias', 'usuarios_admin', 'vw_estudiantes_estado']) {
++    for (const objeto of ['estudiantes', 'pagos_referencias', 'usuarios_admin', 'vw_estudiantes_estado', 'sedes', 'invitaciones_inscripcion']) {
+       const err = await db.conTransaccion(async (tx) => {
+         await db.ejecutar(`SET LOCAL ROLE ${rol}`, [], tx);
+         await db.ejecutar(`SELECT * FROM ${objeto}`, [], tx);
+diff --git a/tests/multisede.test.js b/tests/multisede.test.js
+new file mode 100644
+index 0000000..30572df
+--- /dev/null
++++ b/tests/multisede.test.js
+@@ -0,0 +1,222 @@
++'use strict';
++const { db } = require('./helpers/entorno');
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { proximaEjecucionCaracas } = require('../utils/fechas');
++const { alcanceDe } = require('../utils/alcance');
++const { crearGuard, evaluarAcceso } = require('../modules/premium/guard');
++const { iniciarCron, sumarDias, ejecutarCiclo } = require('../modules/premium/whatsapp-cron');
++const { prepararInscripcion } = require('../controllers/admisiones.controller');
++const { AppError } = require('../errors/AppError');
++
++// `jsonwebtoken` real si está instalado; si no (entorno sin red), un HS256 mínimo con crypto para poder ejercitar el middleware.
++const Module = require('node:module');
++const crypto = require('node:crypto');
++try { require.resolve('jsonwebtoken'); } catch {
++  const b64 = (o) => Buffer.from(typeof o === 'string' ? o : JSON.stringify(o)).toString('base64url');
++  const firma = (data, secreto) => crypto.createHmac('sha256', secreto).update(data).digest('base64url');
++  const jwtMinimo = {
++    sign: (payload, secreto) => { const d = `${b64({ alg: 'HS256', typ: 'JWT' })}.${b64(payload)}`; return `${d}.${firma(d, secreto)}`; },
++    verify: (token, secreto) => {
++      const [h, p, f] = String(token).split('.');
++      if (firma(`${h}.${p}`, secreto) !== f) throw Object.assign(new Error('invalid signature'), { name: 'JsonWebTokenError' });
++      return JSON.parse(Buffer.from(p, 'base64url').toString('utf8'));
++    },
++  };
++  const cargaOriginal = Module._load;
++  Module._load = function cargar(request, ...resto) { return request === 'jsonwebtoken' ? jwtMinimo : cargaOriginal.call(this, request, ...resto); };
++}
++const { firmarToken, requireAuth } = require('../middlewares/auth');
++
++const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
++
++// ── Reloj del cron: 08:00 de Caracas (UTC-4 fijo) = 12:00 UTC ────────────────────────────────────
++test('cron: la próxima ejecución es siempre las 08:00 de Caracas (12:00 UTC), estrictamente posterior a "ahora"', () => {
++  const iso = (ms) => new Date(ms).toISOString();
++  assert.equal(iso(proximaEjecucionCaracas(Date.parse('2026-10-24T11:59:59Z'))), '2026-10-24T12:00:00.000Z'); // 07:59:59 en Caracas
++  assert.equal(iso(proximaEjecucionCaracas(Date.parse('2026-10-24T12:00:00Z'))), '2026-10-25T12:00:00.000Z'); // justo a las 08:00 → mañana
++  assert.equal(iso(proximaEjecucionCaracas(Date.parse('2026-10-24T20:30:00Z'))), '2026-10-25T12:00:00.000Z');
++  // 22:00 del 23/oct en Caracas (= 02:00Z del 24) → hoy (24 UTC) a las 12:00Z, que es el 24 a las 08:00 de Caracas
++  assert.equal(iso(proximaEjecucionCaracas(Date.parse('2026-10-24T02:00:00Z'))), '2026-10-24T12:00:00.000Z');
++  // cambio de mes y de año
++  assert.equal(iso(proximaEjecucionCaracas(Date.parse('2026-12-31T13:00:00Z'))), '2027-01-01T12:00:00.000Z');
++  // otra hora configurada
++  assert.equal(iso(proximaEjecucionCaracas(Date.parse('2026-10-24T00:00:00Z'), 6, 30)), '2026-10-24T10:30:00.000Z');
++});
++
++test('cron: sumarDias recorre el calendario sin huso horario', () => {
++  assert.equal(sumarDias('2026-10-29', 3), '2026-11-01');
++  assert.equal(sumarDias('2026-12-30', 5), '2027-01-04');
++  assert.equal(sumarDias('2026-03-01', -1), '2026-02-28');
++});
++
++test('cron: iniciarCron arma el temporizador a las 08:00, ejecuta el ciclo, se rearma desde el reloj real y se detiene', async () => {
++  let reloj = Date.parse('2026-10-24T11:00:00Z'); // 07:00 Caracas
++  const armados = [];
++  const cancelados = [];
++  const ciclos = [];
++  const log = { log() {}, error() {} };
++  const c = iniciarCron({
++    ahora: () => reloj, hora: 8, log,
++    ciclo: async (o) => { ciclos.push(o); },
++    programar: (fn, ms) => { const h = { fn, ms, unref() {} }; armados.push(h); return h; },
++    cancelar: (h) => cancelados.push(h),
++  });
++  assert.equal(armados.length, 1);
++  assert.equal(armados[0].ms, 3_600_000, 'espera exactamente 1 h hasta las 08:00');
++  reloj = Date.parse('2026-10-24T12:00:00.100Z');
++  await armados[0].fn();
++  assert.equal(ciclos.length, 1);
++  assert.equal(armados.length, 2, 'se rearma tras cada ciclo');
++  assert.equal(armados[1].ms, 86_400_000 - 100, 'siguiente: mañana a las 08:00, calculado desde el reloj real');
++  c.detener();
++  assert.deepEqual(cancelados, [armados[1]]);
++  await armados[1].fn(); // un disparo tardío tras detener no debe rearmar
++  assert.equal(armados.length, 2);
++});
++
++test('cron: un ciclo que lanza un error no mata el temporizador (se registra y se rearma)', async () => {
++  const errores = [];
++  const armados = [];
++  iniciarCron({
++    ahora: () => Date.parse('2026-10-24T11:00:00Z'), hora: 8, log: { log() {}, error: (...a) => errores.push(a.join(' ')) },
++    ciclo: async () => { throw new Error('base caída'); },
++    programar: (fn, ms) => { const h = { fn, ms, unref() {} }; armados.push(h); return h; }, cancelar() {},
++  });
++  await armados[0].fn();
++  assert.equal(armados.length, 2);
++  assert.match(errores[0], /base caída/);
++});
++
++test('cron: con el módulo inactivo (sin contratar / prueba vencida) no consulta sedes, no reclama el día y no envía', async () => {
++  db.reiniciar();
++  let enviados = 0;
++  const guard = { estado: async () => ({ activo: false }) };
++  const r = await ejecutarCiclo({ guard, servicio: { VENTANA_PREVENTIVA: { min: 3, max: 5 }, generarAlerta: async () => { enviados += 1; } }, log: { log() {}, error() {} } });
++  assert.equal(r.omitido, 'MODULO_INACTIVO');
++  assert.equal(enviados, 0);
++  assert.equal(db.llamadas.length, 0, 'ni siquiera toca la base de datos');
++});
++
++test('cron: SQL de candidatos y reclamación son posicionales ($n), con alcance de sede y huso de Caracas', async () => {
++  db.reiniciar();
++  const vistos = [];
++  db.handler = async (texto, params) => {
++    vistos.push({ texto, params });
++    if (/INSERT INTO parametros/.test(texto)) return rs({ valor: '2026-10-24' });
++    if (/FROM sedes/.test(texto)) return rs({ id: 3 });
++    if (/FROM vw_estudiantes_estado/.test(texto)) return rs();
++    return rs();
++  };
++  const r = await ejecutarCiclo({ guard: { estado: async () => ({ activo: true }) }, servicio: { VENTANA_PREVENTIVA: { min: 3, max: 5 }, generarAlerta: async () => {} }, ahora: () => Date.parse('2026-10-24T12:00:05Z'), log: { log() {}, error() {} } });
++  assert.equal(r.omitido, undefined);
++  const claim = vistos.find((v) => /INSERT INTO parametros/.test(v.texto));
++  assert.deepEqual(claim.params, ['CRON_WA_ULTIMO_DIA', '2026-10-24']);
++  const cand = vistos.filter((v) => /FROM vw_estudiantes_estado/.test(v.texto));
++  assert.equal(cand.length, 4, '2 pases (sede 3 y sin sede) × (Preventiva, Morosidad)');
++  assert.deepEqual(cand.map((c) => [c.params[0], c.params[1], c.params[5]]), [[3, 'Activo', 'PREVENTIVA'], [3, 'Moroso', 'MOROSIDAD'], [null, 'Activo', 'PREVENTIVA'], [null, 'Moroso', 'MOROSIDAD']]);
++  assert.deepEqual(cand[0].params.slice(3, 5), ['2026-10-27', '2026-10-29'], 'ventana preventiva: de 3 a 5 días desde hoy en Caracas');
++  for (const c of cand) {
++    assert.match(c.texto, /sede_id IS NOT DISTINCT FROM \$1::int/);
++    assert.match(c.texto, /AT TIME ZONE 'America\/Caracas'/);
++    assert.doesNotMatch(c.texto, /\b(GETDATE|ISNULL|TOP\s+\d+|DATEADD)\b/i);
++  }
++});
++
++// ── Candado con prueba: la vigencia se evalúa EN VIVO (no espera al TTL de la caché) ─────────────
++test('guard: evaluarAcceso distingue contratado, en prueba y prueba vencida', () => {
++  const ahora = Date.parse('2026-10-24T12:00:00Z');
++  const futuro = '2026-11-01T00:00:00Z';
++  const pasado = '2026-10-01T00:00:00Z';
++  assert.deepEqual(evaluarAcceso(null, ahora), { activo: false, contratado: false, enPrueba: false, pruebaExpiraEn: null, pruebaUsada: false });
++  assert.equal(evaluarAcceso({ habilitado: true }, ahora).activo, true);
++  const enPrueba = evaluarAcceso({ habilitado: false, prueba_expira_en: futuro, prueba_usada: true }, ahora);
++  assert.deepEqual([enPrueba.activo, enPrueba.enPrueba, enPrueba.contratado], [true, true, false]);
++  const vencida = evaluarAcceso({ habilitado: false, prueba_expira_en: pasado, prueba_usada: true }, ahora);
++  assert.deepEqual([vencida.activo, vencida.enPrueba, vencida.pruebaUsada], [false, false, true]);
++  assert.equal(evaluarAcceso({ habilitado: false, prueba_expira_en: ahora, prueba_usada: true }, ahora).activo, false, 'en el instante exacto del vencimiento ya está bloqueado');
++});
++
++test('guard: una prueba vencida bloquea con 403 aunque la fila siga en caché; el vencimiento no requiere tareas de limpieza', async () => {
++  let t = Date.parse('2026-10-24T12:00:00Z');
++  let lecturas = 0;
++  const expira = new Date(t + 60_000).toISOString(); // la prueba vence a los 60 s: fecha FIJA en la base
++  const repo = { leer: async () => { lecturas += 1; return { nombre: 'WhatsApp', precio_usd: 150, habilitado: false, prueba_expira_en: expira, prueba_usada: true }; } };
++  const { requireModulo } = crearGuard({ repo, ttlMs: 15_000, ahora: () => t });
++  const pasar = async () => { let r = 'sin-llamar'; await requireModulo('WHATSAPP_AUTOMATICO')({}, {}, (e) => { r = e; }); return r; };
++  assert.equal(await pasar(), undefined, 'dentro de la prueba pasa');
++  t += 30_000; // pasa el TTL de la caché y aún quedan 30 s de prueba
++  assert.equal(await pasar(), undefined);
++  t += 31_000; // vencida
++  const e = await pasar();
++  assert.equal(e.status, 403);
++  assert.equal(e.codigo, 'MODULO_PREMIUM_DESHABILITADO');
++  assert.ok(e.detalles.prueba_expiro_en);
++  // caché viva (misma lectura) pero el reloj ya pasó el vencimiento: bloquea sin esperar al TTL
++  const antes = lecturas;
++  t += 1_000;
++  assert.equal((await pasar()).status, 403);
++  assert.equal(lecturas, antes, 'no hizo falta releer la base');
++});
++
++// ── Alcance de sede y token ─────────────────────────────────────────────────────────────────────
++test('alcance: fail-closed para quien no es admin y no tiene sede; el admin sin sede es consolidado', () => {
++  assert.equal(alcanceDe({ rol: 'admin', sede_id: null }), null);
++  assert.equal(alcanceDe({ rol: 'admin' }), null);
++  assert.equal(alcanceDe({ rol: 'secretaria', sede_id: 4 }), 4);
++  assert.throws(() => alcanceDe({ rol: 'secretaria', sede_id: null }), (e) => e instanceof AppError && e.status === 403 && e.codigo === 'SEDE_NO_ASIGNADA');
++  assert.throws(() => alcanceDe({ rol: 'secretaria' }), (e) => e.codigo === 'SEDE_NO_ASIGNADA');
++  assert.throws(() => alcanceDe({ rol: 'admin', sede_id: 0 }), (e) => e.status === 403);
++  assert.throws(() => alcanceDe({ rol: 'admin', sede_id: -2 }), (e) => e.status === 403);
++});
++
++test('auth: el JWT lleva sede_id y requireAuth lo expone en req.usuario (NULL cuando no hay sede)', () => {
++  const pasar = (usuario) => {
++    const token = firmarToken(usuario);
++    const req = { get: () => `Bearer ${token}` };
++    let err = 'sin-next';
++    requireAuth(req, {}, (e) => { err = e; });
++    assert.equal(err, undefined);
++    return req.usuario;
++  };
++  assert.deepEqual(pasar({ id: 1, rol: 'secretaria', nombre: 'Ana', sede_id: 9 }), { id: 1, rol: 'secretaria', nombre: 'Ana', sede_id: 9 });
++  assert.equal(pasar({ id: 2, rol: 'admin', nombre: 'Root', sede_id: null }).sede_id, null);
++  assert.equal(pasar({ id: 3, rol: 'admin', nombre: 'Viejo' }).sede_id, null, 'usuario sin la columna (antes de migrar) → sin sede');
++});
++
++// ── Formulario con invitación ───────────────────────────────────────────────────────────────────
++const JPG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
++const PDF = Buffer.from('%PDF-1.4 contenido');
++const body = {
++  alumno_nombres: 'Luis', alumno_apellidos: 'Pérez', alumno_fecha_nacimiento: '2015-03-02',
++  representante_nombres: 'Ana', representante_apellidos: 'Pérez', representante_cedula: 'V-12345678',
++  telefono_codigo: '+58', telefono_numero: '414 123 4567', referencia_bancaria: 'REF-998877', metodo_pago: 'ZELLE',
++};
++const files = () => ({ foto_carnet: [{ buffer: JPG }], cedula_identidad: [{ buffer: PDF }], acta_nacimiento: [{ buffer: JPG }] });
++const TOKEN = 'a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718';
++
++test('formulario: con invitación el grado puede no llegar (lo impone el servidor); sin invitación sigue siendo obligatorio', () => {
++  const conInv = prepararInscripcion({ ...body, invitacion: TOKEN }, files());
++  assert.equal(conInv.datos.invitacion, TOKEN);
++  assert.equal(conInv.datos.grado_solicitado, null);
++  try {
++    prepararInscripcion(body, files());
++    assert.fail('debía lanzar');
++  } catch (err) {
++    assert.equal(err.status, 422);
++    assert.deepEqual(err.detalles.filter((d) => d.campo === 'grado_solicitado'), [{ campo: 'grado_solicitado', mensaje: 'Es obligatorio.' }]);
++  }
++  assert.ok(prepararInscripcion({ ...body, grado_solicitado: '3er grado' }, files()).datos.invitacion === null);
++});
++
++test('formulario: un token de invitación mal formado se rechaza con 422 en el campo invitacion', () => {
++  for (const malo of ['xyz', 'A'.repeat(48), 'a'.repeat(47), `${TOKEN} `.repeat(2)]) {
++    try {
++      prepararInscripcion({ ...body, grado_solicitado: '3er grado', invitacion: malo }, files());
++      assert.fail(`debía rechazar ${malo}`);
++    } catch (err) {
++      assert.equal(err.status, 422, malo);
++      assert.ok(err.detalles.some((d) => d.campo === 'invitacion'), malo);
++    }
++  }
++});
+diff --git a/tests/schema-consistencia.test.js b/tests/schema-consistencia.test.js
+index a6b6964..f413126 100644
+--- a/tests/schema-consistencia.test.js
++++ b/tests/schema-consistencia.test.js
+@@ -48,10 +48,15 @@ for (const m of sqlTodo.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?
+   tablas[m[1]] = cols;
+   unicos[m[1]] = uq;
+ }
++// Columnas añadidas por migraciones posteriores: ALTER TABLE x ADD COLUMN IF NOT EXISTS col TIPO …
++for (const m of sinComentariosSql(sqlTodo).matchAll(new RegExp(`ALTER TABLE (\\w+)\\s+ADD COLUMN IF NOT EXISTS (\\w+)\\s+(?:${TIPOS})\\b`, 'gi'))) {
++  assert.ok(tablas[m[1]], `ALTER TABLE sobre tabla desconocida ${m[1]}`);
++  tablas[m[1]].add(m[2]);
++}
+ for (const m of sqlTodo.matchAll(/CREATE UNIQUE INDEX IF NOT EXISTS \w+ ON (\w+)\s*\(([^)]*)\)/g)) {
+   unicos[m[1]].add(m[2].split(',').map((x) => x.trim()).join(','));
+ }
+-const vistaTexto = /CREATE OR REPLACE VIEW (\w+)[\s\S]*?\bAS\s+SELECT([\s\S]*?);\s*$/m.exec(sqlTodo);
++const vistaTexto = [...sinComentariosSql(sqlTodo).matchAll(/CREATE OR REPLACE VIEW (\w+)[\s\S]*?\bAS\s+SELECT([\s\S]*?);\s*$/gm)].pop(); // la última definición manda (005 añade sede_id)
+ const vista = { nombre: vistaTexto[1], cols: new Set([...vistaTexto[2].matchAll(/\bAS\s+(\w+)\s*[,\n]/g)].map((m) => m[1])) };
+ for (const m of vistaTexto[2].matchAll(/\be\.(\w+)\s*,/g)) vista.cols.add(m[1]);
+ vista.cols.add('proximo_vencimiento');
+@@ -60,11 +65,11 @@ const objetos = new Set([...Object.keys(tablas), vista.nombre]);
+ for (const [, t] of codigo) for (const m of t.matchAll(/(?:\bWITH|,)\s+(\w+)\s+AS\s*\(\s*SELECT/g)) objetos.add(m[1]);
+ 
+ test('el esquema define las tablas del Core Base', () => {
+-  for (const t of ['usuarios_admin', 'representantes', 'estudiantes', 'documentos_estudiante', 'cuotas', 'pagos_referencias', 'tasas_bcv', 'cuentas_pago',
++  for (const t of ['sedes', 'invitaciones_inscripcion', 'usuarios_admin', 'representantes', 'estudiantes', 'documentos_estudiante', 'cuotas', 'pagos_referencias', 'tasas_bcv', 'cuentas_pago',
+     'personal', 'horas_clase', 'nomina_pagos', 'egresos', 'notificaciones_whatsapp', 'portal_tokens', 'modulos_premium', 'parametros', 'schema_migrations']) {
+     assert.ok(tablas[t] && tablas[t].size >= 2, `falta la tabla ${t} (o no se pudo leer)`);
+   }
+-  assert.ok(vista.cols.has('estado_dinamico') && vista.cols.has('estatus_pago') && vista.cols.has('deuda_vencida_usd'));
++  assert.ok(vista.cols.has('estado_dinamico') && vista.cols.has('estatus_pago') && vista.cols.has('deuda_vencida_usd') && vista.cols.has('sede_id'));
+ });
+ 
+ test('todo objeto referenciado en FROM/JOIN/INTO/UPDATE existe en las migraciones', () => {
+@@ -173,9 +178,16 @@ test('PostgreSQL: DDL idempotente, paréntesis balanceados y nombres de índice/
+   assert.ok(idx.includes('ux_pagos_referencia_activa') && idx.includes('ux_estudiantes_identidad') && idx.includes('ux_egresos_nomina'));
+ });
+ 
+-test('Supabase: RLS activado en las 17 tablas del Core Base, vista con security_invoker y sin tipos de dinero flotantes', () => {
++test('Supabase: RLS activado en las 19 tablas (004 para el Core Base; 005/006 para las nuevas), vista con security_invoker y sin dinero flotante', () => {
+   const seg = migraciones.find(([f]) => f.startsWith('004'))[1];
+-  for (const t of Object.keys(tablas)) assert.ok(new RegExp(`'${t}'`).test(seg), `004 no activa RLS en ${t}`);
++  const nuevas = new Set(['sedes', 'invitaciones_inscripcion']);
++  for (const t of Object.keys(tablas)) {
++    if (nuevas.has(t)) {
++      const dueña = migraciones.find(([, txt]) => new RegExp(`CREATE TABLE IF NOT EXISTS ${t}\\b`).test(txt));
++      assert.match(dueña[1], new RegExp(`ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY`), `${dueña[0]} no activa RLS en ${t}`);
++      assert.match(dueña[1], new RegExp(`REVOKE ALL ON TABLE ${t} FROM`), `${dueña[0]} no revoca anon/authenticated en ${t}`);
++    } else assert.ok(new RegExp(`'${t}'`).test(seg), `004 no activa RLS en ${t}`);
++  }
+   assert.match(sqlTodo, /VIEW vw_estudiantes_estado WITH \(security_invoker = true\)/);
+   assert.ok(!/\b(FLOAT|REAL|DOUBLE PRECISION|MONEY)\b/i.test(sinComentariosSql(sqlTodo)), 'dinero/tasas deben ser NUMERIC');
+   assert.ok(/AT TIME ZONE 'America\/Caracas'/.test(sqlTodo), 'la vista debe calcular "hoy" en hora de Caracas');
+@@ -204,3 +216,46 @@ test('el código usa el contrato { rows, rowCount } y params como arreglo (nada
+   }
+   assert.deepEqual(malos, []);
+ });
++
++// ── Multi-sede: cableado del alcance (estático) ─────────────────────────────────────────────────
++test('multi-sede: todo servicio segmentado por sede se invoca desde los controladores con alcanceDe(req.usuario) (fail-closed)', () => {
++  const sinAlcance = [];
++  let revisadas = 0;
++  for (const f of ['crm', 'facturacion', 'notificaciones', 'exportaciones', 'contabilidad', 'sedes']) {
++    const t = sinComentariosJs(leer(`controllers/${f}.controller.js`));
++    assert.match(t, /require\('\.\.\/utils\/alcance'\)/, `${f}.controller no importa utils/alcance`);
++    for (const m of t.matchAll(/\b(crm|pagos|facturacion|notificaciones|invitaciones|conta)\.(resumen|listar|detalle|retirar|reactivar|tablero|auditoria|bandeja|aprobar|rechazar|listarCuotas|crearCuota|generarMensualidades|generarAlerta|historial|listarEgresos|crearEgreso|balance|revocar)\(([^;]*)\)/g)) {
++      revisadas += 1;
++      if (!/alcanceDe\(req\.usuario\)/.test(m[0])) sinAlcance.push(`${f}.controller: ${m[1]}.${m[2]}`);
++    }
++  }
++  assert.ok(revisadas >= 18, `se esperaban >= 18 llamadas revisadas (hubo ${revisadas})`);
++  assert.deepEqual(sinAlcance, []);
++});
++
++test('multi-sede: datos sin sede (personal, horas, nómina, configuración, sedes) y el Excel contable exigen acceso consolidado; la ruta pública de invitación existe', () => {
++  const rutas = sinComentariosJs(leer('routes/index.js'));
++  const sinCandado = [];
++  for (const m of rutas.matchAll(/api\.(get|post|put)\('(\/(?:contabilidad\/(?:personal|horas|nomina)|exportaciones\/contabilidad\.xlsx|configuracion|sedes))[^']*',([^;]*)\);/g)) {
++    if (m[2] === '/sedes' && m[1] === 'get') continue; // listar sedes: cada usuario ve las suyas (alcance)
++    if (!/soloConsolidado/.test(m[3])) sinCandado.push(`${m[1].toUpperCase()} ${m[0].slice(m[0].indexOf("'"), m[0].indexOf("',") + 1)}`);
++  }
++  assert.deepEqual(sinCandado, []);
++  assert.match(rutas, /api\.get\('\/public\/admisiones\/invitacion\/:token', crearLimitador\(/);
++  assert.match(rutas, /api\.post\('\/premium|catalogoRouter/, 'el catálogo premium sigue montado');
++  const prem = leer('modules/premium/premium.routes.js');
++  assert.match(prem, /catalogoRouter\.post\('\/activar-prueba', requireAuth, requireRol\('admin'\), requireConsolidado/);
++});
++
++test('multi-sede: toda consulta de lectura/escritura sobre tablas segmentadas usa el predicado ($n::int IS NULL OR …sede_id = $n::int) o hereda por trigger', () => {
++  const t = (f) => sinComentariosJs(leer(f));
++  const predicado = /\(\$\d+::int IS NULL OR [a-z]*\.?(?:sede_)?id = \$\d+::int\)/; // sede_id en tablas segmentadas; id en la propia tabla sedes
++  for (const f of ['services/crm.service.js', 'services/facturacion.service.js', 'services/pagos.service.js', 'services/contabilidad.service.js',
++    'services/notificaciones.service.js', 'services/invitaciones.service.js', 'services/sedes.service.js', 'services/exportacion.service.js']) {
++    assert.match(t(f), predicado, `${f} no aplica el predicado de sede`);
++  }
++  // los INSERT de filas segmentadas no pueden escribir una sede distinta de la que da el trigger/servidor
++  assert.match(t('services/admisiones.service.js'), /emergencia_telefono, sede_id\)/);
++  assert.match(sqlTodo, /CREATE TRIGGER trg_cuotas_heredar_sede BEFORE INSERT ON cuotas/);
++  assert.match(sqlTodo, /CREATE TRIGGER trg_pagos_heredar_sede BEFORE INSERT ON pagos_referencias/);
++});
+diff --git a/utils/alcance.js b/utils/alcance.js
+new file mode 100644
+index 0000000..5b2960b
+--- /dev/null
++++ b/utils/alcance.js
+@@ -0,0 +1,35 @@
++'use strict';
++const { AppError, e } = require('../errors/AppError');
++
++/**
++ * Alcance de sede del usuario autenticado (multi-sede).
++ *   · devuelve un ENTERO  → el usuario solo opera sobre esa sede: los servicios filtran con `($n::int IS NULL OR x.sede_id = $n::int)`.
++ *   · devuelve NULL       → acceso consolidado/global (SuperAdmin): el mismo predicado deja pasar todas las filas.
++ * FAIL-CLOSED: un usuario que NO es admin y no tiene sede (secretaria sin asignar, token anterior a la migración 005) NO se trata como
++ * global: recibe 403 SEDE_NO_ASIGNADA. Así un olvido de configuración nunca abre el acceso consolidado.
++ * Todo controlador del panel que lea o escriba datos segmentados por sede debe llamar a esta función con `req.usuario`.
++ */
++function alcanceDe(usuario) {
++  if (!usuario) throw e.noAutenticado();
++  const sede = usuario.sede_id;
++  if (sede === null || sede === undefined) {
++    if (usuario.rol === 'admin') return null;
++    throw new AppError(403, 'SEDE_NO_ASIGNADA', 'Tu usuario no tiene una sede asignada. Pide a un administrador que te asigne una sede.');
++  }
++  if (!Number.isInteger(sede) || sede <= 0) throw e.prohibido('La sede de tu sesión no es válida. Inicia sesión de nuevo.');
++  return sede;
++}
++
++/** Función reservada al acceso consolidado (nómina, personal, horas, ajustes globales): un usuario atado a una sede recibe 403. */
++function requireConsolidado(req, _res, next) {
++  try {
++    if (alcanceDe(req.usuario) !== null) {
++      throw e.prohibido('Esta función solo está disponible para el acceso consolidado (usuario sin sede asignada).');
++    }
++    next();
++  } catch (err) {
++    next(err);
++  }
++}
++
++module.exports = { alcanceDe, requireConsolidado };
+diff --git a/utils/fechas.js b/utils/fechas.js
+index 9dd3a46..95b15e1 100644
+--- a/utils/fechas.js
++++ b/utils/fechas.js
+@@ -57,4 +57,15 @@ function limitesPeriodo(periodo) {
+   };
+ }
+ 
+-module.exports = { hoyCaracas, esFechaValida, aFechaSql, aInstanteSql, diasEntre, periodoActual, esPeriodoValido, limitesPeriodo };
++/**
++ * Instante (ms epoch UTC) de la PRÓXIMA ocurrencia estrictamente posterior a `ahora` de las `hora`:`minuto` de pared en Caracas.
++ * Caracas = UTC-4 fijo → 08:00 en Caracas = 12:00 UTC (sin horario de verano, el cálculo es exacto todo el año).
++ */
++function proximaEjecucionCaracas(ahora = Date.now(), hora = 8, minuto = 0) {
++  const caracas = new Date(ahora - OFFSET_CARACAS_MS); // reloj de pared de Caracas, leído con los getters UTC
++  let objetivo = Date.UTC(caracas.getUTCFullYear(), caracas.getUTCMonth(), caracas.getUTCDate(), hora, minuto) + OFFSET_CARACAS_MS;
++  if (objetivo <= ahora) objetivo += 86_400_000;
++  return objetivo;
++}
++
++module.exports = { proximaEjecucionCaracas, hoyCaracas, esFechaValida, aFechaSql, aInstanteSql, diasEntre, periodoActual, esPeriodoValido, limitesPeriodo };

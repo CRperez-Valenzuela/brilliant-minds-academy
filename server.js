@@ -2,6 +2,7 @@
 const cfg = require('./config/env');
 const { crearApp } = require('./app');
 const { closePool, getPool } = require('./config/db');
+const { cron: cronWhatsapp } = require('./cron/whatsappCron');
 
 const app = crearApp();
 const server = app.listen(cfg.puerto, () => {
@@ -9,6 +10,8 @@ const server = app.listen(cfg.puerto, () => {
   console.log(`  Admisiones: /admisiones   Panel: /admin   Salud: /api/health`);
   // Verifica la base al arrancar (no bloquea el servidor: /api/health/db informa el estado después).
   getPool().then(() => console.log('  Base de datos PostgreSQL (Supabase) conectada.')).catch((e) => console.error('  ⚠ PostgreSQL no disponible:', e.message));
+  // Bot de WhatsApp (módulo premium): corre a diario; cada ciclo comprueba que el módulo esté habilitado.
+  if (cfg.whatsappCron.activo) cronWhatsapp.iniciar();
 });
 
 // Un rechazo no manejado jamás debe tumbar el proceso en silencio ni dejarlo en estado inconsistente.
@@ -23,6 +26,7 @@ function shutdown(codigo = 0) {
   const forzar = setTimeout(() => process.exit(codigo || 1), 10_000);
   forzar.unref();
   server.close(async () => {
+    await cronWhatsapp.detener().catch(() => undefined); // termina el mensaje en curso antes de cerrar la base
     await closePool().catch(() => undefined);
     process.exit(codigo);
   });

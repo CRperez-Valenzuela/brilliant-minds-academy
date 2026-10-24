@@ -125,12 +125,12 @@ test.after(async () => {
 });
 
 // ── Migraciones y scripts ───────────────────────────────────────────────────────────────────────
-t('migrate.js: aplica las 4 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
+t('migrate.js: aplica las 5 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
   const primera = hijo('scripts/migrate.js');
   for (const f of fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql'))) assert.match(primera, new RegExp(`Aplicada ${f}`));
   const segunda = hijo('scripts/migrate.js');
   assert.ok(!/Aplicada/.test(segunda), segunda);
-  assert.equal((segunda.match(/ya aplicada/g) || []).length, 4);
+  assert.equal((segunda.match(/ya aplicada/g) || []).length, 5);
   assert.match(segunda, /Migraciones al día/);
 });
 
@@ -141,7 +141,7 @@ t(`el esquema real contiene las 17 tablas + la vista, con RLS activo y la vista 
   const v = await uno(`SELECT array_to_string(reloptions, ',') AS opciones FROM pg_class WHERE relname = 'vw_estudiantes_estado'`);
   assert.equal(v.opciones, 'security_invoker=true');
   const reg = await filas('SELECT nombre FROM schema_migrations ORDER BY nombre');
-  assert.equal(reg.length, 4);
+  assert.equal(reg.length, 5);
 });
 
 t('crear-admin.js: upsert por correo (ON CONFLICT), normaliza a minúsculas, reactiva y no duplica', async () => {
@@ -645,6 +645,164 @@ t('Supabase: con los privilegios por defecto de anon/authenticated, la migració
   }
   // el rol de la aplicación (dueño) sigue leyendo normalmente
   assert.ok((await uno('SELECT COUNT(*)::int AS n FROM estudiantes')).n > 0);
+});
+
+// ── Prueba premium de 15 días ───────────────────────────────────────────────────────────────────
+t('005: modulos_premium gana prueba_iniciada_en y expira_prueba_en (TIMESTAMPTZ NULL) sin tocar el estado existente', async () => {
+  const cols = await filas(`SELECT column_name, data_type, is_nullable FROM information_schema.columns
+                             WHERE table_name = 'modulos_premium' AND column_name IN ('prueba_iniciada_en', 'expira_prueba_en') ORDER BY 1`);
+  assert.deepEqual(cols.map((c) => [c.column_name, c.data_type, c.is_nullable]),
+    [['expira_prueba_en', 'timestamp with time zone', 'YES'], ['prueba_iniciada_en', 'timestamp with time zone', 'YES']]);
+  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM modulos_premium WHERE expira_prueba_en IS NOT NULL`)).n, 0);
+});
+
+t('activar-prueba: UPDATE atómico (habilitado + expira = NOW() + 15 días) y solo UNA activación gana aunque lleguen 5 a la vez', async () => {
+  const { activarPrueba } = require('../modules/premium/prueba.service');
+  const resultados = await Promise.allSettled(Array.from({ length: 5 }, () => activarPrueba({ codigo: 'APP_MOVIL' })));
+  const ok = resultados.filter((r) => r.status === 'fulfilled');
+  const mal = resultados.filter((r) => r.status === 'rejected');
+  assert.equal(ok.length, 1, 'exactamente una activación');
+  assert.ok(mal.every((r) => r.reason.status === 409 && r.reason.codigo === 'MODULO_YA_HABILITADO'));
+  const f = await uno(`SELECT habilitado, EXTRACT(EPOCH FROM (expira_prueba_en - prueba_iniciada_en))::int AS seg, habilitado_en = prueba_iniciada_en AS mismo_instante
+                         FROM modulos_premium WHERE codigo = 'APP_MOVIL'`);
+  assert.deepEqual([f.habilitado, f.seg, f.mismo_instante], [true, 15 * 86400, true]);
+  await assert.rejects(activarPrueba({ codigo: 'NO_EXISTE' }), (e) => e.status === 404);
+});
+
+t('guard: la prueba vigente pasa; al vencer se BLOQUEA en la base (habilitado = FALSE, expira = NULL), responde 403 y no se puede reactivar sola', async () => {
+  const { activarPrueba } = require('../modules/premium/prueba.service');
+  const g = svc.guard.crearGuard({ ttlMs: 60_000 });
+  const pedir = async () => { let r; await g.requireModulo('IA_ATENCION')({}, {}, (e) => { r = e; }); return r; };
+
+  assert.equal((await pedir())?.codigo, 'MODULO_PREMIUM_DESHABILITADO');
+  await activarPrueba({ codigo: 'IA_ATENCION' });
+  g.invalidar();
+  assert.equal(await pedir(), undefined, 'prueba vigente → pasa');
+
+  await db.ejecutar(`UPDATE modulos_premium SET expira_prueba_en = NOW() - INTERVAL '1 minute' WHERE codigo = $1`, ['IA_ATENCION']);
+  g.invalidar();
+  const bloqueo = await pedir();
+  assert.deepEqual([bloqueo.status, bloqueo.codigo, bloqueo.detalles.motivo], [403, 'MODULO_PREMIUM_DESHABILITADO', 'PRUEBA_EXPIRADA']);
+  const f = await uno(`SELECT habilitado, expira_prueba_en, prueba_iniciada_en IS NOT NULL AS usada FROM modulos_premium WHERE codigo = 'IA_ATENCION'`);
+  assert.deepEqual([f.habilitado, f.expira_prueba_en, f.usada], [false, null, true]);
+
+  await assert.rejects(activarPrueba({ codigo: 'IA_ATENCION' }), (e) => e.status === 409 && e.codigo === 'PRUEBA_YA_UTILIZADA');
+
+  // Contratación permanente posterior (el UPDATE documentado en la migración 005): vuelve a pasar y ya no caduca.
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), expira_prueba_en = NULL, actualizado_en = NOW() WHERE codigo = 'IA_ATENCION'`);
+  g.invalidar();
+  assert.equal(await pedir(), undefined);
+  await assert.rejects(activarPrueba({ codigo: 'IA_ATENCION' }), (e) => e.codigo === 'MODULO_YA_HABILITADO');
+});
+
+t('bloquearVencidas() (catálogo del panel) converge la base y deja intactos los módulos permanentes y las pruebas vigentes', async () => {
+  const repo = svc.guard.guard.repo;
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, prueba_iniciada_en = NOW() - INTERVAL '20 days', expira_prueba_en = NOW() - INTERVAL '5 days' WHERE codigo = 'FACHADA_WEB'`);
+  assert.equal(await repo.bloquearVencidas(), 1);
+  assert.equal(await repo.bloquearVencidas(), 0, 'idempotente');
+  const est = Object.fromEntries((await filas('SELECT codigo, habilitado FROM modulos_premium')).map((x) => [x.codigo, x.habilitado]));
+  assert.deepEqual([est.FACHADA_WEB, est.IA_ATENCION, est.APP_MOVIL], [false, true, true]);
+  const todos = await repo.leerTodos();
+  assert.ok(todos.every((m) => 'expira_prueba_en' in m && 'prueba_iniciada_en' in m));
+});
+
+// ── Bot de WhatsApp automático (ciclo completo contra la base real) ─────────────────────────────
+t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en revisión), envío secuencial con pausa, ENVIADA/FALLIDA reales, idempotencia y arrendamiento', async () => {
+  const { crearCronWhatsapp, candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
+  const { activarPrueba } = require('../modules/premium/prueba.service');
+  const hoy = svc.hoy();
+  const extraCuota = (estId, concepto, vence, estado) => db.ejecutar(
+    `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento, estado) VALUES ($1, 'OTRO', $2, 10, $3, $4)`, [estId, concepto, vence, estado]);
+
+  const d3 = await sembrar({ vence: sumarDias(hoy, 3), nombres: 'CronD3', apellidos: 'Borde' });
+  const d5 = await sembrar({ vence: sumarDias(hoy, 5), nombres: 'CronD5', apellidos: 'Borde' });
+  const d2 = await sembrar({ vence: sumarDias(hoy, 2), nombres: 'CronD2', apellidos: 'Cerca' });
+  const d6 = await sembrar({ vence: sumarDias(hoy, 6), nombres: 'CronD6', apellidos: 'Lejos' });
+  const proxima = await sembrar({ vence: sumarDias(hoy, 1), nombres: 'CronProxima', apellidos: 'Uno' }); // su próxima cuota vence mañana…
+  await extraCuota(proxima.estId, 'Otra cuota +4', sumarDias(hoy, 4), 'Pendiente'); // …así que la de +4 NO cuenta (misma regla que el envío manual)
+  const pendVal = await sembrar({ estatus: 'Pendiente por Validación Administrativa', vence: sumarDias(hoy, 4), nombres: 'CronPendVal', apellidos: 'X' });
+  const fuera = await sembrar({ estatus: 'Fuera de la Academia', vence: sumarDias(hoy, 4), nombres: 'CronFuera', apellidos: 'X' });
+  const moroso = await sembrar({ vence: sumarDias(hoy, -6), monto: 30, nombres: 'CronMoroso', apellidos: 'Normal' });
+  const fallida = await sembrar({ vence: sumarDias(hoy, -2), monto: 12, nombres: 'CronFallona', apellidos: 'Meta' });
+  const soloRevision = await sembrar({ vence: sumarDias(hoy, -9), estadoCuota: 'En Revisión', nombres: 'CronRevision', apellidos: 'Total' });
+  const mixto = await sembrar({ vence: sumarDias(hoy, -9), monto: 20, nombres: 'CronMixto', apellidos: 'Parcial' });
+  await extraCuota(mixto.estId, 'Vencida en revisión', sumarDias(hoy, -3), 'En Revisión');
+
+  const lim = 1000;
+  const ids = (rows) => rows.map((r) => r.estudiante_id);
+  const ventana = svc.notif.VENTANA_PREVENTIVA;
+  const prev = ids(await candidatosPreventiva({ hoy, ventana, limite: lim }));
+  for (const incluido of [d3, d5]) assert.ok(prev.includes(incluido.estId), 'bordes 3 y 5 días incluidos');
+  for (const excluido of [d2, d6, proxima, pendVal, fuera, moroso, soloRevision]) assert.ok(!prev.includes(excluido.estId));
+  assert.ok(prev.indexOf(d3.estId) < prev.indexOf(d5.estId), 'orden por vencimiento');
+
+  const mor = ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim }));
+  for (const incluido of [moroso, fallida, mixto]) assert.ok(mor.includes(incluido.estId));
+  for (const excluido of [soloRevision, d3, pendVal, fuera]) assert.ok(!mor.includes(excluido.estId), 'con todo en revisión / no moroso no se cobra');
+  assert.equal((await candidatosPreventiva({ hoy, ventana, limite: 1 })).length, 1, 'LIMIT respetado');
+
+  // El módulo se habilita con la prueba de 15 días (extremo a extremo con el candado real).
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
+  const guardReal = svc.guard.crearGuard({ ttlMs: 0 });
+  const enviados = []; const pausas = [];
+  const waFalso = { configurado: () => true, enviarTexto: async (to, txt) => {
+    if (/CronFallona/.test(txt)) throw svc.AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131047: fuera de la ventana de 24 h' });
+    enviados.push(txt);
+  } };
+  const bcvFresco = { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false, capturadaEn: new Date() }) };
+  const notificaciones = {
+    VENTANA_PREVENTIVA: ventana,
+    generarAlerta: (a, deps) => svc.notif.generarAlerta(a, { bcvSvc: deps.bcvSvc, waSvc: waFalso }),
+  };
+  const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: lim, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
+  const armar = () => crearCronWhatsapp({ db, guard: guardReal, notificaciones, bcv: bcvFresco, whatsapp: waFalso, config,
+    esperar: async (ms) => { pausas.push(ms); }, log: () => {}, logError: () => {} });
+
+  // 1) Módulo bloqueado → no envía nada
+  let r = await armar().ejecutarCiclo();
+  assert.deepEqual([r.estado, r.motivo, enviados.length], ['OMITIDO', 'DESHABILITADO', 0]);
+
+  // 2) Se activa la prueba de 15 días → el ciclo corre
+  await activarPrueba({ codigo: 'WHATSAPP_AUTOMATICO' });
+  r = await armar().ejecutarCiclo();
+  assert.equal(r.estado, 'COMPLETADO');
+  assert.ok(pausas.length > 0 && pausas.every((ms) => ms === 1500));
+  assert.equal(pausas.length, r.preventiva.enviadas + r.morosidad.enviadas + r.morosidad.fallidas + r.preventiva.fallidas - 1, 'una pausa entre cada par de envíos consecutivos');
+  const estado = async (est) => filas(`SELECT tipo, estado, error, creado_por FROM notificaciones_whatsapp WHERE estudiante_id = $1 ORDER BY id`, [est.estId]);
+  for (const e of [d3, d5]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado, x.creado_por]), [['PREVENTIVA', 'ENVIADA', null]]);
+  for (const e of [moroso, mixto]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado]), [['MOROSIDAD', 'ENVIADA']]);
+  const filaFallida = await estado(fallida);
+  assert.deepEqual(filaFallida.map((x) => [x.tipo, x.estado]), [['MOROSIDAD', 'FALLIDA']]);
+  assert.match(filaFallida[0].error, /131047/);
+  for (const e of [d2, d6, proxima, pendVal, fuera, soloRevision]) assert.equal((await estado(e)).length, 0, 'no candidatos → ninguna notificación');
+  assert.match(enviados.find((x) => /CronMixto/.test(x)), /US\$ 20\.00/, 'solo se cobra la cuota Pendiente, no la que está en revisión');
+
+  // 3) Idempotencia: relanzar el mismo día no duplica (la FALLIDA sí se reintenta)
+  const antes = enviados.length;
+  r = await armar().ejecutarCiclo();
+  assert.equal(enviados.length, antes, 'nadie recibe dos mensajes el mismo día');
+  assert.equal((await estado(d3)).length, 1);
+  assert.deepEqual((await estado(fallida)).map((x) => x.estado), ['FALLIDA', 'FALLIDA'], 'el fallido se reintenta (y vuelve a quedar registrado)');
+  assert.equal((await estado(moroso)).length, 1);
+
+  // 4) Morosidad: pasados 7 días se vuelve a cobrar
+  await db.ejecutar(`UPDATE notificaciones_whatsapp SET creado_en = NOW() - INTERVAL '8 days' WHERE estudiante_id = $1`, [moroso.estId]);
+  assert.ok(ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim })).includes(moroso.estId));
+
+  // 5) Arrendamiento: uno vigente bloquea el ciclo; uno caducado se retoma; el propio se libera al terminar
+  await db.ejecutar(`INSERT INTO parametros (clave, valor) VALUES ('WHATSAPP_CRON_LEASE', 'otra-instancia') ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_en = NOW()`);
+  r = await armar().ejecutarCiclo();
+  assert.deepEqual([r.estado, r.motivo], ['OMITIDO', 'OTRA_INSTANCIA_EN_CURSO']);
+  await db.ejecutar(`UPDATE parametros SET actualizado_en = NOW() - INTERVAL '3 hours' WHERE clave = 'WHATSAPP_CRON_LEASE'`);
+  r = await armar().ejecutarCiclo();
+  assert.equal(r.estado, 'COMPLETADO');
+  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM parametros WHERE clave = 'WHATSAPP_CRON_LEASE'`)).n, 0, 'lease liberado');
+
+  // 6) Prueba vencida a mitad de vida del módulo → el bot deja de enviar y el módulo queda bloqueado en la base
+  await db.ejecutar(`UPDATE modulos_premium SET expira_prueba_en = NOW() - INTERVAL '1 second' WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
+  r = await armar().ejecutarCiclo();
+  assert.deepEqual([r.estado, r.motivo], ['OMITIDO', 'PRUEBA_EXPIRADA']);
+  assert.equal((await uno(`SELECT habilitado FROM modulos_premium WHERE codigo = 'WHATSAPP_AUTOMATICO'`)).habilitado, false);
 });
 
 t('salud: SELECT 1 responde y una segunda llamada a closePool es inocua', async () => {

@@ -1,10 +1,12 @@
 'use strict';
 const express = require('express');
-const { guard } = require('./guard');
+const { guard, estadoEfectivo } = require('./guard');
 const { CATALOGO, TOOLTIP_BLOQUEADO } = require('./catalogo');
-const { requireAuth } = require('../../middlewares/auth');
+const { activarPrueba, DIAS_PRUEBA } = require('./prueba.service');
+const { requireAuth, requireRol } = require('../../middlewares/auth');
 const { AppError } = require('../../errors/AppError');
 const { asyncHandler, ok } = require('../../utils/http');
+const { validar } = require('../../utils/validar');
 
 /**
  * Ruta reservada: el candado ya protege la URL; si el módulo está habilitado pero su lógica aún no se publica,
@@ -16,16 +18,30 @@ const reservado = (codigo, descripcion) => (_req, _res, next) =>
 // ── Catálogo para la interfaz: candados + tooltips ──────────────────────────────────────────────
 const catalogoRouter = express.Router();
 catalogoRouter.get('/modulos', requireAuth, asyncHandler(async (_req, res) => {
+  // Housekeeping idempotente: las pruebas vencidas se bloquean en la base (habilitado = FALSE) al abrir el catálogo.
+  await guard.repo.bloquearVencidas();
   const filas = await guard.repo.leerTodos();
   const porCod = new Map(filas.map((f) => [f.codigo, f]));
+  const ahora = Date.now();
   ok(res, CATALOGO.map((m) => {
     const f = porCod.get(m.codigo);
-    const habilitado = Boolean(f && f.habilitado);
+    const e = estadoEfectivo(f || null, ahora, m.codigo);
     return {
       codigo: m.codigo, nombre: m.nombre, descripcion: f ? f.descripcion : '', precio_usd: f ? Number(f.precio_usd) : m.precioUsd,
-      vista: m.vista, habilitado, bloqueado: !habilitado, tooltip: habilitado ? null : TOOLTIP_BLOQUEADO,
+      vista: m.vista, habilitado: e.habilitado, bloqueado: !e.habilitado, tooltip: e.habilitado ? null : TOOLTIP_BLOQUEADO,
+      en_prueba: e.enPrueba, expira_prueba_en: e.expiraPruebaEn, dias_restantes_prueba: e.diasRestantes,
+      prueba_utilizada: Boolean(f && f.prueba_iniciada_en),
     };
   }));
+}));
+
+// Prueba premium de 15 días (solo admin): habilita el módulo y fija expira_prueba_en = NOW() + 15 días.
+catalogoRouter.post('/activar-prueba', requireAuth, requireRol('admin'), asyncHandler(async (req, res) => {
+  const { modulo } = validar(req.body, { modulo: { tipo: 'enum', requerido: true, valores: CATALOGO.map((m) => m.codigo) } });
+  const r = await activarPrueba({ codigo: modulo });
+  guard.invalidar(); // el panel y los candados ven la activación de inmediato
+  console.log(`[premium] Prueba de ${DIAS_PRUEBA} días activada: ${modulo} por usuario ${req.usuario.id}`);
+  ok(res, r, 201);
 }));
 
 // ── Módulo: Atención al Cliente por IA y Clasificación Temática (US$ 200) ───────────────────────

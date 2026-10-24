@@ -1,0 +1,1825 @@
+From 2afe1136f032e36c8ed50812edf20b00ee0f9e53 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 23 Oct 2026 22:18:44 -0400
+Subject: [PATCH] feat: planilla fintech, prueba Premium de 15 dias y cron de
+ WhatsApp
+
+- Admisiones: cuentas de pago dinamicas (Pago Movil/Zelle/Binance Pay/PayPal),
+  monto en Bs. con tasa BCV, referencia bancaria validada en vivo.
+- Premium: migracion 005, POST /api/premium/activar-prueba (admin),
+  guard con prueba vigente/permanente y auto-bloqueo 403 MODULO_PREMIUM_DESHABILITADO.
+- cron/whatsappCron.js: alertas preventivas y de morosidad, envio secuencial
+  con pausa de 1.5 s, lease en tabla parametros (compatible con pooler).
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01HNiNxPEhBkSkvryPWYUxtS
+---
+ .env.example                               |  10 +
+ CAMBIOS_BMA_FINTECH_PRUEBA_CRON.md         | 113 ++++++++
+ config/env.js                              |  17 ++
+ cron/whatsappCron.js                       | 297 +++++++++++++++++++++
+ database/migrations/005_premium_prueba.sql |  18 ++
+ frontend/src/admisiones.ts                 | 221 +++++++++++++--
+ frontend/src/lib/format.ts                 |   2 +-
+ frontend/src/lib/icons.ts                  |   1 +
+ modules/premium/guard.js                   |  94 ++++++-
+ modules/premium/premium.routes.js          |  24 +-
+ modules/premium/prueba.service.js          |  44 +++
+ package.json                               |   2 +
+ server.js                                  |   4 +
+ tests/integracion.pg.test.js               | 164 +++++++++++-
+ tests/premium-prueba.test.js               | 201 ++++++++++++++
+ tests/schema-consistencia.test.js          |   7 +-
+ tests/whatsapp-cron.test.js                | 216 +++++++++++++++
+ 17 files changed, 1392 insertions(+), 43 deletions(-)
+ create mode 100644 CAMBIOS_BMA_FINTECH_PRUEBA_CRON.md
+ create mode 100644 cron/whatsappCron.js
+ create mode 100644 database/migrations/005_premium_prueba.sql
+ create mode 100644 modules/premium/prueba.service.js
+ create mode 100644 tests/premium-prueba.test.js
+ create mode 100644 tests/whatsapp-cron.test.js
+
+diff --git a/.env.example b/.env.example
+index 1368812..4f94ae1 100644
+--- a/.env.example
++++ b/.env.example
+@@ -47,6 +47,16 @@ WHATSAPP_TOKEN=
+ WHATSAPP_PHONE_NUMBER_ID=
+ GRAPH_API_VERSION=v20.0
+ 
++# ── Bot de WhatsApp automático (módulo premium WHATSAPP_AUTOMATICO) ──
++# Sin WHATSAPP_CRON_ACTIVO solo arranca con NODE_ENV=production. Aun activo, cada ciclo exige el módulo habilitado.
++WHATSAPP_CRON_ACTIVO=
++WHATSAPP_CRON_HORA=08:00
++WHATSAPP_CRON_DELAY_MS=1500
++WHATSAPP_CRON_MAX_ENVIOS=400
++WHATSAPP_CRON_MOROSIDAD_CADA_DIAS=7
++WHATSAPP_CRON_MAX_FALLOS_SEGUIDOS=5
++WHATSAPP_CRON_LEASE_MIN=120
++
+ # ── Admisiones (cargas simultáneas) ───────────────────────
+ ADMISIONES_MAX_ARCHIVO_MB=5
+ ADMISIONES_CONCURRENCIA_MAX=4
+diff --git a/CAMBIOS_BMA_FINTECH_PRUEBA_CRON.md b/CAMBIOS_BMA_FINTECH_PRUEBA_CRON.md
+new file mode 100644
+index 0000000..ed3f668
+--- /dev/null
++++ b/CAMBIOS_BMA_FINTECH_PRUEBA_CRON.md
+@@ -0,0 +1,113 @@
++# CAMBIOS_BMA_FINTECH_PRUEBA_CRON — Planilla fintech, prueba Premium de 15 días y cron de WhatsApp
++
++**Proyecto:** Brilliant Minds Academy · Core Base (US$750) · **Rama de trabajo:** `feat/fintech-trial-cron` (sobre `development`) · **Agente:** Arquitecto Principal, Astra Digital Solutions · **Motor:** PostgreSQL / Supabase (pooler `pg`, parámetros posicionales `$1, $2, $3`)
++
++Tres entregas: (1) planilla pública de admisiones con cuentas de pago dinámicas, conversión exacta a Bs. y referencia bancaria validada; (2) prueba gratuita de 15 días para módulos Premium con bloqueo automático; (3) bot diario de WhatsApp (`WHATSAPP_AUTOMATICO`) con cola secuencial anti-baneo.
++
++## Sistema de diseño (uiux-pro-max)
++
++| Aspecto | Decisión |
++|---|---|
++| Estilo | Minimal / fintech limpio, tarjetas con borde fino y sombra suave; vidrio (glass) solo con `bg-white/90` o más (mínimo exigido `/80`). |
++| Paleta | Texto `slate-900` `#0F172A` sobre `white`; secundario `slate-600` `#475569`; acento `indigo-600` `#4F46E5` (hover `indigo-700` `#4338CA`); éxito `emerald-700` `#047857`; error `red-700` `#B91C1C`. Contraste ≥ 4.5:1. |
++| Tipografía | Inter (UI); cifras con `tabular-nums` para montos y tasas. |
++| Espaciado | Escala 4/8 px: `1·2·3·4·6·8·12` (regla impuesta en `lib/ui.ts`). |
++| Iconos | SVG propios (`lib/icons.ts`, se añadió `copy`); sin emojis. |
++| Interacción | `cursor-pointer`, `transition-colors duration-200`, `active:scale-[.98]`, foco visible, `aria-pressed`, `aria-live`, objetivos táctiles ≥ 40 px, layout de 1 columna desde 320 px. |
++
++## Verificación realizada (y sus límites)
++
++| Verificación | Resultado |
++|---|---|
++| `node --test tests/*.test.js` | 138 pruebas: **99 pasan, 0 fallan**, 39 omitidas (integración sin `PG_TEST_PORT`) |
++| `PG_TEST_PORT=54329 node --test tests/integracion.pg.test.js` contra **PostgreSQL 16 real** | **39/39** (migraciones 001–005 idempotentes, activación concurrente, expiración y reactivación del guard, ciclo completo del cron con filas ENVIADA/FALLIDA, lease) |
++| `tsc` estricto sobre `frontend/src` | 0 errores |
++| Prueba en **Chromium real** (Playwright) del JS compilado de `admisiones` contra API simulada | 11/11 (ver abajo) |
++| Auditoría estática de los archivos nuevos/modificados | 0 residuos MSSQL (`GETDATE`, `TOP`, `ISNULL`, `@param`, `OUTPUT INSERTED`, `sp_getapplock`, `DATEADD`…); 0 placeholders `?`; 0 interpolación de variables dentro de SQL; todo con `$1, $2, $3` |
++
++Casos de navegador: orden Pago Móvil / Zelle / Binance Pay / PayPal; Bs. con tasa BCV solo en Pago Móvil y US$ en las divisas; costo USD + Bs. + tasa + hora; XSS en el titular de una cuenta (se ve como texto); método preseleccionado y sincronía tarjeta ↔ `<select>` con foco conservado; botón copiar; refresco de tasa sin perder foco; referencia (espacios eliminados, caracteres inválidos y longitud mínima en vivo); envío vacío bloqueado; envío multipart completo con 3 archivos.
++
++**Lo que NO se pudo comprobar en este entorno** (registro npm bloqueado):
++- `vite build` / Tailwind **no se ejecutaron**: `public/` conserva los assets anteriores. Hay que correr `npm run frontend:build` y revisar el aspecto visual. Las pruebas de navegador verificaron comportamiento sin hoja de estilos.
++- Express y `jsonwebtoken` no están instalados aquí: la ruta nueva se probó con un doble de Express (registro de rutas y middlewares), no levantando el servidor.
++- Meta/WhatsApp real: el cron se probó con el cliente de WhatsApp inyectado (stub), no contra la API de Meta.
++
++## 1. Planilla pública de admisiones (`frontend/src/admisiones.ts`)
++
++- Secciones numeradas: alumno (personales + médicos), representante, transaccional.
++- Bloque `#cuentas-pago` (con `aria-live`) **antes** de los campos de pago; se pinta desde `GET /api/public/admisiones/config`, una tarjeta por método autorizado: Pago Móvil, Zelle, Binance Pay, PayPal. Pago Móvil muestra el monto en **Bs.** (matrícula USD × tasa BCV) y el resto en **US$**. Datos de cuenta siempre escapados (la etiqueta `html` escapa cada interpolación).
++- «Pagaré con este método» selecciona el método; «Copiar datos» usa `navigator.clipboard` con respaldo `execCommand`.
++- Refresco de tasa cada 30 s y antes de enviar; redibuja solo si cambió algo y restaura el foco.
++- **Número de Referencia Bancaria** obligatorio: se eliminan espacios al escribir/pegar y se valida el patrón en vivo (misma regla del backend `^[A-Za-z0-9-]{4,40}$`).
++
++## 2. Prueba Premium de 15 días
++
++Modelo de estado en `modulos_premium`:
++
++| `habilitado` | `expira_prueba_en` | Significado |
++|---|---|---|
++| FALSE | — | Bloqueado |
++| TRUE | NULL | Contratado (permanente) |
++| TRUE | futuro | En prueba |
++| TRUE | pasado | Vencida → el guard fija `habilitado=FALSE`, `expira_prueba_en=NULL` y responde 403 |
++
++- `POST /api/premium/activar-prueba` (solo `admin`, body `{modulo}`): un único `UPDATE ... WHERE habilitado=FALSE AND prueba_iniciada_en IS NULL RETURNING` con `expira_prueba_en = NOW() + ($2::int * INTERVAL '1 day')`, params `[codigo, 15]`. Atómico: con dos activaciones simultáneas gana exactamente una. Errores: 404 módulo inexistente, 409 `MODULO_YA_HABILITADO`, 409 `PRUEBA_YA_UTILIZADA`.
++- `modules/premium/guard.js` reescrito: permite permanente **o** prueba en vigencia (se evalúa en cada petición aunque la caché de 15 s esté caliente); al vencer bloquea en BD (fail-closed si el UPDATE falla) y responde `403 MODULO_PREMIUM_DESHABILITADO` con `detalles.motivo = 'PRUEBA_EXPIRADA'`.
++- `GET /premium/modulos` devuelve estado efectivo más `en_prueba`, `expira_prueba_en`, `dias_restantes_prueba`, `prueba_utilizada`.
++
++## 3. Cron `cron/whatsappCron.js` (módulo `WHATSAPP_AUTOMATICO`)
++
++- Se ejecuta a diario a `WHATSAPP_CRON_HORA` (08:00 Caracas, UTC-4) dentro del proceso (`server.js`) o suelto: `npm run cron:whatsapp` (un ciclo; código de salida 2 si abortó) / `npm run cron:whatsapp:daemon`.
++- Solo corre si el módulo está habilitado (compra o prueba vigente) y WhatsApp está configurado.
++- Selección masiva en SQL: **Preventiva** = próxima cuota Pendiente de estudiantes Activos que vence entre 3 y 5 días; **Morosidad** = estudiantes Moroso con cuotas Pendientes vencidas **sin pagos en revisión**.
++- Envío **secuencial** por `services/notificaciones.service.js` (`generarAlerta({enviar:true})`) con pausa de **1500 ms** tras cada llamada real a Meta; cada intento queda en el historial como `ENVIADA` o `FALLIDA`.
++- Compatible con el pooler de Supabase: sin locks de sesión; exclusión mutua por *lease* en la tabla `parametros` (clave `WHATSAPP_CRON_LEASE`, renovado cada 25 envíos, liberado en `finally`).
++- Cortafuegos: aborta ante tasa BCV desactualizada/no disponible, WhatsApp no configurado, 5 fallos seguidos o 400 envíos en el ciclo.
++
++## Decisiones de diseño a confirmar
++
++1. **Una prueba por módulo** (`prueba_iniciada_en` marca la prueba consumida).
++2. Preventiva: una vez por cuota. Morosidad: se repite cada 7 días (`WHATSAPP_CRON_MOROSIDAD_CADA_DIAS`).
++3. Máximo 400 envíos por ciclo; el cron arranca solo en producción por defecto (`WHATSAPP_CRON_ACTIVO` para forzar).
++4. El representante con varios hijos recibe un mensaje por estudiante.
++5. Fallos previos al insert (BCV/BD) abortan o se omiten, no generan fila `FALLIDA`.
++6. `GET /premium/modulos` hace un UPDATE de mantenimiento (bloquea pruebas vencidas).
++7. Patrón de referencia: se mantiene el del backend (permite guiones) por coherencia; si se desea estrictamente alfanumérico, cambiar en ambos lados.
++8. La tasa BCV de `/config` proviene de la caché del servidor (≤ 5 min); el front la refresca cada 30 s y antes de enviar.
++
++## Archivos creados
++
++| Archivo | Contenido |
++|---|---|
++| `database/migrations/005_premium_prueba.sql` | `ALTER TABLE modulos_premium ADD COLUMN IF NOT EXISTS prueba_iniciada_en, expira_prueba_en` (TIMESTAMPTZ NULL); documenta el modelo de estados. Idempotente. |
++| `modules/premium/prueba.service.js` | `activarPrueba({codigo})`, `DIAS_PRUEBA = 15`. |
++| `cron/whatsappCron.js` | Bot diario (selección, lease, envío secuencial, scheduler, CLI). |
++| `tests/premium-prueba.test.js` | 9 pruebas (estado efectivo, guard, servicio, ruta). |
++| `tests/whatsapp-cron.test.js` | 14 pruebas (ventanas, dedupe, pausas 1500 ms, aborts, lease, scheduler). |
++| `CAMBIOS_BMA_FINTECH_PRUEBA_CRON.md` | Este resumen. |
++
++## Archivos modificados
++
++| Archivo | Cambio |
++|---|---|
++| `modules/premium/guard.js` | Reescrito: prueba/permanente, vencimiento por petición, auto-bloqueo, exports `crearGuard`, `estadoEfectivo`, `guard`. |
++| `modules/premium/premium.routes.js` | `POST /activar-prueba` (admin); `GET /modulos` con estado efectivo y campos de prueba. |
++| `config/env.js` | Bloque `whatsappCron` (activo, hora, delayMs, maxEnviosPorCiclo, morosidadCadaDias, maxFallosSeguidos, arrendamientoMin). |
++| `server.js` | Arranque del cron tras `listen` y `detener()` en el apagado ordenado antes de cerrar el pool. |
++| `package.json` | Scripts `cron:whatsapp`, `cron:whatsapp:daemon`. |
++| `.env.example` | Variables `WHATSAPP_CRON_*`. |
++| `frontend/src/admisiones.ts` | Cuentas dinámicas, conversión Bs./US$, referencia validada, copiar, selección de método. |
++| `frontend/src/lib/format.ts` | Etiqueta `BINANCE: 'Binance Pay'`. |
++| `frontend/src/lib/icons.ts` | Icono `copy`. |
++| `tests/schema-consistencia.test.js` | Soporta `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`; incluye `cron/` en las fuentes auditadas. |
++| `tests/integracion.pg.test.js` | 4→5 migraciones; 5 pruebas nuevas contra PostgreSQL real. |
++
++## Cómo aplicar
++
++```bash
++git checkout development
++git am bma-fintech-prueba-cron.patch          # o: git apply --index bma-fintech-prueba-cron.patch
++npm run migrate                               # aplica 005_premium_prueba.sql (idempotente)
++npm run frontend:build                        # regenera public/ (pendiente en este entorno)
++npm test
++```
+diff --git a/config/env.js b/config/env.js
+index 35e1720..002eaa0 100644
+--- a/config/env.js
++++ b/config/env.js
+@@ -20,6 +20,12 @@ function booleano(nombre, defecto) {
+   return v.toLowerCase() === 'true';
+ }
+ 
++function horaHHMM(nombre, defecto) {
++  const v = process.env[nombre] || defecto;
++  if (!/^([01]\d|2[0-3]):[0-5]\d$/.test(v)) throw new Error(`[env] ${nombre} debe tener el formato HH:MM de 24 h (recibido: ${v})`);
++  return v;
++}
++
+ function validarProduccion(cfg) {
+   const faltan = [];
+   if (!cfg.jwt.secret || cfg.jwt.secret.length < 32) faltan.push('JWT_SECRET (>= 32 caracteres)');
+@@ -70,6 +76,17 @@ const config = Object.freeze({
+     phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+     graphVersion: process.env.GRAPH_API_VERSION || 'v20.0',
+   }),
++  // Bot de envío masivo (módulo premium WHATSAPP_AUTOMATICO). Sin WHATSAPP_CRON_ACTIVO explícito solo arranca en producción;
++  // aun activo, cada ciclo exige que el módulo esté habilitado (contratado o en prueba vigente).
++  whatsappCron: Object.freeze({
++    activo: booleano('WHATSAPP_CRON_ACTIVO', ES_PRODUCCION),
++    hora: horaHHMM('WHATSAPP_CRON_HORA', '08:00'), // hora de Caracas (UTC-4)
++    delayMs: entero('WHATSAPP_CRON_DELAY_MS', 1500), // pausa entre envíos para no ser baneado por Meta
++    maxEnviosPorCiclo: entero('WHATSAPP_CRON_MAX_ENVIOS', 400),
++    morosidadCadaDias: entero('WHATSAPP_CRON_MOROSIDAD_CADA_DIAS', 7), // no repetir el cobro al mismo estudiante antes de N días
++    maxFallosSeguidos: entero('WHATSAPP_CRON_MAX_FALLOS_SEGUIDOS', 5), // corta el ciclo si Meta/la base fallan en cadena
++    arrendamientoMin: entero('WHATSAPP_CRON_LEASE_MIN', 120), // candado entre instancias (ver cron/whatsappCron.js)
++  }),
+   portalBaseUrl: (process.env.PORTAL_BASE_URL || 'http://localhost:3000').replace(/\/+$/, ''),
+   admisiones: Object.freeze({
+     maxArchivoMb: entero('ADMISIONES_MAX_ARCHIVO_MB', 5),
+diff --git a/cron/whatsappCron.js b/cron/whatsappCron.js
+new file mode 100644
+index 0000000..c5bf755
+--- /dev/null
++++ b/cron/whatsappCron.js
+@@ -0,0 +1,297 @@
++'use strict';
++/**
++ * Bot de envío masivo automático — módulo premium WHATSAPP_AUTOMATICO.
++ *
++ * Una vez al día (hora de Caracas, WHATSAPP_CRON_HORA) barre la base y despacha por la API de WhatsApp, de forma SECUENCIAL
++ * y con una pausa de 1,5 s entre envíos (anti-baneo de Meta):
++ *   1) PREVENTIVA : estudiantes Activos cuya próxima cuota Pendiente vence en 3–5 días (VENTANA_PREVENTIVA).
++ *   2) MOROSIDAD  : estudiantes Morosos con cuotas vencidas en estado 'Pendiente' (las que ya tienen una referencia
++ *                   'En Revisión' no se cobran de nuevo).
++ * Cada alerta pasa por notificaciones.generarAlerta({ enviar: true }): la misma lógica ya probada del envío manual (reglas de
++ * ventana, tasa BCV, enlace del portal, plantilla) que deja la fila en notificaciones_whatsapp como ENVIADA o FALLIDA.
++ *
++ * Garantías del ciclo:
++ *   - Candado premium: si el módulo no está habilitado (o su prueba de 15 días venció) el ciclo no envía nada.
++ *   - Idempotente: una PREVENTIVA se envía una sola vez por cuota; la MOROSIDAD no se repite al mismo estudiante antes de
++ *     WHATSAPP_CRON_MOROSIDAD_CADA_DIAS (7). Relanzar el ciclo el mismo día no duplica mensajes.
++ *   - Un solo ciclo a la vez entre instancias: arrendamiento (lease) en la tabla `parametros`; funciona detrás del pooler
++ *     de Supabase en modo transacción (no usa locks de sesión) y caduca solo si el proceso muere.
++ *   - Cortafuegos: se aborta ante una falla sistémica (tasa BCV no disponible, WhatsApp sin configurar) o tras
++ *     WHATSAPP_CRON_MAX_FALLOS_SEGUIDOS fallos consecutivos, y se limita a WHATSAPP_CRON_MAX_ENVIOS por ciclo.
++ *   - La tasa BCV se consulta fresca como mucho una vez por minuto durante el ciclo (no una vez por mensaje).
++ *
++ * Uso:
++ *   - Dentro del servidor: server.js llama a `cron.iniciar()` si WHATSAPP_CRON_ACTIVO=true (por defecto, solo en producción).
++ *   - Un solo ciclo (cron del sistema, Render/Railway cron job, GitHub Actions):  npm run cron:whatsapp
++ *   - Proceso independiente con su propio planificador:                          npm run cron:whatsapp:daemon
++ */
++const os = require('node:os');
++const cfg = require('../config/env');
++const { ejecutar, closePool } = require('../config/db');
++const { hoyCaracas, aFechaSql } = require('../utils/fechas');
++const { guard: guardGlobal } = require('../modules/premium/guard');
++const notificacionesGlobal = require('../services/notificaciones.service');
++const { bcv: bcvGlobal } = require('../services/bcv.service');
++const { whatsapp: whatsappGlobal } = require('../services/whatsapp.service');
++
++const MODULO = 'WHATSAPP_AUTOMATICO';
++const CLAVE_LEASE = 'WHATSAPP_CRON_LEASE';
++const OFFSET_CARACAS_MS = 4 * 3600_000;
++const MS_DIA = 86_400_000;
++const REFRESCO_TASA_MS = 60_000;
++const RENOVAR_LEASE_CADA = 25;
++
++// Errores de reglas de negocio: el estado del estudiante cambió entre la consulta masiva y el envío → se omite sin contar como fallo.
++const CODIGOS_OMITIR = new Set(['ESTADO_NO_APLICA', 'SIN_CUOTA_PROXIMA', 'FUERA_DE_VENTANA_PREVENTIVA', 'ESTUDIANTE_NO_MOROSO', 'PAGO_EN_REVISION', 'NO_ENCONTRADO']);
++// Fallas sistémicas: reintentar con el siguiente estudiante fallaría igual → se corta el ciclo.
++const CODIGOS_ABORTAR = new Set(['TASA_BCV_DESACTUALIZADA', 'TASA_BCV_NO_DISPONIBLE', 'WHATSAPP_NO_CONFIGURADO']);
++
++const esperarReal = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); });
++
++// ───────────────────────── Consultas masivas (PostgreSQL, parámetros posicionales) ─────────────────────────
++
++/**
++ * Activos con la próxima cuota Pendiente (>= hoy) dentro de la ventana [hoy+min, hoy+max] y sin PREVENTIVA ya enviada para esa cuota.
++ * Misma definición de "próxima cuota" que notificaciones.prepararPreventiva: la de menor vencimiento ≥ hoy por estudiante.
++ */
++const SQL_CANDIDATOS_PREVENTIVA = `
++  SELECT p.estudiante_id, p.cuota_id, p.fecha_vencimiento
++    FROM (
++      SELECT DISTINCT ON (c.estudiante_id) c.estudiante_id, c.id AS cuota_id, c.fecha_vencimiento
++        FROM cuotas c
++        JOIN vw_estudiantes_estado v ON v.id = c.estudiante_id
++       WHERE c.estado = $5::text AND c.fecha_vencimiento >= $1::date AND v.estado_dinamico = $6::text
++       ORDER BY c.estudiante_id, c.fecha_vencimiento, c.id
++    ) p
++   WHERE p.fecha_vencimiento BETWEEN ($1::date + $2::int) AND ($1::date + $3::int)
++     AND NOT EXISTS (SELECT 1 FROM notificaciones_whatsapp n
++                      WHERE n.cuota_id = p.cuota_id AND n.tipo = $7::text AND n.estado = $8::text)
++   ORDER BY p.fecha_vencimiento, p.estudiante_id
++   LIMIT $4::int`;
++
++/**
++ * Morosos con al menos una cuota vencida en estado Pendiente (si todas están En Revisión no aparecen) y sin cobro ENVIADO
++ * dentro de los últimos N días.
++ */
++const SQL_CANDIDATOS_MOROSIDAD = `
++  SELECT v.id AS estudiante_id, MIN(c.fecha_vencimiento) AS vencida_desde
++    FROM vw_estudiantes_estado v
++    JOIN cuotas c ON c.estudiante_id = v.id AND c.estado = $4::text AND c.fecha_vencimiento < $1::date
++   WHERE v.estado_dinamico = $5::text
++     AND NOT EXISTS (SELECT 1 FROM notificaciones_whatsapp n
++                      WHERE n.estudiante_id = v.id AND n.tipo = $6::text AND n.estado = $7::text
++                        AND n.creado_en > NOW() - ($2::int * INTERVAL '1 day'))
++   GROUP BY v.id
++   ORDER BY MIN(c.fecha_vencimiento), v.id
++   LIMIT $3::int`;
++
++async function candidatosPreventiva({ hoy, ventana, limite, db = { ejecutar } }) {
++  const r = await db.ejecutar(SQL_CANDIDATOS_PREVENTIVA, [aFechaSql(hoy), ventana.min, ventana.max, limite, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA']);
++  return r.rows;
++}
++
++async function candidatosMorosidad({ hoy, cadaDias, limite, db = { ejecutar } }) {
++  const r = await db.ejecutar(SQL_CANDIDATOS_MOROSIDAD, [aFechaSql(hoy), cadaDias, limite, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA']);
++  return r.rows;
++}
++
++// ───────────────────────── Arrendamiento entre instancias ─────────────────────────
++
++async function adquirirLease(db, titular, minutos) {
++  const r = await db.ejecutar(
++    `INSERT INTO parametros (clave, valor) VALUES ($1, $2)
++     ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_en = NOW()
++       WHERE parametros.actualizado_en < NOW() - ($3::int * INTERVAL '1 minute')
++     RETURNING clave`,
++    [CLAVE_LEASE, titular, minutos]);
++  return r.rowCount > 0;
++}
++
++const renovarLease = (db, titular) =>
++  db.ejecutar('UPDATE parametros SET actualizado_en = NOW() WHERE clave = $1 AND valor = $2', [CLAVE_LEASE, titular]);
++
++const liberarLease = (db, titular) =>
++  db.ejecutar('DELETE FROM parametros WHERE clave = $1 AND valor = $2', [CLAVE_LEASE, titular]);
++
++// ───────────────────────── Utilidades puras ─────────────────────────
++
++/** Milisegundos hasta la próxima ocurrencia de `hora` ('HH:MM', hora de Caracas). Siempre > 0 y <= 24 h. */
++function msHastaProximaEjecucion(hora, ahoraMs = Date.now()) {
++  const [h, m] = hora.split(':').map(Number);
++  const caracas = ahoraMs - OFFSET_CARACAS_MS; // los campos UTC de este instante son la hora local de Caracas
++  const d = new Date(caracas);
++  let objetivo = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), h, m, 0, 0);
++  if (objetivo <= caracas) objetivo += MS_DIA;
++  return objetivo - caracas;
++}
++
++/** Envuelve el servicio BCV: consulta fresca como mucho cada `ttlMs`; entre medias reutiliza la última captura. */
++function bcvDelCiclo(bcv, ahora, ttlMs = REFRESCO_TASA_MS) {
++  let ultimaFresca = Number.NEGATIVE_INFINITY;
++  return {
++    async obtenerTasa() {
++      const fresca = ahora() - ultimaFresca >= ttlMs;
++      const t = await bcv.obtenerTasa({ fresca });
++      if (fresca && !t.desactualizada) ultimaFresca = ahora();
++      return t;
++    },
++  };
++}
++
++// ───────────────────────── Servicio ─────────────────────────
++
++/**
++ * Crea el bot. Todas las dependencias son inyectables (los tests usan dobles; en producción se usan los servicios reales).
++ * Interfaz: ejecutarCiclo() → resumen · iniciar() / detener() → planificador diario.
++ */
++function crearCronWhatsapp({
++  db = { ejecutar },
++  guard = guardGlobal,
++  notificaciones = notificacionesGlobal,
++  bcv = bcvGlobal,
++  whatsapp = whatsappGlobal,
++  config = cfg.whatsappCron,
++  esperar = esperarReal,
++  ahora = () => Date.now(),
++  log = (...a) => console.log('[whatsapp-cron]', ...a),
++  logError = (...a) => console.error('[whatsapp-cron]', ...a),
++} = {}) {
++  let temporizador = null;
++  let detenido = false;
++  let enCurso = null;
++
++  async function procesar(lista, resumen, estado) {
++    const bcvCiclo = bcvDelCiclo(bcv, ahora);
++    for (const item of lista) {
++      if (detenido) { resumen.abortado = 'DETENIDO'; return; }
++      if (resumen.abortado) return;
++      if (estado.intentos >= config.maxEnviosPorCiclo) { resumen.abortado = 'LIMITE_POR_CICLO'; return; }
++      if (estado.llamoAMeta) await esperar(config.delayMs); // pausa anti-baneo entre envíos consecutivos
++      estado.llamoAMeta = false;
++      estado.intentos += 1;
++      if (estado.intentos % RENOVAR_LEASE_CADA === 0) await renovarLease(db, estado.titular).catch((e) => logError('No se pudo renovar el arrendamiento:', e.message));
++
++      const parcial = resumen[item.tipo.toLowerCase()];
++      try {
++        const r = await notificaciones.generarAlerta(
++          { tipo: item.tipo, estudianteId: item.estudiante_id, enviar: true, usuarioId: null },
++          { bcvSvc: bcvCiclo });
++        estado.llamoAMeta = true;
++        estado.fallosSeguidos = 0;
++        parcial.enviadas += 1;
++        log(`${item.tipo} ENVIADA estudiante=${item.estudiante_id} notificacion=${r.notificacion_id}`);
++      } catch (err) {
++        const codigo = err && err.codigo;
++        if (CODIGOS_OMITIR.has(codigo)) {
++          parcial.omitidas += 1;
++          log(`${item.tipo} omitida estudiante=${item.estudiante_id}: ${codigo}`);
++          continue;
++        }
++        if (codigo === 'WHATSAPP_ENVIO_FALLIDO') estado.llamoAMeta = true; // la solicitud sí llegó a Meta
++        parcial.fallidas += 1;
++        estado.fallosSeguidos += 1;
++        logError(`${item.tipo} FALLIDA estudiante=${item.estudiante_id}: ${codigo || 'ERROR'} ${(err && err.detalles && err.detalles.motivo) || (err && err.message)}`);
++        if (CODIGOS_ABORTAR.has(codigo)) { resumen.abortado = codigo; return; }
++        if (estado.fallosSeguidos >= config.maxFallosSeguidos) { resumen.abortado = 'DEMASIADOS_FALLOS_SEGUIDOS'; return; }
++      }
++    }
++  }
++
++  /** Un ciclo completo. Nunca lanza por un envío individual; sí propaga errores de infraestructura (base caída) al planificador. */
++  async function ejecutarCiclo() {
++    const inicio = ahora();
++    const resumen = {
++      estado: 'COMPLETADO', motivo: null, abortado: null, fecha: hoyCaracas(inicio),
++      preventiva: { candidatos: 0, enviadas: 0, fallidas: 0, omitidas: 0 },
++      morosidad: { candidatos: 0, enviadas: 0, fallidas: 0, omitidas: 0 },
++      duracion_ms: 0,
++    };
++
++    const modulo = await guard.evaluar(MODULO, { fresco: true });
++    if (!modulo.habilitado) {
++      log(`Ciclo omitido: módulo ${MODULO} deshabilitado (${modulo.motivo || 'sin motivo'}).`);
++      return { ...resumen, estado: 'OMITIDO', motivo: modulo.motivo || 'MODULO_DESHABILITADO' };
++    }
++    if (!whatsapp.configurado()) {
++      logError('Ciclo omitido: falta WHATSAPP_TOKEN / WHATSAPP_PHONE_NUMBER_ID.');
++      return { ...resumen, estado: 'OMITIDO', motivo: 'WHATSAPP_NO_CONFIGURADO' };
++    }
++
++    const titular = `${os.hostname()}:${process.pid}:${inicio}`;
++    if (!(await adquirirLease(db, titular, config.arrendamientoMin))) {
++      log('Ciclo omitido: otra instancia ya está ejecutando el bot.');
++      return { ...resumen, estado: 'OMITIDO', motivo: 'OTRA_INSTANCIA_EN_CURSO' };
++    }
++
++    try {
++      const hoy = resumen.fecha;
++      const limite = config.maxEnviosPorCiclo;
++      const preventivas = await candidatosPreventiva({ hoy, ventana: notificaciones.VENTANA_PREVENTIVA, limite, db });
++      const morosos = await candidatosMorosidad({ hoy, cadaDias: config.morosidadCadaDias, limite, db });
++      resumen.preventiva.candidatos = preventivas.length;
++      resumen.morosidad.candidatos = morosos.length;
++      log(`Ciclo ${hoy}: ${preventivas.length} preventivas + ${morosos.length} por morosidad (tope ${limite}).`);
++
++      const lista = [
++        ...preventivas.map((c) => ({ tipo: 'PREVENTIVA', estudiante_id: c.estudiante_id })),
++        ...morosos.map((c) => ({ tipo: 'MOROSIDAD', estudiante_id: c.estudiante_id })),
++      ];
++      await procesar(lista, resumen, { intentos: 0, llamoAMeta: false, fallosSeguidos: 0, titular });
++      if (resumen.abortado) Object.assign(resumen, { estado: 'ABORTADO' });
++    } finally {
++      await liberarLease(db, titular).catch((e) => logError('No se pudo liberar el arrendamiento (caducará solo):', e.message));
++      resumen.duracion_ms = ahora() - inicio;
++    }
++    log(`Ciclo ${resumen.estado}${resumen.abortado ? ` (${resumen.abortado})` : ''}: preventiva ${JSON.stringify(resumen.preventiva)} · morosidad ${JSON.stringify(resumen.morosidad)} · ${resumen.duracion_ms} ms`);
++    return resumen;
++  }
++
++  function programar() {
++    if (detenido) return;
++    const ms = msHastaProximaEjecucion(config.hora, ahora());
++    log(`Próxima ejecución en ${Math.round(ms / 60_000)} min (${config.hora} hora de Caracas).`);
++    temporizador = setTimeout(async () => {
++      enCurso = ejecutarCiclo().catch((err) => logError('El ciclo falló:', err.message));
++      await enCurso;
++      enCurso = null;
++      programar();
++    }, ms);
++    if (typeof temporizador.unref === 'function') temporizador.unref(); // no impide cerrar el proceso (lo mantiene vivo el servidor HTTP)
++  }
++
++  function iniciar() {
++    detenido = false;
++    if (temporizador) return;
++    programar();
++  }
++
++  /** Cancela el planificador y espera a que el envío en curso termine su mensaje actual. */
++  async function detener() {
++    detenido = true;
++    if (temporizador) { clearTimeout(temporizador); temporizador = null; }
++    if (enCurso) await enCurso;
++  }
++
++  return { ejecutarCiclo, iniciar, detener };
++}
++
++const cron = crearCronWhatsapp();
++
++module.exports = { crearCronWhatsapp, cron, msHastaProximaEjecucion, bcvDelCiclo, candidatosPreventiva, candidatosMorosidad, MODULO, CLAVE_LEASE };
++
++// Ejecución directa: `node cron/whatsappCron.js` (un ciclo) o `node cron/whatsappCron.js --daemon` (planificador propio).
++if (require.main === module) {
++  const daemon = process.argv.includes('--daemon');
++  if (daemon) {
++    const parar = () => cron.detener().finally(() => closePool().finally(() => process.exit(0)));
++    process.on('SIGTERM', parar);
++    process.on('SIGINT', parar);
++    cron.iniciar();
++    setInterval(() => {}, 2 ** 30); // mantiene vivo el proceso independiente (el timer del planificador es unref)
++  } else {
++    cron.ejecutarCiclo()
++      .then((r) => { process.exitCode = r.estado === 'ABORTADO' ? 2 : 0; })
++      .catch((err) => { console.error('[whatsapp-cron] Ciclo fallido:', err.message); process.exitCode = 1; })
++      .finally(() => closePool());
++  }
++}
+diff --git a/database/migrations/005_premium_prueba.sql b/database/migrations/005_premium_prueba.sql
+new file mode 100644
+index 0000000..1b6f8b2
+--- /dev/null
++++ b/database/migrations/005_premium_prueba.sql
+@@ -0,0 +1,18 @@
++-- 005_premium_prueba.sql — Prueba Premium de 15 días (sistema de candados).
++-- Idempotente (ADD COLUMN IF NOT EXISTS); corre dentro de la transacción de scripts/migrate.js.
++--
++-- Estado efectivo de un módulo (lo evalúa modules/premium/guard.js):
++--   habilitado = FALSE                                        → bloqueado
++--   habilitado = TRUE  y expira_prueba_en IS NULL              → habilitado de forma PERMANENTE (contratado)
++--   habilitado = TRUE  y expira_prueba_en >  NOW()             → en PRUEBA vigente
++--   habilitado = TRUE  y expira_prueba_en <= NOW()             → prueba vencida: el guard fija habilitado = FALSE y
++--                                                               expira_prueba_en = NULL en la base y responde 403.
++--
++-- prueba_iniciada_en deja constancia de que el módulo ya consumió su prueba (una por módulo: no se reactiva sola).
++-- Contratación permanente tras la prueba (Astra Digital Solutions):
++--   UPDATE modulos_premium
++--      SET habilitado = TRUE, habilitado_en = NOW(), expira_prueba_en = NULL, actualizado_en = NOW()
++--    WHERE codigo = 'WHATSAPP_AUTOMATICO';
++
++ALTER TABLE modulos_premium ADD COLUMN IF NOT EXISTS prueba_iniciada_en TIMESTAMPTZ NULL;
++ALTER TABLE modulos_premium ADD COLUMN IF NOT EXISTS expira_prueba_en   TIMESTAMPTZ NULL;
+diff --git a/frontend/src/admisiones.ts b/frontend/src/admisiones.ts
+index 1c95a92..d29e619 100644
+--- a/frontend/src/admisiones.ts
++++ b/frontend/src/admisiones.ts
+@@ -10,10 +10,11 @@ import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
+ import { html, montar, raw, type HtmlSeguro } from './lib/html';
+ import { icono } from './lib/icons';
+ import { bs, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
+-import { CLS, aviso, boton, buscar, conBotonOcupado, obtener, todos } from './lib/ui';
++import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
+ import type {
+   CampoArchivoAdmision,
+   ConfigAdmisiones,
++  CuentaPago,
+   MetodoPago,
+   RespuestaAdmision,
+   SolicitudAdmisionTexto,
+@@ -24,12 +25,61 @@ import type {
+ 
+ export const MAX_BYTES_ARCHIVO = 5 * 1024 * 1024;
+ const INTERVALO_TASA_MS = 30_000;
+-const METODOS: readonly MetodoPago[] = ['ZELLE', 'BINANCE', 'PAYPAL', 'PAGO_MOVIL'];
++/** Orden de presentación: primero el método local (bolívares) y luego las divisas. */
++const METODOS: readonly MetodoPago[] = ['PAGO_MOVIL', 'ZELLE', 'BINANCE', 'PAYPAL'];
+ const TIPOS_SANGRE: readonly TipoSangre[] = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'];
+ const RE_CEDULA = /^[A-Za-z0-9.-]{4,20}$/;
+ const RE_REFERENCIA = /^[A-Za-z0-9-]{4,40}$/;
+ const RE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+ 
++/** Quita TODO espacio en blanco (pegar «0012 3456» o «ABC 123» deja una referencia válida). */
++export function sanearReferencia(valor: string): string {
++  return valor.replace(/\s+/g, '');
++}
++
++/**
++ * Valida el número de referencia bancaria (mismo patrón que el backend: ^[A-Za-z0-9-]{4,40}$).
++ * Devuelve el mensaje de error o null si es válido. Con `completo = false` (mientras se escribe) no se exige aún el mínimo.
++ */
++export function mensajeReferencia(valor: string, completo = true): string | null {
++  if (valor === '') return completo ? 'Número de referencia: es obligatorio.' : null;
++  if (/\s/.test(valor)) return 'Número de referencia: no puede contener espacios.';
++  if (/[^A-Za-z0-9-]/.test(valor)) return 'Número de referencia: solo letras, números o guiones.';
++  if (valor.length > 40) return 'Número de referencia: máximo 40 caracteres.';
++  if (valor.length < 4) return completo ? 'Número de referencia: mínimo 4 caracteres.' : null;
++  return RE_REFERENCIA.test(valor) ? null : 'Número de referencia: formato no válido.';
++}
++
++/** Moneda en la que se paga con cada método y pasos a seguir (las cuentas concretas llegan de /api/public/admisiones/config). */
++interface InfoMetodo {
++  readonly moneda: 'USD' | 'BS';
++  readonly icono: 'phone' | 'wallet' | 'globe';
++  readonly pasos: readonly string[];
++}
++
++const INFO_METODOS: Readonly<Record<MetodoPago, InfoMetodo>> = {
++  PAGO_MOVIL: {
++    moneda: 'BS',
++    icono: 'phone',
++    pasos: ['Abre la app de tu banco y elige Pago Móvil.', 'Transfiere el monto exacto en bolívares a los datos indicados.', 'Copia el número de referencia que te da el banco y pégalo abajo.'],
++  },
++  ZELLE: {
++    moneda: 'USD',
++    icono: 'wallet',
++    pasos: ['Envía el monto exacto en dólares al contacto de Zelle indicado, a nombre del titular.', 'Guarda el número de confirmación que te entrega tu banco.', 'Pégalo en «Número de referencia».'],
++  },
++  BINANCE: {
++    moneda: 'USD',
++    icono: 'globe',
++    pasos: ['En Binance entra a Pay y envía el monto exacto en dólares al ID o correo indicado.', 'Copia el ID de la orden de la transacción.', 'Pégalo en «Número de referencia».'],
++  },
++  PAYPAL: {
++    moneda: 'USD',
++    icono: 'globe',
++    pasos: ['Envía el monto exacto en dólares al correo de PayPal indicado.', 'Copia el ID de la transacción que muestra PayPal.', 'Pégalo en «Número de referencia».'],
++  },
++};
++
+ type NombreTexto = keyof SolicitudAdmisionTexto;
+ type TipoControl = 'text' | 'date' | 'email' | 'tel' | 'select';
+ 
+@@ -43,6 +93,8 @@ interface DefCampo {
+   readonly ayuda?: string;
+   readonly opciones?: readonly { readonly valor: string; readonly texto: string }[];
+   readonly porDefecto?: string;
++  /** Atributos HTML constantes del propio código (nunca datos del usuario). */
++  readonly atributos?: string;
+ }
+ 
+ interface DefSeccion {
+@@ -106,7 +158,7 @@ const SECCIONES: readonly DefSeccion[] = [
+         requerido: true,
+         opciones: METODOS.map((m) => ({ valor: m, texto: nombreMetodo(m) })),
+       },
+-      { nombre: 'referencia_bancaria', etiqueta: 'Número de referencia', tipo: 'text', requerido: true, maximo: 40, ayuda: 'De 4 a 40 caracteres: letras, números o guiones, sin espacios.' },
++      { nombre: 'referencia_bancaria', etiqueta: 'Número de referencia bancaria', tipo: 'text', requerido: true, maximo: 40, ayuda: 'Cópiala tal como la muestra tu banco o billetera: de 4 a 40 letras, números o guiones, sin espacios.', atributos: 'spellcheck="false" autocapitalize="characters"' },
+     ],
+   },
+ ];
+@@ -224,8 +276,9 @@ export function validarTextos(v: SolicitudAdmisionTexto, hoy: string = hoyCaraca
+   if (v.emergencia_telefono && !ya('emergencia_telefono') && normalizarTelefono(v.emergencia_telefono) === null) {
+     agregar('emergencia_telefono', 'Teléfono de emergencia: debe tener entre 10 y 15 dígitos incluyendo el código de país.');
+   }
+-  if (!ya('referencia_bancaria') && !RE_REFERENCIA.test(v.referencia_bancaria)) {
+-    agregar('referencia_bancaria', 'Número de referencia: de 4 a 40 caracteres (letras, números o guiones, sin espacios).');
++  if (!ya('referencia_bancaria')) {
++    const problema = mensajeReferencia(v.referencia_bancaria);
++    if (problema) agregar('referencia_bancaria', problema);
+   }
+   return errores;
+ }
+@@ -266,7 +319,7 @@ export function leerTextos(formulario: HTMLFormElement): SolicitudAdmisionTexto
+     telefono_codigo: t('telefono_codigo'),
+     telefono_numero: t('telefono_numero'),
+     metodo_pago: esMetodoPago(metodo) ? metodo : 'ZELLE',
+-    referencia_bancaria: t('referencia_bancaria'),
++    referencia_bancaria: sanearReferencia(t('referencia_bancaria')),
+   };
+ }
+ 
+@@ -312,7 +365,7 @@ function controlHtml(def: DefCampo): HtmlSeguro {
+     control = html`<select id="${id}" name="${def.nombre}" class="${CLS.input}" aria-describedby="${descrito}" ${def.requerido ? raw('required') : null}>${(def.opciones ?? []).map((o) => html`<option value="${o.valor}">${o.texto}</option>`)}</select>`;
+   } else {
+     const extra = def.tipo === 'date' ? html` min="1990-01-01" max="${hoyCaracas()}"` : html`${def.maximo ? html` maxlength="${def.maximo}"` : null}`;
+-    control = html`<input id="${id}" name="${def.nombre}" type="${def.tipo}" class="${CLS.input}" value="${def.porDefecto ?? ''}" autocomplete="${def.autocompletar ?? 'off'}" aria-describedby="${descrito}"${extra} ${def.requerido ? raw('required') : null}>`;
++    control = html`<input id="${id}" name="${def.nombre}" type="${def.tipo}" class="${CLS.input}" value="${def.porDefecto ?? ''}" autocomplete="${def.autocompletar ?? 'off'}" aria-describedby="${descrito}"${extra} ${def.atributos ? raw(def.atributos) : null} ${def.requerido ? raw('required') : null}>`;
+   }
+   return html`<div>
+     <label for="${id}" class="${CLS.etiqueta}">${def.etiqueta}${estrella}</label>
+@@ -333,11 +386,17 @@ function archivoHtml(def: DefArchivo): HtmlSeguro {
+   </div>`;
+ }
+ 
+-function seccionHtml(s: DefSeccion): HtmlSeguro {
+-  const bloqueCuentas = s.id === 'pago' ? html`<div class="sm:col-span-2" id="cuentas-pago"></div>` : null;
++/** Número de paso (1–5) en un círculo: guía el orden de la planilla sin depender del color. */
++function encabezadoSeccion(id: string, numero: number, titulo: string): HtmlSeguro {
++  return html`<h2 id="t-${id}" class="mb-4 flex items-center gap-3 text-base font-bold text-slate-900"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-bold text-white" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
++}
++
++function seccionHtml(s: DefSeccion, numero: number): HtmlSeguro {
++  // En el paso de pago las instrucciones de las cuentas van PRIMERO: se paga y luego se anota la referencia.
++  const bloqueCuentas = s.id === 'pago' ? html`<div class="sm:col-span-2" id="cuentas-pago" aria-live="polite"></div>` : null;
+   return html`<section class="${CLS.tarjeta} p-6" aria-labelledby="t-${s.id}">
+-    <h2 id="t-${s.id}" class="mb-4 text-base font-bold text-slate-900">${s.titulo}</h2>
+-    <div class="grid gap-4 sm:grid-cols-2">${s.campos.map(controlHtml)}${bloqueCuentas}</div>
++    ${encabezadoSeccion(s.id, numero, s.titulo)}
++    <div class="grid gap-4 sm:grid-cols-2">${bloqueCuentas}${s.campos.map(controlHtml)}</div>
+   </section>`;
+ }
+ 
+@@ -356,12 +415,12 @@ function esqueleto(): HtmlSeguro {
+     <div id="resumen-errores" tabindex="-1"></div>
+ 
+     <form id="planilla" novalidate class="flex flex-col gap-6" aria-label="Planilla de inscripción">
+-      ${SECCIONES.slice(0, 3).map(seccionHtml)}
++      ${SECCIONES.slice(0, 3).map((s, i) => seccionHtml(s, i + 1))}
+       <section class="${CLS.tarjeta} p-6" aria-labelledby="t-documentos">
+-        <h2 id="t-documentos" class="mb-4 text-base font-bold text-slate-900">Documentos obligatorios</h2>
++        ${encabezadoSeccion('documentos', 4, 'Documentos obligatorios')}
+         <div class="grid gap-4 sm:grid-cols-2">${ARCHIVOS.map(archivoHtml)}</div>
+       </section>
+-      ${seccionHtml(SECCIONES[3] ?? { id: 'pago', titulo: 'Pago', campos: [] })}
++      ${seccionHtml(SECCIONES[3] ?? { id: 'pago', titulo: 'Pago', campos: [] }, 5)}
+       <button id="enviar" type="submit" class="${boton(CLS.btnPrimario, 'w-full py-3 text-base')}">${icono('upload', 'h-5 w-5')}<span>Enviar inscripción</span></button>
+       <p class="text-center text-xs text-slate-600">Los campos con <span aria-hidden="true">*</span><span class="sr-only">asterisco</span> son obligatorios.</p>
+     </form>
+@@ -378,12 +437,6 @@ function costoHtml(): HtmlSeguro {
+     return html`${titulo}<div class="mt-4">${aviso('bad', errorConfig ?? 'No se pudo cargar el costo de la matrícula.')}</div>
+       <button type="button" id="reintentar" class="${boton(CLS.btnSecundario, 'mt-4')}">${icono('refresh', 'h-4 w-4')}<span>Reintentar</span></button>`;
+   }
+-  const cuentas =
+-    config.cuentas.length === 0
+-      ? html`<p class="${CLS.ayuda}">Consulta los datos de pago con la administración.</p>`
+-      : html`<ul class="mt-2 grid gap-2 sm:grid-cols-2">${config.cuentas.map(
+-          (c) => html`<li class="rounded-lg border border-slate-200 bg-white/95 p-3 text-sm"><p class="font-semibold text-slate-900">${nombreMetodo(c.metodo)}</p><p class="break-words text-slate-700">${c.detalle}</p><p class="text-xs text-slate-600">Titular: ${c.titular}</p></li>`,
+-        )}</ul>`;
+   return html`${titulo}
+     <div class="mt-4 flex flex-wrap items-end gap-x-6 gap-y-2">
+       <p class="text-3xl font-bold text-slate-900" data-usd>${usd(config.matricula_usd)}</p>
+@@ -395,7 +448,7 @@ function costoHtml(): HtmlSeguro {
+       <button type="button" id="actualizar-tasa" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">${icono('refresh', 'h-4 w-4')}<span>Actualizar</span></button>
+     </p>
+     ${config.tasa_desactualizada ? html`<div class="mt-4">${aviso('warn', 'El BCV no respondió en este momento: se muestra la última tasa disponible. El monto exacto se confirma al enviar.')}</div>` : null}
+-    <h3 class="mt-6 text-sm font-semibold text-slate-900">Cuentas para pagar</h3>${cuentas}`;
++    <p class="mt-4 text-sm text-slate-700">Las cuentas autorizadas y los pasos para pagar están en el <a href="#t-pago" class="font-semibold text-slate-900 underline">paso 5 · Pago de la matrícula</a>.</p>`;
+ }
+ 
+ function pintarCosto(): void {
+@@ -403,6 +456,110 @@ function pintarCosto(): void {
+   montar(zona, costoHtml());
+   buscar('#reintentar', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
+   buscar('#actualizar-tasa', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
++  pintarCuentas();
++}
++
++// ───────────────────────── Cuentas autorizadas (instrucciones de pago dinámicas) ─────────────────────────
++
++const montoEn = (config: ConfigAdmisiones, moneda: InfoMetodo['moneda']): string => (moneda === 'BS' ? bs(config.matricula_bs) : usd(config.matricula_usd));
++
++function cuentaHtml(c: CuentaPago): HtmlSeguro {
++  return html`<div class="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm">
++    <p class="break-words font-semibold text-slate-900">${c.detalle}</p>
++    <p class="text-xs text-slate-600">Titular: ${c.titular}</p>
++    <button type="button" data-copiar="${c.detalle}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'mt-2')}" aria-label="Copiar los datos de ${nombreMetodo(c.metodo)}">${icono('copy', 'h-4 w-4')}<span>Copiar datos</span></button>
++  </div>`;
++}
++
++function tarjetaMetodoHtml(config: ConfigAdmisiones, metodo: MetodoPago, cuentas: readonly CuentaPago[], elegido: boolean): HtmlSeguro {
++  const info = INFO_METODOS[metodo];
++  return html`<article role="listitem" data-metodo="${metodo}" class="flex flex-col gap-3 rounded-xl border bg-white/95 p-4 shadow-sm ${elegido ? 'border-slate-900 ring-2 ring-slate-900' : 'border-slate-200'}">
++    <header class="flex items-center justify-between gap-3">
++      <h3 class="flex items-center gap-2 text-sm font-bold text-slate-900">${icono(info.icono, 'h-5 w-5')}<span>${nombreMetodo(metodo)}</span></h3>
++      ${elegido ? etiqueta('Seleccionado', 'ok') : null}
++    </header>
++    <p class="text-lg font-bold text-slate-900">${montoEn(config, info.moneda)} <span class="text-xs font-medium text-slate-600">· monto exacto${info.moneda === 'BS' ? ` a tasa BCV ${formatoTasa(config.tasa_bcv)}` : ''}</span></p>
++    ${cuentas.map(cuentaHtml)}
++    <ol class="flex list-decimal flex-col gap-1 pl-6 text-xs text-slate-700">${info.pasos.map((p) => html`<li>${p}</li>`)}</ol>
++    <button type="button" data-elegir="${metodo}" aria-pressed="${elegido}" class="${boton(elegido ? CLS.btnPrimario : CLS.btnSecundario, 'mt-auto')}">${elegido ? 'Método seleccionado' : 'Pagaré con este método'}</button>
++  </article>`;
++}
++
++function cuentasHtml(config: ConfigAdmisiones, elegido: string): HtmlSeguro {
++  const grupos = METODOS.map((m) => ({ metodo: m, cuentas: config.cuentas.filter((c) => c.metodo === m) })).filter((g) => g.cuentas.length > 0);
++  if (grupos.length === 0) {
++    return aviso('warn', 'Aún no hay cuentas de pago habilitadas. Consulta los datos de pago con la administración antes de enviar la planilla.');
++  }
++  return html`<p class="mb-3 text-sm text-slate-700">Paga el monto exacto en una de las cuentas autorizadas, elige el método que usaste y anota abajo el número de referencia.</p>
++    <div class="grid gap-4 sm:grid-cols-2" role="list" aria-label="Cuentas autorizadas para el pago">${grupos.map((g) => tarjetaMetodoHtml(config, g.metodo, g.cuentas, g.metodo === elegido))}</div>`;
++}
++
++const metodoElegido = (): string => buscar('#f-metodo_pago', HTMLSelectElement)?.value ?? '';
++
++let ultimoHtmlCuentas = '';
++
++/** Redibuja las tarjetas solo si cambió algo (tasa, cuentas o método elegido) y devuelve el foco al botón que lo tenía. */
++function pintarCuentas(): void {
++  const zona = buscar('#cuentas-pago', HTMLElement);
++  if (!zona || !estado.config) return;
++  const contenido = cuentasHtml(estado.config, metodoElegido());
++  if (contenido.valor === ultimoHtmlCuentas && zona.childElementCount > 0) return;
++  const activo = document.activeElement;
++  const clave = activo instanceof HTMLElement && zona.contains(activo) ? (activo.dataset['elegir'] ? `[data-elegir="${CSS.escape(activo.dataset['elegir'])}"]` : null) : null;
++  ultimoHtmlCuentas = contenido.valor;
++  montar(zona, contenido);
++  if (clave) buscar(clave, HTMLElement, zona)?.focus();
++}
++
++function seleccionarMetodo(valor: string): void {
++  if (!esMetodoPago(valor)) return;
++  const selector = buscar('#f-metodo_pago', HTMLSelectElement);
++  if (!selector) return;
++  selector.value = valor;
++  pintarCuentas();
++}
++
++/** Copia al portapapeles (API moderna con plan B para navegadores sin permiso) y avisa del resultado. */
++async function copiarTexto(texto: string): Promise<void> {
++  try {
++    if (navigator.clipboard) {
++      await navigator.clipboard.writeText(texto);
++      notificar('ok', 'Datos copiados al portapapeles.', 3_000);
++      return;
++    }
++  } catch {
++    /* sin permiso: se intenta el plan B */
++  }
++  const area = document.createElement('textarea');
++  area.value = texto;
++  area.setAttribute('readonly', '');
++  area.className = 'fixed left-0 top-0 opacity-0';
++  document.body.append(area);
++  area.select();
++  let copiado = false;
++  try {
++    copiado = document.execCommand('copy');
++  } catch {
++    copiado = false;
++  }
++  area.remove();
++  notificar(copiado ? 'ok' : 'warn', copiado ? 'Datos copiados al portapapeles.' : 'No se pudo copiar automáticamente: selecciona los datos y cópialos.', 4_000);
++}
++
++/** Validación en vivo del número de referencia: sin espacios, solo letras/números/guiones. */
++function validarReferenciaEnVivo(control: HTMLInputElement, completo: boolean): void {
++  const problema = mensajeReferencia(control.value, completo);
++  const texto = buscar('#e-referencia_bancaria', HTMLElement);
++  if (!texto) return;
++  if (problema) {
++    texto.textContent = problema;
++    texto.hidden = false;
++    control.setAttribute('aria-invalid', 'true');
++  } else {
++    texto.textContent = '';
++    texto.hidden = true;
++    control.removeAttribute('aria-invalid');
++  }
+ }
+ 
+ // ───────────────────────── Carga de la tasa BCV ─────────────────────────
+@@ -571,6 +728,28 @@ function iniciar(): void {
+     control.addEventListener('change', () => mostrarArchivoElegido(control));
+   }
+ 
++  // Cuentas de pago: copiar datos y elegir método desde las tarjetas (delegación: las tarjetas se redibujan con la tasa).
++  obtener('#cuentas-pago', HTMLElement).addEventListener('click', (ev) => {
++    const origen = ev.target instanceof Element ? ev.target : null;
++    const copiar = origen?.closest('[data-copiar]');
++    if (copiar instanceof HTMLElement) {
++      void copiarTexto(copiar.dataset['copiar'] ?? '');
++      return;
++    }
++    const elegir = origen?.closest('[data-elegir]');
++    if (elegir instanceof HTMLElement) seleccionarMetodo(elegir.dataset['elegir'] ?? '');
++  });
++  obtener('#f-metodo_pago', HTMLSelectElement).addEventListener('change', pintarCuentas);
++
++  // Referencia bancaria: se quitan los espacios al escribir/pegar y se valida el patrón al instante.
++  const referencia = obtener('#f-referencia_bancaria', HTMLInputElement);
++  referencia.addEventListener('input', () => {
++    const limpio = sanearReferencia(referencia.value);
++    if (limpio !== referencia.value) referencia.value = limpio;
++    validarReferenciaEnVivo(referencia, false);
++  });
++  referencia.addEventListener('blur', () => validarReferenciaEnVivo(referencia, referencia.value !== ''));
++
+   void refrescarConfig(false);
+   window.setInterval(() => {
+     if (!document.hidden && !estado.enviando) void refrescarConfig(true);
+diff --git a/frontend/src/lib/format.ts b/frontend/src/lib/format.ts
+index fb7f54d..57e5a13 100644
+--- a/frontend/src/lib/format.ts
++++ b/frontend/src/lib/format.ts
+@@ -47,7 +47,7 @@ export function esVencida(fechaVencimiento: string): boolean {
+ 
+ export const NOMBRE_METODO: Readonly<Record<string, string>> = {
+   ZELLE: 'Zelle',
+-  BINANCE: 'Binance',
++  BINANCE: 'Binance Pay',
+   PAYPAL: 'PayPal',
+   PAGO_MOVIL: 'Pago Móvil',
+ };
+diff --git a/frontend/src/lib/icons.ts b/frontend/src/lib/icons.ts
+index 9fbb4c9..4bd9ae9 100644
+--- a/frontend/src/lib/icons.ts
++++ b/frontend/src/lib/icons.ts
+@@ -22,6 +22,7 @@ const TRAZOS = {
+   phone: '<rect x="7" y="2" width="10" height="20" rx="2"/><path d="M11 18h2"/>',
+   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
+   bot: '<rect x="4" y="8" width="16" height="11" rx="2"/><path d="M12 8V4M9 13h.01M15 13h.01"/>',
++  copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 012-2h9"/>',
+   wallet: '<path d="M3 7h16a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2zM3 7V6a2 2 0 012-2h11M17 14h.01"/>',
+ } as const;
+ 
+diff --git a/modules/premium/guard.js b/modules/premium/guard.js
+index 0636b80..201db6b 100644
+--- a/modules/premium/guard.js
++++ b/modules/premium/guard.js
+@@ -3,39 +3,107 @@ const { ejecutar } = require('../../config/db');
+ const { AppError } = require('../../errors/AppError');
+ const { TOOLTIP_BLOQUEADO, porCodigo } = require('./catalogo');
+ 
++const MS_DIA = 86_400_000;
++
+ const repoSql = {
+   async leer(codigo) {
+-    const r = await ejecutar('SELECT nombre, precio_usd, habilitado FROM modulos_premium WHERE codigo = $1', [codigo]);
++    const r = await ejecutar(
++      'SELECT nombre, precio_usd, habilitado, prueba_iniciada_en, expira_prueba_en FROM modulos_premium WHERE codigo = $1',
++      [codigo]);
+     return r.rows[0] || null;
+   },
+   async leerTodos() {
+-    return (await ejecutar('SELECT codigo, nombre, descripcion, precio_usd, habilitado, habilitado_en FROM modulos_premium ORDER BY precio_usd')).rows;
++    return (await ejecutar(
++      `SELECT codigo, nombre, descripcion, precio_usd, habilitado, habilitado_en, prueba_iniciada_en, expira_prueba_en
++         FROM modulos_premium ORDER BY precio_usd`)).rows;
++  },
++  /** Bloqueo automático de UN módulo cuya prueba venció. El reloj que decide es el de la base (NOW()). Devuelve filas afectadas. */
++  async bloquearVencida(codigo) {
++    const r = await ejecutar(
++      `UPDATE modulos_premium
++          SET habilitado = FALSE, expira_prueba_en = NULL, actualizado_en = NOW()
++        WHERE codigo = $1 AND habilitado = TRUE AND expira_prueba_en IS NOT NULL AND expira_prueba_en <= NOW()`,
++      [codigo]);
++    return r.rowCount;
++  },
++  /** Igual, para todos los módulos (lo usa el catálogo del panel para que la base converja). Devuelve filas afectadas. */
++  async bloquearVencidas() {
++    const r = await ejecutar(
++      `UPDATE modulos_premium
++          SET habilitado = FALSE, expira_prueba_en = NULL, actualizado_en = NOW()
++        WHERE habilitado = TRUE AND expira_prueba_en IS NOT NULL AND expira_prueba_en <= NOW()`);
++    return r.rowCount;
+   },
+ };
+ 
+ /**
+- * Candado de módulos premium. El estado se lee de la base (cache de 15 s para no consultar en cada petición).
+- * Deshabilitado → 403 MODULO_PREMIUM_DESHABILITADO (con precio y tooltip para la UI). Si el codigo no existe, también se bloquea.
++ * Estado efectivo de un módulo a partir de su fila y la hora `ahoraMs` (función pura, sin acceso a la base):
++ *   - sin fila / habilitado = false           → bloqueado
++ *   - habilitado y sin expira_prueba_en       → habilitado permanente (contratado)
++ *   - habilitado y expira_prueba_en > ahora   → en prueba vigente (con días restantes, redondeados hacia arriba)
++ *   - habilitado y expira_prueba_en <= ahora  → prueba vencida (`vencida: true`): hay que bloquearlo en la base
++ */
++function estadoEfectivo(fila, ahoraMs, codigo = '') {
++  if (!fila) return { habilitado: false, vencida: false, enPrueba: false, expiraPruebaEn: null, diasRestantes: null, nombre: codigo, precioUsd: null, motivo: 'NO_REGISTRADO' };
++  const base = { nombre: fila.nombre, precioUsd: Number(fila.precio_usd) };
++  const expMs = fila.expira_prueba_en ? new Date(fila.expira_prueba_en).getTime() : null;
++  if (!fila.habilitado) {
++    return { ...base, habilitado: false, vencida: false, enPrueba: false, expiraPruebaEn: null, diasRestantes: null, motivo: 'DESHABILITADO' };
++  }
++  if (expMs === null || Number.isNaN(expMs)) {
++    return { ...base, habilitado: true, vencida: false, enPrueba: false, expiraPruebaEn: null, diasRestantes: null, motivo: null };
++  }
++  if (ahoraMs < expMs) {
++    return { ...base, habilitado: true, vencida: false, enPrueba: true, expiraPruebaEn: new Date(expMs).toISOString(), diasRestantes: Math.ceil((expMs - ahoraMs) / MS_DIA), motivo: null };
++  }
++  return { ...base, habilitado: false, vencida: true, enPrueba: false, expiraPruebaEn: new Date(expMs).toISOString(), diasRestantes: 0, motivo: 'PRUEBA_EXPIRADA' };
++}
++
++/**
++ * Candado de módulos premium. El estado se lee de la base (cache de 15 s para no consultar en cada petición), pero la
++ * vigencia de la prueba se evalúa en CADA petición con la hora actual: una prueba que vence dentro de la ventana de cache
++ * se bloquea igual. Al detectar una prueba vencida actualiza `habilitado = FALSE` en la base (y limpia expira_prueba_en)
++ * y responde 403 MODULO_PREMIUM_DESHABILITADO. Si el codigo no existe en la base, también se bloquea.
+  */
+ function crearGuard({ repo = repoSql, ttlMs = 15_000, ahora = () => Date.now() } = {}) {
+   const cache = new Map();
+ 
+-  async function estado(codigo) {
++  async function leerFila(codigo, fresco) {
+     const c = cache.get(codigo);
+-    if (c && ahora() - c.en < ttlMs) return c.valor;
++    if (!fresco && c && ahora() - c.en < ttlMs) return c.fila;
+     const fila = await repo.leer(codigo);
+-    const valor = fila ? { habilitado: Boolean(fila.habilitado), nombre: fila.nombre, precioUsd: Number(fila.precio_usd) } : { habilitado: false, nombre: codigo, precioUsd: null };
+-    cache.set(codigo, { valor, en: ahora() });
+-    return valor;
++    cache.set(codigo, { fila, en: ahora() });
++    return fila;
++  }
++
++  /** Evalúa un módulo (con efecto secundario único: bloquea en la base si su prueba venció). Nunca lanza por el bloqueo. */
++  async function evaluar(codigo, { fresco = false } = {}) {
++    const fila = await leerFila(codigo, fresco);
++    const e = estadoEfectivo(fila, ahora(), codigo);
++    if (e.vencida) {
++      try {
++        await repo.bloquearVencida(codigo);
++      } catch (err) {
++        // Fail-closed: aunque no se pudo persistir el bloqueo, el acceso se niega y el siguiente intento lo reintenta.
++        console.error(`[premium] No se pudo persistir el bloqueo de la prueba vencida (${codigo}):`, err.message);
++      }
++      cache.set(codigo, { fila: { ...fila, habilitado: false, expira_prueba_en: null }, en: ahora() });
++    }
++    return e;
+   }
+ 
++  /** Compatibilidad: estado simple { habilitado, nombre, precioUsd } (+ datos de la prueba). */
++  const estado = (codigo, opciones) => evaluar(codigo, opciones);
++
+   function requireModulo(codigo) {
+     if (!porCodigo(codigo)) throw new Error(`[premium] Módulo desconocido: ${codigo}`); // error de programación: falla al montar las rutas
+     return async (_req, _res, next) => {
+       try {
+-        const m = await estado(codigo);
++        const m = await evaluar(codigo);
+         if (!m.habilitado) {
+-          return next(new AppError(403, 'MODULO_PREMIUM_DESHABILITADO', TOOLTIP_BLOQUEADO, { modulo: codigo, nombre: m.nombre, precio_usd: m.precioUsd }));
++          const detalles = { modulo: codigo, nombre: m.nombre, precio_usd: m.precioUsd };
++          if (m.vencida) detalles.motivo = 'PRUEBA_EXPIRADA';
++          return next(new AppError(403, 'MODULO_PREMIUM_DESHABILITADO', TOOLTIP_BLOQUEADO, detalles));
+         }
+         return next();
+       } catch (err) {
+@@ -45,7 +113,7 @@ function crearGuard({ repo = repoSql, ttlMs = 15_000, ahora = () => Date.now() }
+   }
+ 
+   const invalidar = () => cache.clear();
+-  return { requireModulo, estado, invalidar, repo };
++  return { requireModulo, estado, evaluar, invalidar, repo };
+ }
+ 
+-module.exports = { crearGuard, guard: crearGuard() };
++module.exports = { crearGuard, estadoEfectivo, guard: crearGuard() };
+diff --git a/modules/premium/premium.routes.js b/modules/premium/premium.routes.js
+index 13df2bb..89ad268 100644
+--- a/modules/premium/premium.routes.js
++++ b/modules/premium/premium.routes.js
+@@ -1,10 +1,12 @@
+ 'use strict';
+ const express = require('express');
+-const { guard } = require('./guard');
++const { guard, estadoEfectivo } = require('./guard');
+ const { CATALOGO, TOOLTIP_BLOQUEADO } = require('./catalogo');
+-const { requireAuth } = require('../../middlewares/auth');
++const { activarPrueba, DIAS_PRUEBA } = require('./prueba.service');
++const { requireAuth, requireRol } = require('../../middlewares/auth');
+ const { AppError } = require('../../errors/AppError');
+ const { asyncHandler, ok } = require('../../utils/http');
++const { validar } = require('../../utils/validar');
+ 
+ /**
+  * Ruta reservada: el candado ya protege la URL; si el módulo está habilitado pero su lógica aún no se publica,
+@@ -16,18 +18,32 @@ const reservado = (codigo, descripcion) => (_req, _res, next) =>
+ // ── Catálogo para la interfaz: candados + tooltips ──────────────────────────────────────────────
+ const catalogoRouter = express.Router();
+ catalogoRouter.get('/modulos', requireAuth, asyncHandler(async (_req, res) => {
++  // Housekeeping idempotente: las pruebas vencidas se bloquean en la base (habilitado = FALSE) al abrir el catálogo.
++  await guard.repo.bloquearVencidas();
+   const filas = await guard.repo.leerTodos();
+   const porCod = new Map(filas.map((f) => [f.codigo, f]));
++  const ahora = Date.now();
+   ok(res, CATALOGO.map((m) => {
+     const f = porCod.get(m.codigo);
+-    const habilitado = Boolean(f && f.habilitado);
++    const e = estadoEfectivo(f || null, ahora, m.codigo);
+     return {
+       codigo: m.codigo, nombre: m.nombre, descripcion: f ? f.descripcion : '', precio_usd: f ? Number(f.precio_usd) : m.precioUsd,
+-      vista: m.vista, habilitado, bloqueado: !habilitado, tooltip: habilitado ? null : TOOLTIP_BLOQUEADO,
++      vista: m.vista, habilitado: e.habilitado, bloqueado: !e.habilitado, tooltip: e.habilitado ? null : TOOLTIP_BLOQUEADO,
++      en_prueba: e.enPrueba, expira_prueba_en: e.expiraPruebaEn, dias_restantes_prueba: e.diasRestantes,
++      prueba_utilizada: Boolean(f && f.prueba_iniciada_en),
+     };
+   }));
+ }));
+ 
++// Prueba premium de 15 días (solo admin): habilita el módulo y fija expira_prueba_en = NOW() + 15 días.
++catalogoRouter.post('/activar-prueba', requireAuth, requireRol('admin'), asyncHandler(async (req, res) => {
++  const { modulo } = validar(req.body, { modulo: { tipo: 'enum', requerido: true, valores: CATALOGO.map((m) => m.codigo) } });
++  const r = await activarPrueba({ codigo: modulo });
++  guard.invalidar(); // el panel y los candados ven la activación de inmediato
++  console.log(`[premium] Prueba de ${DIAS_PRUEBA} días activada: ${modulo} por usuario ${req.usuario.id}`);
++  ok(res, r, 201);
++}));
++
+ // ── Módulo: Atención al Cliente por IA y Clasificación Temática (US$ 200) ───────────────────────
+ const ia = express.Router();
+ ia.use(requireAuth, guard.requireModulo('IA_ATENCION'));
+diff --git a/modules/premium/prueba.service.js b/modules/premium/prueba.service.js
+new file mode 100644
+index 0000000..95dc4f2
+--- /dev/null
++++ b/modules/premium/prueba.service.js
+@@ -0,0 +1,44 @@
++'use strict';
++const { ejecutar } = require('../../config/db');
++const { e } = require('../../errors/AppError');
++
++/** Duración de la prueba premium: 15 días continuos desde la activación. */
++const DIAS_PRUEBA = 15;
++
++/**
++ * Activa la prueba de UN módulo. Es una sola sentencia atómica (sin SELECT previo): dos administradores que pulsen a la
++ * vez no pueden iniciar dos pruebas ni extender una existente. Solo procede si el módulo está bloqueado y nunca consumió su
++ * prueba; si no, se diagnostica el motivo para responder con un 404/409 claro:
++ *   - MODULO_YA_HABILITADO : ya está contratado o con una prueba vigente.
++ *   - PRUEBA_YA_UTILIZADA  : la prueba de 15 días ya se usó (para seguir hay que contratar el módulo).
++ */
++async function activarPrueba({ codigo }) {
++  const r = await ejecutar(
++    `UPDATE modulos_premium
++        SET habilitado = TRUE, habilitado_en = NOW(), prueba_iniciada_en = NOW(),
++            expira_prueba_en = NOW() + ($2::int * INTERVAL '1 day'), actualizado_en = NOW()
++      WHERE codigo = $1 AND habilitado = FALSE AND prueba_iniciada_en IS NULL
++      RETURNING codigo, nombre, habilitado_en, prueba_iniciada_en, expira_prueba_en`,
++    [codigo, DIAS_PRUEBA]);
++
++  if (r.rowCount) {
++    const m = r.rows[0];
++    return {
++      modulo: m.codigo, nombre: m.nombre, habilitado: true, en_prueba: true, dias_prueba: DIAS_PRUEBA,
++      iniciada_en: m.prueba_iniciada_en, expira_prueba_en: m.expira_prueba_en,
++    };
++  }
++
++  const f = await ejecutar('SELECT nombre, habilitado, prueba_iniciada_en, expira_prueba_en FROM modulos_premium WHERE codigo = $1', [codigo]);
++  if (!f.rowCount) throw e.noEncontrado('El módulo premium');
++  const m = f.rows[0];
++  const vencida = m.habilitado && m.expira_prueba_en && new Date(m.expira_prueba_en).getTime() <= Date.now();
++  if (m.habilitado && !vencida) {
++    throw e.conflicto('MODULO_YA_HABILITADO',
++      m.expira_prueba_en ? 'El módulo ya tiene una prueba vigente.' : 'El módulo ya está habilitado de forma permanente.',
++      { modulo: codigo, en_prueba: Boolean(m.expira_prueba_en), expira_prueba_en: m.expira_prueba_en || null });
++  }
++  throw e.conflicto('PRUEBA_YA_UTILIZADA', 'La prueba gratuita de 15 días de este módulo ya fue utilizada. Contrata el módulo para continuar.', { modulo: codigo });
++}
++
++module.exports = { activarPrueba, DIAS_PRUEBA };
+diff --git a/package.json b/package.json
+index ff18c9e..0d10351 100644
+--- a/package.json
++++ b/package.json
+@@ -11,6 +11,8 @@
+     "dev": "nodemon server.js",
+     "migrate": "node scripts/migrate.js",
+     "crear-admin": "node scripts/crear-admin.js",
++    "cron:whatsapp": "node cron/whatsappCron.js",
++    "cron:whatsapp:daemon": "node cron/whatsappCron.js --daemon",
+     "test": "node --test tests/*.test.js",
+     "test:integracion": "node --test tests/integracion.pg.test.js",
+     "frontend:install": "npm --prefix frontend install",
+diff --git a/server.js b/server.js
+index cdb2edf..ffd83a9 100644
+--- a/server.js
++++ b/server.js
+@@ -2,6 +2,7 @@
+ const cfg = require('./config/env');
+ const { crearApp } = require('./app');
+ const { closePool, getPool } = require('./config/db');
++const { cron: cronWhatsapp } = require('./cron/whatsappCron');
+ 
+ const app = crearApp();
+ const server = app.listen(cfg.puerto, () => {
+@@ -9,6 +10,8 @@ const server = app.listen(cfg.puerto, () => {
+   console.log(`  Admisiones: /admisiones   Panel: /admin   Salud: /api/health`);
+   // Verifica la base al arrancar (no bloquea el servidor: /api/health/db informa el estado después).
+   getPool().then(() => console.log('  Base de datos PostgreSQL (Supabase) conectada.')).catch((e) => console.error('  ⚠ PostgreSQL no disponible:', e.message));
++  // Bot de WhatsApp (módulo premium): corre a diario; cada ciclo comprueba que el módulo esté habilitado.
++  if (cfg.whatsappCron.activo) cronWhatsapp.iniciar();
+ });
+ 
+ // Un rechazo no manejado jamás debe tumbar el proceso en silencio ni dejarlo en estado inconsistente.
+@@ -23,6 +26,7 @@ function shutdown(codigo = 0) {
+   const forzar = setTimeout(() => process.exit(codigo || 1), 10_000);
+   forzar.unref();
+   server.close(async () => {
++    await cronWhatsapp.detener().catch(() => undefined); // termina el mensaje en curso antes de cerrar la base
+     await closePool().catch(() => undefined);
+     process.exit(codigo);
+   });
+diff --git a/tests/integracion.pg.test.js b/tests/integracion.pg.test.js
+index f09cd48..563c7b0 100644
+--- a/tests/integracion.pg.test.js
++++ b/tests/integracion.pg.test.js
+@@ -125,12 +125,12 @@ test.after(async () => {
+ });
+ 
+ // ── Migraciones y scripts ───────────────────────────────────────────────────────────────────────
+-t('migrate.js: aplica las 4 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
++t('migrate.js: aplica las 5 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
+   const primera = hijo('scripts/migrate.js');
+   for (const f of fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql'))) assert.match(primera, new RegExp(`Aplicada ${f}`));
+   const segunda = hijo('scripts/migrate.js');
+   assert.ok(!/Aplicada/.test(segunda), segunda);
+-  assert.equal((segunda.match(/ya aplicada/g) || []).length, 4);
++  assert.equal((segunda.match(/ya aplicada/g) || []).length, 5);
+   assert.match(segunda, /Migraciones al día/);
+ });
+ 
+@@ -141,7 +141,7 @@ t(`el esquema real contiene las 17 tablas + la vista, con RLS activo y la vista
+   const v = await uno(`SELECT array_to_string(reloptions, ',') AS opciones FROM pg_class WHERE relname = 'vw_estudiantes_estado'`);
+   assert.equal(v.opciones, 'security_invoker=true');
+   const reg = await filas('SELECT nombre FROM schema_migrations ORDER BY nombre');
+-  assert.equal(reg.length, 4);
++  assert.equal(reg.length, 5);
+ });
+ 
+ t('crear-admin.js: upsert por correo (ON CONFLICT), normaliza a minúsculas, reactiva y no duplica', async () => {
+@@ -647,6 +647,164 @@ t('Supabase: con los privilegios por defecto de anon/authenticated, la migració
+   assert.ok((await uno('SELECT COUNT(*)::int AS n FROM estudiantes')).n > 0);
+ });
+ 
++// ── Prueba premium de 15 días ───────────────────────────────────────────────────────────────────
++t('005: modulos_premium gana prueba_iniciada_en y expira_prueba_en (TIMESTAMPTZ NULL) sin tocar el estado existente', async () => {
++  const cols = await filas(`SELECT column_name, data_type, is_nullable FROM information_schema.columns
++                             WHERE table_name = 'modulos_premium' AND column_name IN ('prueba_iniciada_en', 'expira_prueba_en') ORDER BY 1`);
++  assert.deepEqual(cols.map((c) => [c.column_name, c.data_type, c.is_nullable]),
++    [['expira_prueba_en', 'timestamp with time zone', 'YES'], ['prueba_iniciada_en', 'timestamp with time zone', 'YES']]);
++  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM modulos_premium WHERE expira_prueba_en IS NOT NULL`)).n, 0);
++});
++
++t('activar-prueba: UPDATE atómico (habilitado + expira = NOW() + 15 días) y solo UNA activación gana aunque lleguen 5 a la vez', async () => {
++  const { activarPrueba } = require('../modules/premium/prueba.service');
++  const resultados = await Promise.allSettled(Array.from({ length: 5 }, () => activarPrueba({ codigo: 'APP_MOVIL' })));
++  const ok = resultados.filter((r) => r.status === 'fulfilled');
++  const mal = resultados.filter((r) => r.status === 'rejected');
++  assert.equal(ok.length, 1, 'exactamente una activación');
++  assert.ok(mal.every((r) => r.reason.status === 409 && r.reason.codigo === 'MODULO_YA_HABILITADO'));
++  const f = await uno(`SELECT habilitado, EXTRACT(EPOCH FROM (expira_prueba_en - prueba_iniciada_en))::int AS seg, habilitado_en = prueba_iniciada_en AS mismo_instante
++                         FROM modulos_premium WHERE codigo = 'APP_MOVIL'`);
++  assert.deepEqual([f.habilitado, f.seg, f.mismo_instante], [true, 15 * 86400, true]);
++  await assert.rejects(activarPrueba({ codigo: 'NO_EXISTE' }), (e) => e.status === 404);
++});
++
++t('guard: la prueba vigente pasa; al vencer se BLOQUEA en la base (habilitado = FALSE, expira = NULL), responde 403 y no se puede reactivar sola', async () => {
++  const { activarPrueba } = require('../modules/premium/prueba.service');
++  const g = svc.guard.crearGuard({ ttlMs: 60_000 });
++  const pedir = async () => { let r; await g.requireModulo('IA_ATENCION')({}, {}, (e) => { r = e; }); return r; };
++
++  assert.equal((await pedir())?.codigo, 'MODULO_PREMIUM_DESHABILITADO');
++  await activarPrueba({ codigo: 'IA_ATENCION' });
++  g.invalidar();
++  assert.equal(await pedir(), undefined, 'prueba vigente → pasa');
++
++  await db.ejecutar(`UPDATE modulos_premium SET expira_prueba_en = NOW() - INTERVAL '1 minute' WHERE codigo = $1`, ['IA_ATENCION']);
++  g.invalidar();
++  const bloqueo = await pedir();
++  assert.deepEqual([bloqueo.status, bloqueo.codigo, bloqueo.detalles.motivo], [403, 'MODULO_PREMIUM_DESHABILITADO', 'PRUEBA_EXPIRADA']);
++  const f = await uno(`SELECT habilitado, expira_prueba_en, prueba_iniciada_en IS NOT NULL AS usada FROM modulos_premium WHERE codigo = 'IA_ATENCION'`);
++  assert.deepEqual([f.habilitado, f.expira_prueba_en, f.usada], [false, null, true]);
++
++  await assert.rejects(activarPrueba({ codigo: 'IA_ATENCION' }), (e) => e.status === 409 && e.codigo === 'PRUEBA_YA_UTILIZADA');
++
++  // Contratación permanente posterior (el UPDATE documentado en la migración 005): vuelve a pasar y ya no caduca.
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), expira_prueba_en = NULL, actualizado_en = NOW() WHERE codigo = 'IA_ATENCION'`);
++  g.invalidar();
++  assert.equal(await pedir(), undefined);
++  await assert.rejects(activarPrueba({ codigo: 'IA_ATENCION' }), (e) => e.codigo === 'MODULO_YA_HABILITADO');
++});
++
++t('bloquearVencidas() (catálogo del panel) converge la base y deja intactos los módulos permanentes y las pruebas vigentes', async () => {
++  const repo = svc.guard.guard.repo;
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, prueba_iniciada_en = NOW() - INTERVAL '20 days', expira_prueba_en = NOW() - INTERVAL '5 days' WHERE codigo = 'FACHADA_WEB'`);
++  assert.equal(await repo.bloquearVencidas(), 1);
++  assert.equal(await repo.bloquearVencidas(), 0, 'idempotente');
++  const est = Object.fromEntries((await filas('SELECT codigo, habilitado FROM modulos_premium')).map((x) => [x.codigo, x.habilitado]));
++  assert.deepEqual([est.FACHADA_WEB, est.IA_ATENCION, est.APP_MOVIL], [false, true, true]);
++  const todos = await repo.leerTodos();
++  assert.ok(todos.every((m) => 'expira_prueba_en' in m && 'prueba_iniciada_en' in m));
++});
++
++// ── Bot de WhatsApp automático (ciclo completo contra la base real) ─────────────────────────────
++t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en revisión), envío secuencial con pausa, ENVIADA/FALLIDA reales, idempotencia y arrendamiento', async () => {
++  const { crearCronWhatsapp, candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
++  const { activarPrueba } = require('../modules/premium/prueba.service');
++  const hoy = svc.hoy();
++  const extraCuota = (estId, concepto, vence, estado) => db.ejecutar(
++    `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento, estado) VALUES ($1, 'OTRO', $2, 10, $3, $4)`, [estId, concepto, vence, estado]);
++
++  const d3 = await sembrar({ vence: sumarDias(hoy, 3), nombres: 'CronD3', apellidos: 'Borde' });
++  const d5 = await sembrar({ vence: sumarDias(hoy, 5), nombres: 'CronD5', apellidos: 'Borde' });
++  const d2 = await sembrar({ vence: sumarDias(hoy, 2), nombres: 'CronD2', apellidos: 'Cerca' });
++  const d6 = await sembrar({ vence: sumarDias(hoy, 6), nombres: 'CronD6', apellidos: 'Lejos' });
++  const proxima = await sembrar({ vence: sumarDias(hoy, 1), nombres: 'CronProxima', apellidos: 'Uno' }); // su próxima cuota vence mañana…
++  await extraCuota(proxima.estId, 'Otra cuota +4', sumarDias(hoy, 4), 'Pendiente'); // …así que la de +4 NO cuenta (misma regla que el envío manual)
++  const pendVal = await sembrar({ estatus: 'Pendiente por Validación Administrativa', vence: sumarDias(hoy, 4), nombres: 'CronPendVal', apellidos: 'X' });
++  const fuera = await sembrar({ estatus: 'Fuera de la Academia', vence: sumarDias(hoy, 4), nombres: 'CronFuera', apellidos: 'X' });
++  const moroso = await sembrar({ vence: sumarDias(hoy, -6), monto: 30, nombres: 'CronMoroso', apellidos: 'Normal' });
++  const fallida = await sembrar({ vence: sumarDias(hoy, -2), monto: 12, nombres: 'CronFallona', apellidos: 'Meta' });
++  const soloRevision = await sembrar({ vence: sumarDias(hoy, -9), estadoCuota: 'En Revisión', nombres: 'CronRevision', apellidos: 'Total' });
++  const mixto = await sembrar({ vence: sumarDias(hoy, -9), monto: 20, nombres: 'CronMixto', apellidos: 'Parcial' });
++  await extraCuota(mixto.estId, 'Vencida en revisión', sumarDias(hoy, -3), 'En Revisión');
++
++  const lim = 1000;
++  const ids = (rows) => rows.map((r) => r.estudiante_id);
++  const ventana = svc.notif.VENTANA_PREVENTIVA;
++  const prev = ids(await candidatosPreventiva({ hoy, ventana, limite: lim }));
++  for (const incluido of [d3, d5]) assert.ok(prev.includes(incluido.estId), 'bordes 3 y 5 días incluidos');
++  for (const excluido of [d2, d6, proxima, pendVal, fuera, moroso, soloRevision]) assert.ok(!prev.includes(excluido.estId));
++  assert.ok(prev.indexOf(d3.estId) < prev.indexOf(d5.estId), 'orden por vencimiento');
++
++  const mor = ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim }));
++  for (const incluido of [moroso, fallida, mixto]) assert.ok(mor.includes(incluido.estId));
++  for (const excluido of [soloRevision, d3, pendVal, fuera]) assert.ok(!mor.includes(excluido.estId), 'con todo en revisión / no moroso no se cobra');
++  assert.equal((await candidatosPreventiva({ hoy, ventana, limite: 1 })).length, 1, 'LIMIT respetado');
++
++  // El módulo se habilita con la prueba de 15 días (extremo a extremo con el candado real).
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
++  const guardReal = svc.guard.crearGuard({ ttlMs: 0 });
++  const enviados = []; const pausas = [];
++  const waFalso = { configurado: () => true, enviarTexto: async (to, txt) => {
++    if (/CronFallona/.test(txt)) throw svc.AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131047: fuera de la ventana de 24 h' });
++    enviados.push(txt);
++  } };
++  const bcvFresco = { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false, capturadaEn: new Date() }) };
++  const notificaciones = {
++    VENTANA_PREVENTIVA: ventana,
++    generarAlerta: (a, deps) => svc.notif.generarAlerta(a, { bcvSvc: deps.bcvSvc, waSvc: waFalso }),
++  };
++  const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: lim, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
++  const armar = () => crearCronWhatsapp({ db, guard: guardReal, notificaciones, bcv: bcvFresco, whatsapp: waFalso, config,
++    esperar: async (ms) => { pausas.push(ms); }, log: () => {}, logError: () => {} });
++
++  // 1) Módulo bloqueado → no envía nada
++  let r = await armar().ejecutarCiclo();
++  assert.deepEqual([r.estado, r.motivo, enviados.length], ['OMITIDO', 'DESHABILITADO', 0]);
++
++  // 2) Se activa la prueba de 15 días → el ciclo corre
++  await activarPrueba({ codigo: 'WHATSAPP_AUTOMATICO' });
++  r = await armar().ejecutarCiclo();
++  assert.equal(r.estado, 'COMPLETADO');
++  assert.ok(pausas.length > 0 && pausas.every((ms) => ms === 1500));
++  assert.equal(pausas.length, r.preventiva.enviadas + r.morosidad.enviadas + r.morosidad.fallidas + r.preventiva.fallidas - 1, 'una pausa entre cada par de envíos consecutivos');
++  const estado = async (est) => filas(`SELECT tipo, estado, error, creado_por FROM notificaciones_whatsapp WHERE estudiante_id = $1 ORDER BY id`, [est.estId]);
++  for (const e of [d3, d5]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado, x.creado_por]), [['PREVENTIVA', 'ENVIADA', null]]);
++  for (const e of [moroso, mixto]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado]), [['MOROSIDAD', 'ENVIADA']]);
++  const filaFallida = await estado(fallida);
++  assert.deepEqual(filaFallida.map((x) => [x.tipo, x.estado]), [['MOROSIDAD', 'FALLIDA']]);
++  assert.match(filaFallida[0].error, /131047/);
++  for (const e of [d2, d6, proxima, pendVal, fuera, soloRevision]) assert.equal((await estado(e)).length, 0, 'no candidatos → ninguna notificación');
++  assert.match(enviados.find((x) => /CronMixto/.test(x)), /US\$ 20\.00/, 'solo se cobra la cuota Pendiente, no la que está en revisión');
++
++  // 3) Idempotencia: relanzar el mismo día no duplica (la FALLIDA sí se reintenta)
++  const antes = enviados.length;
++  r = await armar().ejecutarCiclo();
++  assert.equal(enviados.length, antes, 'nadie recibe dos mensajes el mismo día');
++  assert.equal((await estado(d3)).length, 1);
++  assert.deepEqual((await estado(fallida)).map((x) => x.estado), ['FALLIDA', 'FALLIDA'], 'el fallido se reintenta (y vuelve a quedar registrado)');
++  assert.equal((await estado(moroso)).length, 1);
++
++  // 4) Morosidad: pasados 7 días se vuelve a cobrar
++  await db.ejecutar(`UPDATE notificaciones_whatsapp SET creado_en = NOW() - INTERVAL '8 days' WHERE estudiante_id = $1`, [moroso.estId]);
++  assert.ok(ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim })).includes(moroso.estId));
++
++  // 5) Arrendamiento: uno vigente bloquea el ciclo; uno caducado se retoma; el propio se libera al terminar
++  await db.ejecutar(`INSERT INTO parametros (clave, valor) VALUES ('WHATSAPP_CRON_LEASE', 'otra-instancia') ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_en = NOW()`);
++  r = await armar().ejecutarCiclo();
++  assert.deepEqual([r.estado, r.motivo], ['OMITIDO', 'OTRA_INSTANCIA_EN_CURSO']);
++  await db.ejecutar(`UPDATE parametros SET actualizado_en = NOW() - INTERVAL '3 hours' WHERE clave = 'WHATSAPP_CRON_LEASE'`);
++  r = await armar().ejecutarCiclo();
++  assert.equal(r.estado, 'COMPLETADO');
++  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM parametros WHERE clave = 'WHATSAPP_CRON_LEASE'`)).n, 0, 'lease liberado');
++
++  // 6) Prueba vencida a mitad de vida del módulo → el bot deja de enviar y el módulo queda bloqueado en la base
++  await db.ejecutar(`UPDATE modulos_premium SET expira_prueba_en = NOW() - INTERVAL '1 second' WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
++  r = await armar().ejecutarCiclo();
++  assert.deepEqual([r.estado, r.motivo], ['OMITIDO', 'PRUEBA_EXPIRADA']);
++  assert.equal((await uno(`SELECT habilitado FROM modulos_premium WHERE codigo = 'WHATSAPP_AUTOMATICO'`)).habilitado, false);
++});
++
+ t('salud: SELECT 1 responde y una segunda llamada a closePool es inocua', async () => {
+   assert.equal((await uno('SELECT 1 AS ok')).ok, 1);
+ });
+diff --git a/tests/premium-prueba.test.js b/tests/premium-prueba.test.js
+new file mode 100644
+index 0000000..cf34e9d
+--- /dev/null
++++ b/tests/premium-prueba.test.js
+@@ -0,0 +1,201 @@
++'use strict';
++const { db } = require('./helpers/entorno');
++const Module = require('node:module');
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { AppError } = require('../errors/AppError');
++const { crearGuard, estadoEfectivo } = require('../modules/premium/guard');
++const { activarPrueba, DIAS_PRUEBA } = require('../modules/premium/prueba.service');
++
++const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
++const T0 = Date.parse('2026-10-23T12:00:00Z');
++const dias = (n) => new Date(T0 + n * 86_400_000).toISOString();
++const siguiente = () => { const r = { llamado: false }; r.fn = (err) => { r.llamado = true; r.err = err; }; return r; };
++
++// ── estadoEfectivo (puro) ────────────────────────────────────────────────────────────────────────
++test('estadoEfectivo: permanente, prueba vigente (días hacia arriba), vencida y deshabilitado', () => {
++  const base = { nombre: 'WA', precio_usd: '150.00' };
++  assert.deepEqual(
++    (({ habilitado, enPrueba, vencida }) => ({ habilitado, enPrueba, vencida }))(estadoEfectivo({ ...base, habilitado: true, expira_prueba_en: null }, T0)),
++    { habilitado: true, enPrueba: false, vencida: false });
++  const prueba = estadoEfectivo({ ...base, habilitado: true, expira_prueba_en: dias(14.2) }, T0);
++  assert.equal(prueba.habilitado, true);
++  assert.equal(prueba.enPrueba, true);
++  assert.equal(prueba.diasRestantes, 15);
++  assert.equal(estadoEfectivo({ ...base, habilitado: true, expira_prueba_en: dias(0.01) }, T0).diasRestantes, 1);
++  const vencida = estadoEfectivo({ ...base, habilitado: true, expira_prueba_en: dias(-1) }, T0);
++  assert.deepEqual([vencida.habilitado, vencida.vencida, vencida.motivo], [false, true, 'PRUEBA_EXPIRADA']);
++  // límite exacto: en el instante de expiración ya está vencida
++  assert.equal(estadoEfectivo({ ...base, habilitado: true, expira_prueba_en: dias(0) }, T0).vencida, true);
++  // un módulo deshabilitado ignora un expira_prueba_en residual
++  assert.equal(estadoEfectivo({ ...base, habilitado: false, expira_prueba_en: dias(5) }, T0).habilitado, false);
++  assert.equal(estadoEfectivo(null, T0, 'X').motivo, 'NO_REGISTRADO');
++});
++
++// ── guard: ventana de prueba ─────────────────────────────────────────────────────────────────────
++function repoFalso(fila) {
++  const r = { fila, bloqueos: [], falloBloqueo: null };
++  r.leer = async () => r.fila;
++  r.bloquearVencida = async (c) => { r.bloqueos.push(c); if (r.falloBloqueo) throw r.falloBloqueo; return 1; };
++  return r;
++}
++
++test('guard: prueba vigente deja pasar; permanente también', async () => {
++  for (const exp of [dias(3), null]) {
++    const repo = repoFalso({ nombre: 'WA', precio_usd: 150, habilitado: true, expira_prueba_en: exp });
++    const n = siguiente();
++    await crearGuard({ repo, ahora: () => T0 }).requireModulo('WHATSAPP_AUTOMATICO')({}, {}, n.fn);
++    assert.equal(n.err, undefined);
++    assert.equal(repo.bloqueos.length, 0);
++  }
++});
++
++test('guard: prueba vencida → bloquea en la base (habilitado = 0), responde 403 MODULO_PREMIUM_DESHABILITADO y no vuelve a escribir', async () => {
++  const repo = repoFalso({ nombre: 'WA', precio_usd: '150.00', habilitado: true, expira_prueba_en: dias(-0.5) });
++  const g = crearGuard({ repo, ahora: () => T0 });
++  const mw = g.requireModulo('WHATSAPP_AUTOMATICO');
++  const n = siguiente();
++  await mw({}, {}, n.fn);
++  assert.equal(n.err.status, 403);
++  assert.equal(n.err.codigo, 'MODULO_PREMIUM_DESHABILITADO');
++  assert.equal(n.err.message, 'Módulo Premium Deshabilitado');
++  assert.deepEqual(n.err.detalles, { modulo: 'WHATSAPP_AUTOMATICO', nombre: 'WA', precio_usd: 150, motivo: 'PRUEBA_EXPIRADA' });
++  assert.deepEqual(repo.bloqueos, ['WHATSAPP_AUTOMATICO']);
++  const n2 = siguiente();
++  await mw({}, {}, n2.fn); // segunda petición: la caché ya refleja el bloqueo
++  assert.equal(n2.err.codigo, 'MODULO_PREMIUM_DESHABILITADO');
++  assert.equal(repo.bloqueos.length, 1);
++});
++
++test('guard: una prueba que vence DENTRO de la ventana de caché se bloquea igual (la vigencia se evalúa en cada petición)', async () => {
++  let t = T0;
++  const repo = repoFalso({ nombre: 'WA', precio_usd: 150, habilitado: true, expira_prueba_en: new Date(T0 + 10_000).toISOString() });
++  const mw = crearGuard({ repo, ttlMs: 60_000, ahora: () => t }).requireModulo('WHATSAPP_AUTOMATICO');
++  let n = siguiente(); await mw({}, {}, n.fn); assert.equal(n.err, undefined);
++  t = T0 + 20_000; // la caché (60 s) sigue vigente, la prueba no
++  n = siguiente(); await mw({}, {}, n.fn);
++  assert.equal(n.err.codigo, 'MODULO_PREMIUM_DESHABILITADO');
++  assert.equal(repo.bloqueos.length, 1);
++});
++
++test('guard: si no se puede persistir el bloqueo igual se niega el acceso (fail-closed) y se reintenta después', async () => {
++  const repo = repoFalso({ nombre: 'WA', precio_usd: 150, habilitado: true, expira_prueba_en: dias(-1) });
++  repo.falloBloqueo = new Error('db caída');
++  const g = crearGuard({ repo, ahora: () => T0 });
++  const orig = console.error; console.error = () => {};
++  const n = siguiente();
++  await g.requireModulo('WHATSAPP_AUTOMATICO')({}, {}, n.fn);
++  console.error = orig;
++  assert.equal(n.err.codigo, 'MODULO_PREMIUM_DESHABILITADO');
++});
++
++test('guard.evaluar({fresco}) ignora la caché (lo usa el cron antes de cada ciclo)', async () => {
++  let habilitado = false; let lecturas = 0;
++  const repo = { leer: async () => { lecturas += 1; return { nombre: 'WA', precio_usd: 150, habilitado, expira_prueba_en: null }; }, bloquearVencida: async () => 0 };
++  const g = crearGuard({ repo, ttlMs: 15_000, ahora: () => T0 });
++  assert.equal((await g.evaluar('WHATSAPP_AUTOMATICO')).habilitado, false);
++  habilitado = true;
++  assert.equal((await g.evaluar('WHATSAPP_AUTOMATICO')).habilitado, false, 'dentro del TTL sigue en caché');
++  assert.equal((await g.evaluar('WHATSAPP_AUTOMATICO', { fresco: true })).habilitado, true);
++  assert.equal(lecturas, 2);
++});
++
++// ── activarPrueba (servicio) ─────────────────────────────────────────────────────────────────────
++test('activarPrueba: una sola sentencia atómica con parámetros posicionales; fija habilitado y expira_prueba_en = NOW() + 15 días', async () => {
++  db.reiniciar();
++  db.handler = async (texto) => (/^\s*UPDATE modulos_premium/.test(texto)
++    ? rs({ codigo: 'WHATSAPP_AUTOMATICO', nombre: 'WA', habilitado_en: new Date(T0), prueba_iniciada_en: new Date(T0), expira_prueba_en: new Date(T0 + 15 * 86_400_000) })
++    : rs());
++  const r = await activarPrueba({ codigo: 'WHATSAPP_AUTOMATICO' });
++  assert.equal(db.llamadas.length, 1, 'sin SELECT previo: la condición vive en el UPDATE');
++  const { texto, params } = db.llamadas[0];
++  assert.deepEqual(params, ['WHATSAPP_AUTOMATICO', DIAS_PRUEBA]);
++  assert.equal(DIAS_PRUEBA, 15);
++  assert.match(texto, /habilitado = TRUE/);
++  assert.match(texto, /expira_prueba_en = NOW\(\) \+ \(\$2::int \* INTERVAL '1 day'\)/);
++  assert.match(texto, /WHERE codigo = \$1 AND habilitado = FALSE AND prueba_iniciada_en IS NULL/);
++  assert.equal(r.en_prueba, true);
++  assert.equal(r.dias_prueba, 15);
++  assert.equal(r.modulo, 'WHATSAPP_AUTOMATICO');
++});
++
++test('activarPrueba: diagnostica 404 / ya habilitado (permanente o en prueba) / prueba ya utilizada', async () => {
++  const caso = async (fila) => {
++    db.reiniciar();
++    db.handler = async (texto) => (/^\s*UPDATE/.test(texto) ? rs() : (fila ? rs(fila) : rs()));
++    return activarPrueba({ codigo: 'BANCAMIGA' }).then(() => null, (e) => e);
++  };
++  let e = await caso(null);
++  assert.ok(e instanceof AppError); assert.equal(e.status, 404);
++  e = await caso({ nombre: 'B', habilitado: true, prueba_iniciada_en: null, expira_prueba_en: null });
++  assert.deepEqual([e.status, e.codigo, e.detalles.en_prueba], [409, 'MODULO_YA_HABILITADO', false]);
++  e = await caso({ nombre: 'B', habilitado: true, prueba_iniciada_en: new Date(), expira_prueba_en: new Date(Date.now() + 86_400_000) });
++  assert.deepEqual([e.codigo, e.detalles.en_prueba], ['MODULO_YA_HABILITADO', true]);
++  e = await caso({ nombre: 'B', habilitado: false, prueba_iniciada_en: new Date(), expira_prueba_en: null });
++  assert.deepEqual([e.status, e.codigo], [409, 'PRUEBA_YA_UTILIZADA']);
++  e = await caso({ nombre: 'B', habilitado: true, prueba_iniciada_en: new Date(), expira_prueba_en: new Date(Date.now() - 1000) }); // vencida aún sin limpiar
++  assert.equal(e.codigo, 'PRUEBA_YA_UTILIZADA');
++});
++
++// ── POST /api/premium/activar-prueba (cadena de middlewares real, Express simulado) ───────────────
++test('POST /premium/activar-prueba: solo admin, valida el módulo, responde 201 e invalida la caché del guard', async () => {
++  const registros = [];
++  const cargaPrevia = Module._load;
++  Module._load = function cargar(request, ...resto) {
++    if (request === 'express') {
++      return { Router: () => ({
++        get: (path, ...h) => { registros.push({ m: 'GET', path, h }); },
++        post: (path, ...h) => { registros.push({ m: 'POST', path, h }); },
++        put: (path, ...h) => { registros.push({ m: 'PUT', path, h }); },
++        use() {},
++      }) };
++    }
++    if (request === 'jsonwebtoken') return { sign: () => 'x', verify: (t) => JSON.parse(t) }; // el "token" de la prueba es el propio JSON del payload
++    return cargaPrevia.call(this, request, ...resto);
++  };
++  let premium;
++  try { premium = require('../modules/premium/premium.routes'); } finally { Module._load = cargaPrevia; }
++  assert.ok(premium.catalogoRouter);
++
++  const ruta = registros.find((r) => r.m === 'POST' && r.path === '/activar-prueba');
++  assert.ok(ruta, 'la ruta POST /activar-prueba existe');
++  assert.equal(ruta.h.length, 3, 'requireAuth → requireRol(admin) → handler');
++
++  const correr = async (rol, cuerpo) => {
++    const req = { get: (h) => (h.toLowerCase() === 'authorization' ? `Bearer ${JSON.stringify({ sub: 7, rol, nombre: 'U' })}` : ''), body: cuerpo };
++    const res = { statusCode: null, cuerpo: null, status(c) { this.statusCode = c; return this; }, json(b) { this.cuerpo = b; return this; } };
++    let error = null;
++    for (const mw of ruta.h) {
++      let siguienteLlamado = false; let err;
++      // eslint-disable-next-line no-await-in-loop
++      await new Promise((resolve) => {
++        const next = (e) => { siguienteLlamado = true; err = e; resolve(); };
++        Promise.resolve(mw(req, res, next)).then(() => { if (res.cuerpo !== null) resolve(); }, (e) => { err = e; siguienteLlamado = true; resolve(); });
++      });
++      if (err) { error = err; break; }
++      if (!siguienteLlamado) break;
++    }
++    return { res, error };
++  };
++
++  db.reiniciar();
++  let r = await correr('secretaria', { modulo: 'WHATSAPP_AUTOMATICO' });
++  assert.equal(r.error.status, 403, 'una secretaria no puede activar pruebas');
++  assert.equal(db.llamadas.length, 0);
++
++  r = await correr('admin', { modulo: 'NO_EXISTE' });
++  assert.equal(r.error.status, 422);
++  assert.equal(db.llamadas.length, 0);
++
++  db.handler = async () => rs({ codigo: 'WHATSAPP_AUTOMATICO', nombre: 'WA', habilitado_en: new Date(), prueba_iniciada_en: new Date(), expira_prueba_en: new Date(Date.now() + 15 * 86_400_000) });
++  const { guard } = require('../modules/premium/guard');
++  let invalidada = 0; const invalidarOriginal = guard.invalidar; guard.invalidar = () => { invalidada += 1; };
++  const silencio = console.log; console.log = () => {};
++  r = await correr('admin', { modulo: 'WHATSAPP_AUTOMATICO' });
++  console.log = silencio; guard.invalidar = invalidarOriginal;
++  assert.equal(invalidada, 1);
++  assert.equal(r.error, null);
++  assert.equal(r.res.statusCode, 201);
++  assert.equal(r.res.cuerpo.ok, true);
++  assert.equal(r.res.cuerpo.data.dias_prueba, 15);
++});
+diff --git a/tests/schema-consistencia.test.js b/tests/schema-consistencia.test.js
+index a6b6964..ac11145 100644
+--- a/tests/schema-consistencia.test.js
++++ b/tests/schema-consistencia.test.js
+@@ -22,7 +22,7 @@ function archivosJs(dir, acc = []) {
+   }
+   return acc;
+ }
+-const FUENTES = ['services', 'controllers', 'modules', 'scripts', 'middlewares', 'routes', 'config'].flatMap((d) => archivosJs(d));
++const FUENTES = ['services', 'controllers', 'modules', 'scripts', 'middlewares', 'routes', 'config', 'cron'].flatMap((d) => archivosJs(d));
+ // Se ignoran los comentarios JS (// y /* */): el SQL vive en cadenas/plantillas y la prosa en español no debe confundirse con consultas.
+ const sinComentariosJs = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/(^|[^:'"`\w])\/\/ .*$/gm, '$1');
+ const codigo = FUENTES.map((f) => [f, sinComentariosJs(leer(f))]);
+@@ -48,6 +48,11 @@ for (const m of sqlTodo.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?
+   tablas[m[1]] = cols;
+   unicos[m[1]] = uq;
+ }
++// Columnas añadidas por migraciones posteriores (ALTER TABLE … ADD COLUMN IF NOT EXISTS).
++for (const m of sinComentariosSql(sqlTodo).matchAll(new RegExp(`ALTER TABLE (\\w+) ADD COLUMN IF NOT EXISTS ([a-z_0-9]+)\\s+(?:${TIPOS})\\b`, 'gi'))) {
++  assert.ok(tablas[m[1]], `ALTER TABLE sobre una tabla desconocida: ${m[1]}`);
++  tablas[m[1]].add(m[2]);
++}
+ for (const m of sqlTodo.matchAll(/CREATE UNIQUE INDEX IF NOT EXISTS \w+ ON (\w+)\s*\(([^)]*)\)/g)) {
+   unicos[m[1]].add(m[2].split(',').map((x) => x.trim()).join(','));
+ }
+diff --git a/tests/whatsapp-cron.test.js b/tests/whatsapp-cron.test.js
+new file mode 100644
+index 0000000..3ae8637
+--- /dev/null
++++ b/tests/whatsapp-cron.test.js
+@@ -0,0 +1,216 @@
++'use strict';
++require('./helpers/entorno');
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const { AppError, e } = require('../errors/AppError');
++const { crearCronWhatsapp, msHastaProximaEjecucion, bcvDelCiclo } = require('../cron/whatsappCron');
++
++const HORA = Date.parse('2026-10-23T12:00:00-04:00');
++const CONFIG = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: 400, morosidadCadaDias: 7, maxFallosSeguidos: 5, arrendamientoMin: 120 };
++const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
++
++/**
++ * Arma el bot con dobles. `resultados[estudianteId]` = 'ok' | AppError | Error. Cada envío queda en `eventos`
++ * junto con las pausas (`esperar`), para comprobar el orden secuencial y el delay.
++ */
++function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { habilitado: true }, configurado = true, lease = true, config = {} } = {}) {
++  const eventos = [];
++  const sql = [];
++  const db = {
++    ejecutar: async (texto, params) => {
++      sql.push({ texto, params });
++      const maximo = Math.max(0, ...[...texto.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])));
++      assert.equal(params.length, maximo, `parámetros posicionales: usa $1..$${maximo}, recibió ${params.length}`);
++      if (/INSERT INTO parametros/.test(texto)) return lease ? rs({ clave: 'x' }) : rs();
++      if (/FROM \(\s*SELECT DISTINCT ON/.test(texto)) return rs(...preventivas);
++      if (/GROUP BY v\.id/.test(texto)) return rs(...morosos);
++      return rs();
++    },
++  };
++  const guard = { evaluar: async () => modulo };
++  const notificaciones = {
++    VENTANA_PREVENTIVA: { min: 3, max: 5 },
++    generarAlerta: async ({ tipo, estudianteId, enviar, usuarioId }) => {
++      eventos.push(`envio:${tipo}:${estudianteId}`);
++      assert.equal(enviar, true);
++      assert.equal(usuarioId, null, 'el bot no se atribuye a ningún usuario del panel');
++      const r = resultados[estudianteId] ?? 'ok';
++      if (r !== 'ok') throw r;
++      return { notificacion_id: 1000 + estudianteId, estado: 'ENVIADA' };
++    },
++  };
++  const pausas = [];
++  const bot = crearCronWhatsapp({
++    db, guard, notificaciones, bcv: { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false }) },
++    whatsapp: { configurado: () => configurado },
++    config: { ...CONFIG, ...config },
++    esperar: async (ms) => { pausas.push(ms); eventos.push(`pausa:${ms}`); },
++    ahora: () => HORA, log: () => {}, logError: () => {},
++  });
++  return { bot, eventos, pausas, sql };
++}
++
++const prev = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, cuota_id: estudiante_id * 10, fecha_vencimiento: '2026-10-27' }));
++const mor = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, vencida_desde: '2026-10-01' }));
++const metaFalla = () => new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131047' });
++
++test('ciclo: preventivas primero, luego morosidad; envío SECUENCIAL con pausa de 1,5 s entre mensajes (no antes del primero ni después del último)', async () => {
++  const { bot, eventos, pausas } = armar({ preventivas: prev(1, 2), morosos: mor(3) });
++  const r = await bot.ejecutarCiclo();
++  assert.deepEqual(eventos, ['envio:PREVENTIVA:1', 'pausa:1500', 'envio:PREVENTIVA:2', 'pausa:1500', 'envio:MOROSIDAD:3']);
++  assert.deepEqual(pausas, [1500, 1500]);
++  assert.equal(r.estado, 'COMPLETADO');
++  assert.deepEqual(r.preventiva, { candidatos: 2, enviadas: 2, fallidas: 0, omitidas: 0 });
++  assert.deepEqual(r.morosidad, { candidatos: 1, enviadas: 1, fallidas: 0, omitidas: 0 });
++});
++
++test('un envío FALLIDO se cuenta, el ciclo continúa con el siguiente y respeta igualmente la pausa', async () => {
++  const { bot, eventos } = armar({ preventivas: prev(1, 2, 3), resultados: { 2: metaFalla() } });
++  const r = await bot.ejecutarCiclo();
++  assert.deepEqual(eventos.filter((x) => x.startsWith('envio')), ['envio:PREVENTIVA:1', 'envio:PREVENTIVA:2', 'envio:PREVENTIVA:3']);
++  assert.equal(eventos.filter((x) => x === 'pausa:1500').length, 2);
++  assert.deepEqual([r.preventiva.enviadas, r.preventiva.fallidas, r.estado], [2, 1, 'COMPLETADO']);
++});
++
++test('reglas de negocio (el estudiante cambió desde la consulta) se OMITEN: no cuentan como fallo ni gastan pausa', async () => {
++  const { bot, pausas } = armar({ preventivas: prev(1, 2), morosos: mor(3), resultados: { 1: e.reglaNegocio('FUERA_DE_VENTANA_PREVENTIVA', 'x'), 3: e.reglaNegocio('PAGO_EN_REVISION', 'x') } });
++  const r = await bot.ejecutarCiclo();
++  assert.deepEqual([r.preventiva.omitidas, r.preventiva.enviadas, r.morosidad.omitidas], [1, 1, 1]);
++  assert.deepEqual(pausas, [1500], 'la pausa solo se aplica tras un envío real a Meta (antes del 3.º intento); las omitidas previas no la generan');
++  assert.equal(r.estado, 'COMPLETADO');
++});
++
++test('cortafuegos: tras 5 fallos seguidos se aborta; un éxito intermedio reinicia la cuenta', async () => {
++  const fallos = Object.fromEntries([1, 2, 3, 4, 5, 6, 7].map((i) => [i, metaFalla()]));
++  let { bot, eventos } = armar({ preventivas: prev(1, 2, 3, 4, 5, 6, 7), resultados: fallos });
++  let r = await bot.ejecutarCiclo();
++  assert.equal(r.estado, 'ABORTADO');
++  assert.equal(r.abortado, 'DEMASIADOS_FALLOS_SEGUIDOS');
++  assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 5, 'no se intentó a los restantes');
++
++  ({ bot, eventos } = armar({ preventivas: prev(1, 2, 3, 4, 5, 6, 7, 8, 9), resultados: { 1: metaFalla(), 2: metaFalla(), 3: metaFalla(), 4: metaFalla(), 6: metaFalla(), 7: metaFalla() } }));
++  r = await bot.ejecutarCiclo();
++  assert.equal(r.estado, 'COMPLETADO');
++  assert.equal(r.preventiva.fallidas, 6);
++});
++
++test('falla sistémica (tasa BCV caída / WhatsApp sin configurar durante el ciclo) → aborta de inmediato', async () => {
++  for (const codigo of ['TASA_BCV_DESACTUALIZADA', 'TASA_BCV_NO_DISPONIBLE', 'WHATSAPP_NO_CONFIGURADO']) {
++    const { bot, eventos } = armar({ preventivas: prev(1, 2, 3), resultados: { 1: e.noDisponible(codigo, 'x') } });
++    const r = await bot.ejecutarCiclo();
++    assert.deepEqual([r.estado, r.abortado], ['ABORTADO', codigo]);
++    assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 1);
++  }
++});
++
++test('tope por ciclo (WHATSAPP_CRON_MAX_ENVIOS) y el LIMIT viaja a la consulta', async () => {
++  const { bot, eventos, sql } = armar({ preventivas: prev(1, 2, 3, 4), config: { maxEnviosPorCiclo: 3 } });
++  const r = await bot.ejecutarCiclo();
++  assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 3);
++  assert.equal(r.abortado, 'LIMITE_POR_CICLO');
++  const consulta = sql.find((s) => /DISTINCT ON/.test(s.texto));
++  assert.equal(consulta.params[3], 3);
++});
++
++test('candado premium: módulo deshabilitado o prueba vencida → no consulta candidatos ni envía', async () => {
++  for (const modulo of [{ habilitado: false, motivo: 'DESHABILITADO' }, { habilitado: false, vencida: true, motivo: 'PRUEBA_EXPIRADA' }]) {
++    const { bot, eventos, sql } = armar({ preventivas: prev(1), modulo });
++    const r = await bot.ejecutarCiclo();
++    assert.deepEqual([r.estado, r.motivo], ['OMITIDO', modulo.motivo]);
++    assert.equal(eventos.length, 0);
++    assert.equal(sql.length, 0, 'ni siquiera toma el arrendamiento');
++  }
++});
++
++test('WhatsApp sin configurar → ciclo omitido sin crear notificaciones', async () => {
++  const { bot, eventos, sql } = armar({ preventivas: prev(1), configurado: false });
++  const r = await bot.ejecutarCiclo();
++  assert.deepEqual([r.estado, r.motivo, eventos.length, sql.length], ['OMITIDO', 'WHATSAPP_NO_CONFIGURADO', 0, 0]);
++});
++
++test('arrendamiento: si otra instancia ya corre el bot, este ciclo no envía; si no, se libera siempre (incluso tras un error)', async () => {
++  let { bot, eventos } = armar({ preventivas: prev(1), lease: false });
++  const r = await bot.ejecutarCiclo();
++  assert.deepEqual([r.estado, r.motivo, eventos.length], ['OMITIDO', 'OTRA_INSTANCIA_EN_CURSO', 0]);
++
++  const normal = armar({ preventivas: prev(1) });
++  await normal.bot.ejecutarCiclo();
++  const liberar = normal.sql.filter((s) => /^\s*DELETE FROM parametros/.test(s.texto));
++  assert.equal(liberar.length, 1);
++  assert.equal(liberar[0].params[0], 'WHATSAPP_CRON_LEASE');
++
++  // Si la consulta de candidatos revienta, el error se propaga pero el arrendamiento se libera.
++  const sql = [];
++  const bot2 = crearCronWhatsapp({
++    db: { ejecutar: async (texto, params) => { sql.push(texto); if (/DISTINCT ON/.test(texto)) throw new Error('db caída'); return rs({ clave: 'x' }); } },
++    guard: { evaluar: async () => ({ habilitado: true }) }, notificaciones: { VENTANA_PREVENTIVA: { min: 3, max: 5 }, generarAlerta: async () => ({}) },
++    bcv: {}, whatsapp: { configurado: () => true }, config: CONFIG, esperar: async () => {}, ahora: () => HORA, log: () => {}, logError: () => {},
++  });
++  await assert.rejects(bot2.ejecutarCiclo(), /db caída/);
++  assert.ok(sql.some((t) => /^\s*DELETE FROM parametros/.test(t)));
++});
++
++test('las consultas masivas son PostgreSQL con parámetros posicionales y reglas correctas (sin T-SQL)', async () => {
++  const { bot, sql } = armar({});
++  await bot.ejecutarCiclo();
++  const p = sql.find((s) => /DISTINCT ON/.test(s.texto));
++  const m = sql.find((s) => /GROUP BY v\.id/.test(s.texto));
++  assert.deepEqual(p.params, ['2026-10-23', 3, 5, 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA']);
++  assert.deepEqual(m.params, ['2026-10-23', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA']);
++  assert.match(p.texto, /BETWEEN \(\$1::date \+ \$2::int\) AND \(\$1::date \+ \$3::int\)/);
++  assert.match(p.texto, /NOT EXISTS[\s\S]*n\.cuota_id = p\.cuota_id/, 'una PREVENTIVA por cuota');
++  assert.match(m.texto, /c\.estado = \$4::text AND c\.fecha_vencimiento < \$1::date/, 'solo cuotas vencidas en Pendiente (no En Revisión)');
++  assert.match(m.texto, /n\.creado_en > NOW\(\) - \(\$2::int \* INTERVAL '1 day'\)/);
++  assert.ok(!/\b(TOP|GETDATE|DATEADD|ISNULL|dbo\.|@\w+)\b/i.test(p.texto + m.texto));
++});
++
++test('la tasa BCV se consulta fresca como mucho una vez por minuto durante el ciclo', async () => {
++  let t = 0; const llamadas = [];
++  const w = bcvDelCiclo({ obtenerTasa: async (o) => { llamadas.push(o.fresca); return { tasa: 36, desactualizada: false }; } }, () => t, 60_000);
++  await w.obtenerTasa(); t = 10_000; await w.obtenerTasa(); t = 59_999; await w.obtenerTasa(); t = 60_000; await w.obtenerTasa();
++  assert.deepEqual(llamadas, [true, false, false, true]);
++  // una tasa desactualizada no cuenta como fresca: el siguiente intento vuelve a consultar la fuente
++  const llam2 = []; let t2 = 0;
++  const w2 = bcvDelCiclo({ obtenerTasa: async (o) => { llam2.push(o.fresca); return { tasa: 36, desactualizada: true }; } }, () => t2, 60_000);
++  await w2.obtenerTasa(); t2 = 1000; await w2.obtenerTasa();
++  assert.deepEqual(llam2, [true, true]);
++});
++
++test('planificador: próxima ejecución a la hora de Caracas (UTC-4), siempre dentro de las próximas 24 h', () => {
++  const ms = (iso, hora) => msHastaProximaEjecucion(hora, Date.parse(iso));
++  assert.equal(ms('2026-10-23T07:00:00-04:00', '08:00'), 3_600_000); // faltan 60 min → hoy
++  assert.equal(ms('2026-10-23T09:00:00-04:00', '08:00'), 23 * 3_600_000); // ya pasó → mañana
++  assert.equal(ms('2026-10-23T08:00:00-04:00', '08:00'), 24 * 3_600_000); // justo ahora → mañana (no doble ejecución)
++  assert.equal(ms('2026-10-23T23:30:00-04:00', '00:15'), 45 * 60_000); // cruce de medianoche
++  assert.equal(ms('2026-10-24T03:30:00Z', '23:59'), 29 * 60_000); // 23:30 Caracas → 29 min
++});
++
++test('iniciar() programa el ciclo diario y detener() lo cancela y espera al envío en curso', async () => {
++  const temporizadores = [];
++  const setOriginal = global.setTimeout; const clearOriginal = global.clearTimeout;
++  global.setTimeout = (fn, ms) => { const h = { fn, ms, unref() {}, cancelado: false }; temporizadores.push(h); return h; };
++  global.clearTimeout = (h) => { if (h) h.cancelado = true; };
++  try {
++    const { bot } = armar({ modulo: { habilitado: false, motivo: 'DESHABILITADO' } });
++    bot.iniciar();
++    assert.equal(temporizadores.length, 1);
++    assert.equal(temporizadores[0].ms, msHastaProximaEjecucion('08:00', HORA));
++    bot.iniciar(); // idempotente
++    assert.equal(temporizadores.length, 1);
++    await bot.detener();
++    assert.equal(temporizadores[0].cancelado, true);
++  } finally { global.setTimeout = setOriginal; global.clearTimeout = clearOriginal; }
++});
++
++test('el bot usa el servicio de notificaciones real (cero lógica de envío duplicada) y server.js lo enlaza', () => {
++  const raiz = path.resolve(__dirname, '..');
++  const fuente = fs.readFileSync(path.join(raiz, 'cron', 'whatsappCron.js'), 'utf8');
++  assert.match(fuente, /require\('\.\.\/services\/notificaciones\.service'\)/);
++  assert.match(fuente, /generarAlerta\(/);
++  assert.ok(!/axios|graph\.facebook/.test(fuente), 'el cron no habla con Meta directamente');
++  const server = fs.readFileSync(path.join(raiz, 'server.js'), 'utf8');
++  assert.match(server, /cronWhatsapp\.iniciar\(\)/);
++  assert.match(server, /cronWhatsapp\.detener\(\)/);
++});
+-- 
+2.43.0
+

@@ -22,7 +22,7 @@ function archivosJs(dir, acc = []) {
   }
   return acc;
 }
-const FUENTES = ['services', 'controllers', 'modules', 'scripts', 'middlewares', 'routes', 'config'].flatMap((d) => archivosJs(d));
+const FUENTES = ['services', 'controllers', 'modules', 'scripts', 'middlewares', 'routes', 'config', 'cron'].flatMap((d) => archivosJs(d));
 // Se ignoran los comentarios JS (// y /* */): el SQL vive en cadenas/plantillas y la prosa en español no debe confundirse con consultas.
 const sinComentariosJs = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '').replace(/(^|[^:'"`\w])\/\/ .*$/gm, '$1');
 const codigo = FUENTES.map((f) => [f, sinComentariosJs(leer(f))]);
@@ -47,6 +47,11 @@ for (const m of sqlTodo.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?
   }
   tablas[m[1]] = cols;
   unicos[m[1]] = uq;
+}
+// Columnas añadidas por migraciones posteriores (ALTER TABLE … ADD COLUMN IF NOT EXISTS).
+for (const m of sinComentariosSql(sqlTodo).matchAll(new RegExp(`ALTER TABLE (\\w+) ADD COLUMN IF NOT EXISTS ([a-z_0-9]+)\\s+(?:${TIPOS})\\b`, 'gi'))) {
+  assert.ok(tablas[m[1]], `ALTER TABLE sobre una tabla desconocida: ${m[1]}`);
+  tablas[m[1]].add(m[2]);
 }
 for (const m of sqlTodo.matchAll(/CREATE UNIQUE INDEX IF NOT EXISTS \w+ ON (\w+)\s*\(([^)]*)\)/g)) {
   unicos[m[1]].add(m[2].split(',').map((x) => x.trim()).join(','));

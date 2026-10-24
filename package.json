@@ -11,6 +11,8 @@
     "dev": "nodemon server.js",
     "migrate": "node scripts/migrate.js",
     "crear-admin": "node scripts/crear-admin.js",
+    "cron:whatsapp": "node cron/whatsappCron.js",
+    "cron:whatsapp:daemon": "node cron/whatsappCron.js --daemon",
     "test": "node --test tests/*.test.js",
     "test:integracion": "node --test tests/integracion.pg.test.js",
     "frontend:install": "npm --prefix frontend install",
