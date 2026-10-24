@@ -159,33 +159,39 @@ async function pagarNomina({ id }) {
 }
 
 // ───────── Egresos y balance ─────────
-async function crearEgreso({ fecha, categoria, descripcion, monto_usd, referencia }) {
+/**
+ * Egreso con sede. Un usuario de sede SIEMPRE registra en la suya (el `sede_id` del cuerpo se ignora); el acceso consolidado puede
+ * indicar una sede o dejarlo en NULL (gasto general de la academia, visible solo en vista consolidada).
+ */
+async function crearEgreso({ fecha, categoria, descripcion, monto_usd, referencia, sede_id }, sedeId = null) {
+  const sede = sedeId ?? sede_id ?? null;
   const r = await ejecutar(
-    'INSERT INTO egresos (fecha, categoria, descripcion, monto_usd, referencia) VALUES ($1, $2, $3, $4, $5) RETURNING id',
-    [aFechaSql(fecha), categoria, descripcion, monto_usd, referencia]);
+    'INSERT INTO egresos (fecha, categoria, descripcion, monto_usd, referencia, sede_id) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
+    [aFechaSql(fecha), categoria, descripcion, monto_usd, referencia, sede]);
   return { id: r.rows[0].id };
 }
 
-async function listarEgresos({ periodo, offset, limite }) {
+async function listarEgresos({ periodo, offset, limite, sedeId = null }) {
   const lim = periodo ? limitesPeriodo(periodo) : null;
-  const filtroParams = [lim ? aFechaSql(lim.desde) : null, lim ? aFechaSql(lim.hasta) : null];
-  const filtro = 'WHERE ($1::date IS NULL OR fecha >= $1::date) AND ($2::date IS NULL OR fecha <= $2::date)';
+  const filtroParams = [lim ? aFechaSql(lim.desde) : null, lim ? aFechaSql(lim.hasta) : null, sedeId];
+  const filtro = 'WHERE ($1::date IS NULL OR fecha >= $1::date) AND ($2::date IS NULL OR fecha <= $2::date) AND ($3::int IS NULL OR sede_id = $3::int)';
   const [items, total] = await Promise.all([
-    ejecutar(`SELECT id, fecha, categoria, descripcion, monto_usd, referencia, nomina_pago_id FROM egresos ${filtro}
-              ORDER BY fecha DESC, id DESC LIMIT $3 OFFSET $4`, [...filtroParams, limite, offset]),
+    ejecutar(`SELECT id, fecha, categoria, descripcion, monto_usd, referencia, nomina_pago_id, sede_id FROM egresos ${filtro}
+              ORDER BY fecha DESC, id DESC LIMIT $4 OFFSET $5`, [...filtroParams, limite, offset]),
     ejecutar(`SELECT COUNT(*)::int AS n, COALESCE(SUM(monto_usd), 0) AS total_usd FROM egresos ${filtro}`, filtroParams),
   ]);
   return { items: items.rows, total: total.rows[0].n, total_usd: Number(total.rows[0].total_usd) };
 }
 
 /** Balance neto del período = ingresos cobrados (referencias aprobadas ese mes, hora de Caracas) − egresos del mes. */
-async function balance(periodo) {
+async function balance(periodo, sedeId = null) {
   const lim = limitesPeriodo(periodo);
   const r = await ejecutar(
     `SELECT
-       (SELECT COALESCE(SUM(monto_usd), 0) FROM pagos_referencias WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz) AS ingresos_usd,
-       (SELECT COALESCE(SUM(monto_usd), 0) FROM egresos WHERE fecha BETWEEN $3::date AND $4::date) AS egresos_usd`,
-    [aInstanteSql(lim.inicioUtc), aInstanteSql(lim.finUtc), aFechaSql(lim.desde), aFechaSql(lim.hasta)]);
+       (SELECT COALESCE(SUM(monto_usd), 0) FROM pagos_referencias WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz
+          AND ($5::int IS NULL OR sede_id = $5::int)) AS ingresos_usd,
+       (SELECT COALESCE(SUM(monto_usd), 0) FROM egresos WHERE fecha BETWEEN $3::date AND $4::date AND ($5::int IS NULL OR sede_id = $5::int)) AS egresos_usd`,
+    [aInstanteSql(lim.inicioUtc), aInstanteSql(lim.finUtc), aFechaSql(lim.desde), aFechaSql(lim.hasta), sedeId]);
   const ingresos = Number(r.rows[0].ingresos_usd);
   const egresos = Number(r.rows[0].egresos_usd);
   return { periodo, ingresos_usd: ingresos, egresos_usd: egresos, neto_usd: sumar(ingresos, -egresos) };

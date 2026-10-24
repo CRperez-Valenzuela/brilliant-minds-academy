@@ -157,8 +157,8 @@ test('las consultas masivas son PostgreSQL con parámetros posicionales y reglas
   await bot.ejecutarCiclo();
   const p = sql.find((s) => /DISTINCT ON/.test(s.texto));
   const m = sql.find((s) => /GROUP BY v\.id/.test(s.texto));
-  assert.deepEqual(p.params, ['2026-10-23', 3, 5, 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA']);
-  assert.deepEqual(m.params, ['2026-10-23', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA']);
+  assert.deepEqual(p.params, ['2026-10-23', 3, 5, 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', null]); // null = ámbito «sin sede» (no hay sedes en este doble)
+  assert.deepEqual(m.params, ['2026-10-23', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', null]);
   assert.match(p.texto, /BETWEEN \(\$1::date \+ \$2::int\) AND \(\$1::date \+ \$3::int\)/);
   assert.match(p.texto, /NOT EXISTS[\s\S]*n\.cuota_id = p\.cuota_id/, 'una PREVENTIVA por cuota');
   assert.match(m.texto, /c\.estado = \$4::text AND c\.fecha_vencimiento < \$1::date/, 'solo cuotas vencidas en Pendiente (no En Revisión)');

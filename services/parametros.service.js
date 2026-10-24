@@ -25,8 +25,14 @@ async function matriculaUsd(ejecutor) {
   return v;
 }
 
-async function cuentasActivas(ejecutor) {
-  const r = await ejecutar('SELECT id, metodo, titular, detalle FROM cuentas_pago WHERE activa = TRUE ORDER BY metodo, id', [], ejecutor);
+/**
+ * Cuentas de cobro VISIBLES para una sede: las comunes (sede_id NULL) + las propias de esa sede. Con `sedeId` NULL solo las comunes:
+ * jamás se exponen las cuentas de una sede a quien no pertenece a ella (formulario público sin invitación, etc.).
+ */
+async function cuentasActivas(ejecutor, sedeId = null) {
+  const r = await ejecutar(
+    'SELECT id, metodo, titular, detalle FROM cuentas_pago WHERE activa = TRUE AND (sede_id IS NULL OR sede_id = $1::int) ORDER BY metodo, id',
+    [sedeId], ejecutor);
   return r.rows;
 }
 

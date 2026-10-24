@@ -13,6 +13,8 @@ export interface Usuario {
   readonly nombre: string;
   readonly email: string;
   readonly rol: RolUsuario;
+  /** NULL = acceso consolidado (SuperAdmin); un número fija al usuario a esa sede. */
+  readonly sede_id?: number | null;
 }
 
 export type EstadoDinamico =
@@ -145,6 +147,25 @@ export interface ConfigAdmisiones {
   readonly cuentas: readonly CuentaPago[];
 }
 
+/** Sede fijada por un enlace de invitación. */
+export interface SedeInvitacion {
+  readonly id: number;
+  readonly nombre: string;
+}
+
+/**
+ * `GET /api/public/admisiones/invitacion/:token` — la misma configuración del formulario (con las cuentas de cobro de ESA sede) más
+ * la sede y el nivel asignado, que el servidor vuelve a imponer al inscribir. 410 INVITACION_NO_VALIDA si el enlace no sirve.
+ */
+export interface ConfigInvitacion extends ConfigAdmisiones {
+  readonly sede: SedeInvitacion;
+  readonly nivel_asignado: string;
+}
+
+export function esConfigInvitacion(c: ConfigAdmisiones | null): c is ConfigInvitacion {
+  return c !== null && 'nivel_asignado' in c && typeof (c as { nivel_asignado?: unknown }).nivel_asignado === 'string';
+}
+
 export type TipoSangre = 'A+' | 'A-' | 'B+' | 'B-' | 'AB+' | 'AB-' | 'O+' | 'O-';
 
 /** Campos de texto del formulario `POST /api/public/admisiones` (multipart). */
@@ -184,6 +205,9 @@ export interface RespuestaAdmision {
   readonly monto_bs: number;
   readonly tasa_bcv: number;
   readonly tasa_desactualizada: boolean;
+  /** Solo con enlace de invitación: sede y nivel que el servidor impuso. */
+  readonly sede_id?: number | null;
+  readonly grado_solicitado?: string;
 }
 
 // ───────────────────────── Portal del representante ─────────────────────────
@@ -316,7 +340,23 @@ export interface ModuloPremium {
   readonly vista: string;
   readonly habilitado: boolean;
   readonly bloqueado: boolean;
-  readonly tooltip: string;
+  readonly tooltip: string | null;
+  /** Prueba gratuita de 15 días: vigente, cuándo vence y si todavía puede activarse. */
+  readonly en_prueba?: boolean;
+  readonly expira_prueba_en?: string | null;
+  readonly dias_restantes_prueba?: number | null;
+  readonly prueba_utilizada?: boolean;
+}
+
+/** `POST /api/premium/activar-prueba` */
+export interface RespuestaPrueba {
+  readonly modulo: CodigoModuloPremium;
+  readonly nombre: string;
+  readonly habilitado: boolean;
+  readonly en_prueba: boolean;
+  readonly dias_prueba: number;
+  readonly iniciada_en: string;
+  readonly expira_prueba_en: string;
 }
 
 // ───────────────────────── Estado de la interfaz ─────────────────────────

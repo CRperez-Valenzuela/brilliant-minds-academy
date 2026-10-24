@@ -8,6 +8,7 @@ const { detectarTipo } = require('../utils/archivos');
 const { Semaforo } = require('../utils/semaforo');
 const { asyncHandler, ok } = require('../utils/http');
 const admisiones = require('../services/admisiones.service');
+const invitaciones = require('../services/invitaciones.service');
 
 const METODOS = ['ZELLE', 'BINANCE', 'PAYPAL', 'PAGO_MOVIL'];
 const CEDULA = { patron: /^[A-Za-z0-9.-]{4,20}$/, mensajePatron: 'Solo letras, números, puntos y guiones (4 a 20).' };
@@ -17,7 +18,9 @@ const REGLAS = {
   alumno_apellidos: { requerido: true, max: 100 },
   alumno_cedula: { max: 20, ...CEDULA },
   alumno_fecha_nacimiento: { tipo: 'fechaPasada', requerido: true, min: '1990-01-01' },
-  grado_solicitado: { requerido: true, max: 60 },
+  // Con invitación el nivel lo fija el servidor (nivel_asignado) y el campo puede no llegar: la obligatoriedad se evalúa en prepararInscripcion.
+  grado_solicitado: { max: 60 },
+  invitacion: { max: 48, patron: /^[a-f0-9]{48}$/, mensajePatron: 'El enlace de invitación no es válido.' },
   colegio_procedencia: { max: 150 },
   ultimo_grado_aprobado: { max: 60 },
   tipo_sangre: { tipo: 'enum', valores: ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-'] },
@@ -48,6 +51,9 @@ function prepararInscripcion(body, files) {
   } catch (err) {
     if (err instanceof AppError) detalles.push(...err.detalles); else throw err;
   }
+
+  // Sin invitación el nivel lo elige la familia (obligatorio). Se lee del cuerpo crudo: si `validar` falló, `datos` está vacío y no debe duplicar errores.
+  if (!body.invitacion && !String(body.grado_solicitado ?? '').trim()) detalles.push({ campo: 'grado_solicitado', mensaje: 'Es obligatorio.' });
 
   const unir = (campo, ...partes) => {
     try {
@@ -97,10 +103,15 @@ const cargaArchivos = multer({
 
 const config = asyncHandler(async (_req, res) => ok(res, await admisiones.configPublica()));
 
+/** GET /api/public/admisiones/invitacion/:token → sede, cuentas de cobro de la sede y nivel_asignado (bloqueado). 410 si el enlace no sirve. */
+const invitacion = asyncHandler(async (req, res) => ok(res, await admisiones.configInvitacion(req.params.token)));
+
 const inscribir = asyncHandler(async (req, res) => {
   const { datos, archivos } = prepararInscripcion(req.body || {}, req.files);
-  const resultado = await admisiones.registrarInscripcion({ datos, archivos });
+  // Con enlace de invitación: se resuelve en el servidor (sede + nivel). Lo que el cliente haya puesto en el campo de nivel se descarta.
+  const inv = datos.invitacion ? await invitaciones.resolver(datos.invitacion) : null;
+  const resultado = await admisiones.registrarInscripcion({ datos, archivos, invitacion: inv });
   ok(res, resultado, 201);
 });
 
-module.exports = { config, inscribir, limitarConcurrencia, cargaArchivos, prepararInscripcion };
+module.exports = { config, invitacion, inscribir, limitarConcurrencia, cargaArchivos, prepararInscripcion };

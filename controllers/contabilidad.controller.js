@@ -5,6 +5,7 @@ const { sanitizarTelefono } = require('../utils/telefono');
 const { periodoActual, esPeriodoValido } = require('../utils/fechas');
 const { e } = require('../errors/AppError');
 const { asyncHandler, ok } = require('../utils/http');
+const { alcanceDe } = require('../utils/alcance');
 
 const REGLAS_PERSONAL = {
   nombres: { requerido: true, max: 100 },
@@ -78,17 +79,18 @@ const crearEgreso = asyncHandler(async (req, res) => {
     descripcion: { requerido: true, max: 300 },
     monto_usd: { tipo: 'decimal', requerido: true, positivo: true, max: 999999999 },
     referencia: { max: 60 },
+    sede_id: { tipo: 'entero', min: 1 }, // solo lo respeta el acceso consolidado; un usuario de sede siempre registra en la suya
   });
-  ok(res, await conta.crearEgreso(d), 201);
+  ok(res, await conta.crearEgreso(d, alcanceDe(req.usuario)), 201);
 });
 
 const listarEgresos = asyncHandler(async (req, res) => {
   const pag = paginacion(req.query);
-  const r = await conta.listarEgresos({ periodo: req.query.periodo ? periodoDe(req.query.periodo) : null, offset: pag.offset, limite: pag.limite });
+  const r = await conta.listarEgresos({ periodo: req.query.periodo ? periodoDe(req.query.periodo) : null, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario) });
   ok(res, r.items, 200, { paginacion: { pagina: pag.pagina, limite: pag.limite, total: r.total }, total_usd: r.total_usd });
 });
 
-const balance = asyncHandler(async (req, res) => ok(res, await conta.balance(periodoDe(req.query.periodo))));
+const balance = asyncHandler(async (req, res) => ok(res, await conta.balance(periodoDe(req.query.periodo), alcanceDe(req.usuario))));
 
 module.exports = {
   crearPersonal, actualizarPersonal, desactivarPersonal, reactivarPersonal, obtenerPersonal, listarPersonal,

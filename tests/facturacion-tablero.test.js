@@ -30,14 +30,14 @@ function programarTablero({ kpi, dias = [] } = {}) {
 }
 
 /** Simula (req, res, next) de Express para invocar el handler del controlador directamente. */
-async function invocar(handler, query = {}) {
+async function invocar(handler, query = {}, usuario = { id: 1, rol: 'admin', nombre: 'Admin', sede_id: null }) {
   const salida = { status: null, cuerpo: null, error: null };
   const res = { status(c) { salida.status = c; return this; }, json(b) { salida.cuerpo = b; return this; } };
   await new Promise((resolve) => {
     const next = (err) => { salida.error = err || null; resolve(); };
     const original = res.json.bind(res);
     res.json = (b) => { original(b); resolve(); return res; };
-    handler({ query }, res, next);
+    handler({ query, usuario }, res, next);
   });
   return salida;
 }
@@ -74,8 +74,8 @@ test('tablero: dos consultas parametrizadas ($1…$n posicionales, sin concatena
   assert.equal(estado.maxEnVuelo, 2, 'las consultas del tablero deben viajar a la vez (Promise.all)');
 
   const [kpi, porDia] = db.llamadas;
-  assert.ok(Array.isArray(kpi.params) && kpi.params.length === 5);
-  assert.ok(Array.isArray(porDia.params) && porDia.params.length === 2);
+  assert.ok(Array.isArray(kpi.params) && kpi.params.length === 6); // $1..$5 período + $6 sede (NULL = consolidado)
+  assert.ok(Array.isArray(porDia.params) && porDia.params.length === 3);
   // Los datos viajan SOLO como parámetros: el texto SQL no contiene fechas ni importes incrustados.
   for (const l of db.llamadas) assert.doesNotMatch(l.texto, /\d{4}-\d{2}-\d{2}/);
   // Barras diarias: SUM por día calendario de Caracas con AT TIME ZONE nativo de PostgreSQL.
@@ -94,6 +94,7 @@ test('tablero: el intervalo del mes son instantes UTC a medianoche de Caracas (U
   assert.equal(params[2], '2026-10-01');
   assert.equal(params[3], '2026-10-31');
   assert.match(params[4], /^\d{4}-\d{2}-\d{2}$/);
+  assert.equal(params[5], null); // sin sede: vista consolidada
   // Un cobro revisado el 30/sep a las 22:30 en Caracas (= 2026-10-01T02:30Z) pertenece a septiembre, no a octubre.
   const lim = limitesPeriodo('2026-10');
   assert.ok(Date.parse('2026-10-01T02:30:00Z') < lim.inicioUtc.getTime());

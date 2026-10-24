@@ -23,7 +23,7 @@ async function emitirToken(estudianteId, ejecutor) {
 async function resolverToken(token) {
   if (!TOKEN_RE.test(String(token))) throw e.noEncontrado('El enlace');
   const r = await ejecutar(
-    `SELECT t.estudiante_id, v.nombres, v.apellidos, v.estado_dinamico, v.estatus_pago
+    `SELECT t.estudiante_id, v.sede_id, v.nombres, v.apellidos, v.estado_dinamico, v.estatus_pago
      FROM portal_tokens t JOIN vw_estudiantes_estado v ON v.id = t.estudiante_id
      WHERE t.token_hash = $1 AND t.expira_en > NOW()`, [sha256(token)]);
   // Mismo mensaje para "no existe" y "vencido": no se revela cuáles tokens existieron.
@@ -35,7 +35,7 @@ async function vista(token, { bcvSvc = bcv } = {}) {
   const est = await resolverToken(token);
   const [tasa, cuentas, cuotas] = await Promise.all([
     bcvSvc.obtenerTasa(),
-    parametros.cuentasActivas(),
+    parametros.cuentasActivas(undefined, est.sede_id),
     ejecutar(
       `SELECT id, concepto, monto_usd, fecha_vencimiento, estado
        FROM cuotas WHERE estudiante_id = $1 AND estado IN ('Pendiente', 'En Revisión') ORDER BY fecha_vencimiento, id`,

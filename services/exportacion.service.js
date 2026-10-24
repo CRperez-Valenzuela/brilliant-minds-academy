@@ -12,8 +12,9 @@ const FMT_USD = '#,##0.00';
  * hoja = { nombre, columnas:[{header,key,width,fmt?}], sql } — `sql` DEBE usar `... WHERE x.id > $2 ORDER BY x.id LIMIT $1` ($1 = tamaño del lote,
  * $2 = último id leído) y devolver `id`.
  * hoja.fijo = true → consulta única sin paginar (resúmenes pequeños).
+ * hoja.porSede = true → la consulta añade `$3` = sede (NULL = consolidado) para filtrar con `($3::int IS NULL OR x.sede_id = $3::int)`.
  */
-async function exportarLibro(res, nombreArchivo, hojas) {
+async function exportarLibro(res, nombreArchivo, hojas, sedeId = null) {
   res.set({
     'Content-Type': MIME_XLSX,
     'Content-Disposition': `attachment; filename="${nombreArchivo}"`,
@@ -35,7 +36,7 @@ async function exportarLibro(res, nombreArchivo, hojas) {
     } else {
       let ultimo = 0;
       for (;;) {
-        const { rows } = await ejecutar(h.sql, [LOTE, ultimo]);
+        const { rows } = await ejecutar(h.sql, h.porSede ? [LOTE, ultimo, sedeId] : [LOTE, ultimo]);
         if (!rows.length) break;
         for (const fila of rows) ws.addRow(fila).commit();
         ultimo = rows[rows.length - 1].id;
@@ -130,7 +131,8 @@ function hojasFacturacion() {
         sql: `SELECT c.id, s.nombres || ' ' || s.apellidos AS estudiante, r.nombres || ' ' || r.apellidos AS representante, r.cedula AS rep_cedula,
                      c.tipo, c.concepto, c.monto_usd, c.fecha_vencimiento, c.estado
               FROM cuotas c JOIN estudiantes s ON s.id = c.estudiante_id JOIN representantes r ON r.id = s.representante_id
-              WHERE c.id > $2 ORDER BY c.id LIMIT $1`,
+              WHERE c.id > $2 AND ($3::int IS NULL OR c.sede_id = $3::int) ORDER BY c.id LIMIT $1`,
+        porSede: true,
       },
       {
         nombre: 'Pagos y referencias',
@@ -142,7 +144,9 @@ function hojasFacturacion() {
         ],
         sql: `SELECT p.id, p.declarado_en, s.nombres || ' ' || s.apellidos AS estudiante, p.referencia, p.metodo_pago, p.monto_usd, p.tasa_bcv, p.monto_bs,
                      p.estado, p.revisado_en, p.nota_revision
-              FROM pagos_referencias p JOIN estudiantes s ON s.id = p.estudiante_id WHERE p.id > $2 ORDER BY p.id LIMIT $1`,
+              FROM pagos_referencias p JOIN estudiantes s ON s.id = p.estudiante_id
+              WHERE p.id > $2 AND ($3::int IS NULL OR p.sede_id = $3::int) ORDER BY p.id LIMIT $1`,
+        porSede: true,
       },
     ],
   };

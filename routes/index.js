@@ -1,6 +1,7 @@
 'use strict';
 const express = require('express');
 const { requireAuth, requireRol } = require('../middlewares/auth');
+const { requireConsolidado } = require('../utils/alcance');
 const { crearLimitador } = require('../middlewares/limitador');
 const { ejecutar } = require('../config/db');
 const { asyncHandler, ok } = require('../utils/http');
@@ -13,10 +14,13 @@ const facturacion = require('../controllers/facturacion.controller');
 const conta = require('../controllers/contabilidad.controller');
 const notif = require('../controllers/notificaciones.controller');
 const cfg = require('../controllers/configuracion.controller');
+const sedes = require('../controllers/sedes.controller');
 const exportaciones = require('../controllers/exportaciones.controller');
 const premium = require('../modules/premium/premium.routes');
 
 const soloAdmin = requireRol('admin');
+// Datos SIN sede (personal, horas, nómina) o ajustes globales: solo admin con acceso consolidado (sede_id NULL).
+const soloConsolidado = [requireRol('admin'), requireConsolidado];
 const api = express.Router();
 
 // ── Salud ───────────────────────────────────────────────────────────────────────────────────────
@@ -33,6 +37,8 @@ api.get('/auth/me', requireAuth, auth.me);
 // ── PÚBLICO: Admisiones (formulario de inscripción) ─────────────────────────────────────────────
 const limiteAdmision = crearLimitador({ ventanaMs: 60 * 60_000, max: 15, codigo: 'DEMASIADAS_INSCRIPCIONES', mensaje: 'Demasiados envíos desde esta red. Intenta más tarde.' });
 api.get('/public/admisiones/config', crearLimitador({ ventanaMs: 60_000, max: 60 }), admisiones.config);
+// Enlace de invitación: devuelve sede, cuentas de cobro de la sede y el nivel asignado (bloqueado). El nivel lo vuelve a imponer el POST.
+api.get('/public/admisiones/invitacion/:token', crearLimitador({ ventanaMs: 60_000, max: 60 }), admisiones.invitacion);
 api.post('/public/admisiones', limiteAdmision, admisiones.limitarConcurrencia, admisiones.cargaArchivos, admisiones.inscribir);
 
 // ── PÚBLICO: Portal privado del representante (acceso por enlace único) ─────────────────────────
@@ -59,25 +65,34 @@ api.get('/facturacion/auditoria', facturacion.auditoria);
 api.post('/facturacion/auditoria/:id/aprobar', facturacion.aprobar);
 api.post('/facturacion/auditoria/:id/rechazar', facturacion.rechazar);
 
-// Contabilidad interna (solo admin)
-api.get('/contabilidad/personal', soloAdmin, conta.listarPersonal);
-api.post('/contabilidad/personal', soloAdmin, conta.crearPersonal);
-api.get('/contabilidad/personal/:id', soloAdmin, conta.obtenerPersonal);
-api.put('/contabilidad/personal/:id', soloAdmin, conta.actualizarPersonal);
-api.post('/contabilidad/personal/:id/desactivar', soloAdmin, conta.desactivarPersonal);
-api.post('/contabilidad/personal/:id/reactivar', soloAdmin, conta.reactivarPersonal);
-api.get('/contabilidad/horas', soloAdmin, conta.listarHoras);
-api.post('/contabilidad/horas', soloAdmin, conta.registrarHoras);
-api.post('/contabilidad/nomina/calcular', soloAdmin, conta.calcularNomina);
-api.get('/contabilidad/nomina', soloAdmin, conta.listarNomina);
-api.post('/contabilidad/nomina/:id/pagar', soloAdmin, conta.pagarNomina);
+// Contabilidad interna (solo admin). Personal/horas/nómina no tienen sede → solo acceso consolidado; egresos y balance respetan la sede.
+api.get('/contabilidad/personal', ...soloConsolidado, conta.listarPersonal);
+api.post('/contabilidad/personal', ...soloConsolidado, conta.crearPersonal);
+api.get('/contabilidad/personal/:id', ...soloConsolidado, conta.obtenerPersonal);
+api.put('/contabilidad/personal/:id', ...soloConsolidado, conta.actualizarPersonal);
+api.post('/contabilidad/personal/:id/desactivar', ...soloConsolidado, conta.desactivarPersonal);
+api.post('/contabilidad/personal/:id/reactivar', ...soloConsolidado, conta.reactivarPersonal);
+api.get('/contabilidad/horas', ...soloConsolidado, conta.listarHoras);
+api.post('/contabilidad/horas', ...soloConsolidado, conta.registrarHoras);
+api.post('/contabilidad/nomina/calcular', ...soloConsolidado, conta.calcularNomina);
+api.get('/contabilidad/nomina', ...soloConsolidado, conta.listarNomina);
+api.post('/contabilidad/nomina/:id/pagar', ...soloConsolidado, conta.pagarNomina);
 api.get('/contabilidad/egresos', soloAdmin, conta.listarEgresos);
 api.post('/contabilidad/egresos', soloAdmin, conta.crearEgreso);
 api.get('/contabilidad/balance', soloAdmin, conta.balance);
 
 // Exportación a Excel (.xlsx)
-api.get('/exportaciones/contabilidad.xlsx', soloAdmin, exportaciones.contabilidad);
+api.get('/exportaciones/contabilidad.xlsx', ...soloConsolidado, exportaciones.contabilidad);
 api.get('/exportaciones/facturacion.xlsx', soloAdmin, exportaciones.facturacion);
+
+// Sedes e invitaciones de inscripción (nivel y sede blindados)
+api.get('/sedes', sedes.listar);
+api.post('/sedes', ...soloConsolidado, sedes.crear);
+api.post('/sedes/:id/activar', ...soloConsolidado, sedes.activar);
+api.post('/sedes/:id/desactivar', ...soloConsolidado, sedes.desactivar);
+api.get('/invitaciones', sedes.listarInvitaciones);
+api.post('/invitaciones', sedes.crearInvitacion);
+api.post('/invitaciones/:id/revocar', sedes.revocarInvitacion);
 
 // Notificaciones por WhatsApp (manuales, una por una)
 api.post('/notificaciones/whatsapp/preventiva/:estudianteId', notif.preventiva);
@@ -85,10 +100,10 @@ api.post('/notificaciones/whatsapp/morosidad/:estudianteId', notif.morosidad);
 api.get('/notificaciones/whatsapp', notif.historial);
 
 // Configuración de la academia
-api.get('/configuracion', soloAdmin, cfg.obtener);
-api.put('/configuracion/matricula', soloAdmin, cfg.fijarMatricula);
-api.post('/configuracion/cuentas', soloAdmin, cfg.crearCuenta);
-api.put('/configuracion/cuentas/:id', soloAdmin, cfg.actualizarCuenta);
+api.get('/configuracion', ...soloConsolidado, cfg.obtener);
+api.put('/configuracion/matricula', ...soloConsolidado, cfg.fijarMatricula);
+api.post('/configuracion/cuentas', ...soloConsolidado, cfg.crearCuenta);
+api.put('/configuracion/cuentas/:id', ...soloConsolidado, cfg.actualizarCuenta);
 
 // Fase 2 — módulos premium (candados): el catálogo alimenta los candados/tooltips del panel
 api.use('/premium', premium.catalogoRouter);

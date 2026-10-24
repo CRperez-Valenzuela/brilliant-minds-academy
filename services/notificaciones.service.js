@@ -13,10 +13,11 @@ const { plantillaPreventiva, plantillaMorosidad } = require('./plantillas.whatsa
 const ACADEMIA = process.env.ACADEMIA_NOMBRE || 'Brilliant Minds Academy';
 const VENTANA_PREVENTIVA = { min: 3, max: 5 };
 
-async function cargarEstudiante(id) {
+async function cargarEstudiante(id, sedeId = null) {
   const r = await ejecutar(
-    `SELECT v.id, v.nombres, v.apellidos, v.estado_dinamico, r.nombres AS rep_nombres, r.apellidos AS rep_apellidos, r.telefono
-     FROM vw_estudiantes_estado v JOIN representantes r ON r.id = v.representante_id WHERE v.id = $1`, [id]);
+    `SELECT v.id, v.sede_id, v.nombres, v.apellidos, v.estado_dinamico, r.nombres AS rep_nombres, r.apellidos AS rep_apellidos, r.telefono
+     FROM vw_estudiantes_estado v JOIN representantes r ON r.id = v.representante_id
+     WHERE v.id = $1 AND ($2::int IS NULL OR v.sede_id = $2::int)`, [id, sedeId]);
   if (!r.rowCount) throw e.noEncontrado('El estudiante');
   return r.rows[0];
 }
@@ -62,9 +63,9 @@ async function prepararMorosidad(est, hoy) {
  * Genera (y opcionalmente envía) una alerta MANUAL-INDIVIDUAL. La tasa BCV se consulta en ese instante
  * (`fresca: true`); si no se logra obtener, NO se genera nada (503) para no cobrar con una tasa vieja.
  */
-async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId }, { bcvSvc = bcv, waSvc = whatsapp, ahora = Date.now } = {}) {
+async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId, sedeId = null }, { bcvSvc = bcv, waSvc = whatsapp, ahora = Date.now } = {}) {
   const hoy = hoyCaracas(ahora());
-  const est = await cargarEstudiante(estudianteId);
+  const est = await cargarEstudiante(estudianteId, sedeId);
   const datos = tipo === 'PREVENTIVA' ? await prepararPreventiva(est, hoy) : await prepararMorosidad(est, hoy);
 
   const tasa = await bcvSvc.obtenerTasa({ fresca: true });
@@ -81,7 +82,7 @@ async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId }, 
     ? plantillaPreventiva({ academia: ACADEMIA, representante, estudiante, concepto: datos.concepto, montoUsd: datos.montoUsd, montoBs, tasa: tasa.tasa,
         fechaVencimiento: datos.fechaVencimiento, diasRestantes: datos.diasRestantes, enlacePortal })
     : plantillaMorosidad({ academia: ACADEMIA, representante, estudiante, montoUsd: datos.montoUsd, montoBs, tasa: tasa.tasa,
-        cuentas: await parametros.cuentasActivas(), diasMora: datos.diasMora, enlacePortal });
+        cuentas: await parametros.cuentasActivas(undefined, est.sede_id), diasMora: datos.diasMora, enlacePortal });
 
   const ins = await ejecutar(
     `INSERT INTO notificaciones_whatsapp (estudiante_id, cuota_id, tipo, telefono, mensaje, monto_usd, tasa_bcv, monto_bs, estado, creado_por)
@@ -110,13 +111,13 @@ async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId }, 
   };
 }
 
-async function historial({ estudianteId, offset, limite }) {
-  const filtro = '($1::int IS NULL OR n.estudiante_id = $1::int)';
+async function historial({ estudianteId, offset, limite, sedeId = null }) {
+  const filtro = '($1::int IS NULL OR n.estudiante_id = $1::int) AND ($2::int IS NULL OR s.sede_id = $2::int)';
   const [items, total] = await Promise.all([
     ejecutar(`SELECT n.id, n.estudiante_id, s.nombres || ' ' || s.apellidos AS estudiante, n.tipo, n.estado, n.monto_usd, n.monto_bs, n.tasa_bcv, n.error, n.creado_en
               FROM notificaciones_whatsapp n JOIN estudiantes s ON s.id = n.estudiante_id
-              WHERE ${filtro} ORDER BY n.creado_en DESC, n.id DESC LIMIT $2 OFFSET $3`, [estudianteId || null, limite, offset]),
-    ejecutar(`SELECT COUNT(*)::int AS n FROM notificaciones_whatsapp n WHERE ${filtro}`, [estudianteId || null]),
+              WHERE ${filtro} ORDER BY n.creado_en DESC, n.id DESC LIMIT $3 OFFSET $4`, [estudianteId || null, sedeId, limite, offset]),
+    ejecutar(`SELECT COUNT(*)::int AS n FROM notificaciones_whatsapp n JOIN estudiantes s ON s.id = n.estudiante_id WHERE ${filtro}`, [estudianteId || null, sedeId]),
   ]);
   return { items: items.rows, total: total.rows[0].n };
 }

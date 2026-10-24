@@ -4,6 +4,7 @@ const { guard, estadoEfectivo } = require('./guard');
 const { CATALOGO, TOOLTIP_BLOQUEADO } = require('./catalogo');
 const { activarPrueba, DIAS_PRUEBA } = require('./prueba.service');
 const { requireAuth, requireRol } = require('../../middlewares/auth');
+const { requireConsolidado } = require('../../utils/alcance');
 const { AppError } = require('../../errors/AppError');
 const { asyncHandler, ok } = require('../../utils/http');
 const { validar } = require('../../utils/validar');
@@ -35,8 +36,8 @@ catalogoRouter.get('/modulos', requireAuth, asyncHandler(async (_req, res) => {
   }));
 }));
 
-// Prueba premium de 15 días (solo admin): habilita el módulo y fija expira_prueba_en = NOW() + 15 días.
-catalogoRouter.post('/activar-prueba', requireAuth, requireRol('admin'), asyncHandler(async (req, res) => {
+// Prueba premium de 15 días (solo admin consolidado, sin sede): habilita el módulo y fija expira_prueba_en = NOW() + 15 días.
+catalogoRouter.post('/activar-prueba', requireAuth, requireRol('admin'), requireConsolidado, asyncHandler(async (req, res) => {
   const { modulo } = validar(req.body, { modulo: { tipo: 'enum', requerido: true, valores: CATALOGO.map((m) => m.codigo) } });
   const r = await activarPrueba({ codigo: modulo });
   guard.invalidar(); // el panel y los candados ven la activación de inmediato

@@ -2,7 +2,7 @@
 /**
  * Bot de envío masivo automático — módulo premium WHATSAPP_AUTOMATICO.
  *
- * Una vez al día (hora de Caracas, WHATSAPP_CRON_HORA) barre la base y despacha por la API de WhatsApp, de forma SECUENCIAL
+ * Una vez al día (hora de Caracas, WHATSAPP_CRON_HORA) barre la base (sede por sede, y al final los estudiantes sin sede) y despacha por la API de WhatsApp, de forma SECUENCIAL
  * y con una pausa de 1,5 s entre envíos (anti-baneo de Meta):
  *   1) PREVENTIVA : estudiantes Activos cuya próxima cuota Pendiente vence en 3–5 días (VENTANA_PREVENTIVA).
  *   2) MOROSIDAD  : estudiantes Morosos con cuotas vencidas en estado 'Pendiente' (las que ya tienen una referencia
@@ -61,6 +61,7 @@ const SQL_CANDIDATOS_PREVENTIVA = `
         FROM cuotas c
         JOIN vw_estudiantes_estado v ON v.id = c.estudiante_id
        WHERE c.estado = $5::text AND c.fecha_vencimiento >= $1::date AND v.estado_dinamico = $6::text
+         AND (($9::int IS NOT NULL AND v.sede_id = $9::int) OR ($9::int IS NULL AND v.sede_id IS NULL))
        ORDER BY c.estudiante_id, c.fecha_vencimiento, c.id
     ) p
    WHERE p.fecha_vencimiento BETWEEN ($1::date + $2::int) AND ($1::date + $3::int)
@@ -78,6 +79,7 @@ const SQL_CANDIDATOS_MOROSIDAD = `
     FROM vw_estudiantes_estado v
     JOIN cuotas c ON c.estudiante_id = v.id AND c.estado = $4::text AND c.fecha_vencimiento < $1::date
    WHERE v.estado_dinamico = $5::text
+     AND (($8::int IS NOT NULL AND v.sede_id = $8::int) OR ($8::int IS NULL AND v.sede_id IS NULL))
      AND NOT EXISTS (SELECT 1 FROM notificaciones_whatsapp n
                       WHERE n.estudiante_id = v.id AND n.tipo = $6::text AND n.estado = $7::text
                         AND n.creado_en > NOW() - ($2::int * INTERVAL '1 day'))
@@ -85,13 +87,17 @@ const SQL_CANDIDATOS_MOROSIDAD = `
    ORDER BY MIN(c.fecha_vencimiento), v.id
    LIMIT $3::int`;
 
-async function candidatosPreventiva({ hoy, ventana, limite, db = { ejecutar } }) {
-  const r = await db.ejecutar(SQL_CANDIDATOS_PREVENTIVA, [aFechaSql(hoy), ventana.min, ventana.max, limite, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA']);
+/**
+ * `sedeId` entero → solo los estudiantes de esa sede; `null` → solo los que NO tienen sede asignada (datos anteriores a la
+ * migración multi-sede). Cada sede se procesa por separado: ver ejecutarCiclo().
+ */
+async function candidatosPreventiva({ hoy, ventana, limite, sedeId = null, db = { ejecutar } }) {
+  const r = await db.ejecutar(SQL_CANDIDATOS_PREVENTIVA, [aFechaSql(hoy), ventana.min, ventana.max, limite, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', sedeId]);
   return r.rows;
 }
 
-async function candidatosMorosidad({ hoy, cadaDias, limite, db = { ejecutar } }) {
-  const r = await db.ejecutar(SQL_CANDIDATOS_MOROSIDAD, [aFechaSql(hoy), cadaDias, limite, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA']);
+async function candidatosMorosidad({ hoy, cadaDias, limite, sedeId = null, db = { ejecutar } }) {
+  const r = await db.ejecutar(SQL_CANDIDATOS_MOROSIDAD, [aFechaSql(hoy), cadaDias, limite, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', sedeId]);
   return r.rows;
 }
 
@@ -204,6 +210,7 @@ function crearCronWhatsapp({
       estado: 'COMPLETADO', motivo: null, abortado: null, fecha: hoyCaracas(inicio),
       preventiva: { candidatos: 0, enviadas: 0, fallidas: 0, omitidas: 0 },
       morosidad: { candidatos: 0, enviadas: 0, fallidas: 0, omitidas: 0 },
+      por_sede: [],
       duracion_ms: 0,
     };
 
@@ -226,17 +233,25 @@ function crearCronWhatsapp({
     try {
       const hoy = resumen.fecha;
       const limite = config.maxEnviosPorCiclo;
-      const preventivas = await candidatosPreventiva({ hoy, ventana: notificaciones.VENTANA_PREVENTIVA, limite, db });
-      const morosos = await candidatosMorosidad({ hoy, cadaDias: config.morosidadCadaDias, limite, db });
-      resumen.preventiva.candidatos = preventivas.length;
-      resumen.morosidad.candidatos = morosos.length;
-      log(`Ciclo ${hoy}: ${preventivas.length} preventivas + ${morosos.length} por morosidad (tope ${limite}).`);
-
-      const lista = [
-        ...preventivas.map((c) => ({ tipo: 'PREVENTIVA', estudiante_id: c.estudiante_id })),
-        ...morosos.map((c) => ({ tipo: 'MOROSIDAD', estudiante_id: c.estudiante_id })),
-      ];
-      await procesar(lista, resumen, { intentos: 0, llamoAMeta: false, fallosSeguidos: 0, titular });
+      // Multi-sede: cada sede activa se despacha por separado (Preventiva y luego Morosidad) y al final los estudiantes sin
+      // sede. Los contadores del resumen son la suma de todos los ámbitos; el detalle va en `por_sede`.
+      const sedes = (await db.ejecutar('SELECT id, nombre FROM sedes WHERE activa = TRUE ORDER BY id', [])).rows;
+      const ambitos = [...sedes.map((x) => ({ sedeId: x.id, nombre: x.nombre })), { sedeId: null, nombre: null }];
+      const estado = { intentos: 0, llamoAMeta: false, fallosSeguidos: 0, titular };
+      for (const ambito of ambitos) {
+        if (resumen.abortado) break;
+        const preventivas = await candidatosPreventiva({ hoy, ventana: notificaciones.VENTANA_PREVENTIVA, limite, sedeId: ambito.sedeId, db });
+        const morosos = await candidatosMorosidad({ hoy, cadaDias: config.morosidadCadaDias, limite, sedeId: ambito.sedeId, db });
+        resumen.preventiva.candidatos += preventivas.length;
+        resumen.morosidad.candidatos += morosos.length;
+        resumen.por_sede.push({ sede_id: ambito.sedeId, sede: ambito.nombre, preventiva: preventivas.length, morosidad: morosos.length });
+        log(`Ciclo ${hoy} · ${ambito.nombre ?? 'sin sede'}: ${preventivas.length} preventivas + ${morosos.length} por morosidad (tope ${limite}).`);
+        const lista = [
+          ...preventivas.map((c) => ({ tipo: 'PREVENTIVA', estudiante_id: c.estudiante_id })),
+          ...morosos.map((c) => ({ tipo: 'MOROSIDAD', estudiante_id: c.estudiante_id })),
+        ];
+        await procesar(lista, resumen, estado);
+      }
       if (resumen.abortado) Object.assign(resumen, { estado: 'ABORTADO' });
     } finally {
       await liberarLease(db, titular).catch((e) => logError('No se pudo liberar el arrendamiento (caducará solo):', e.message));

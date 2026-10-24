@@ -49,14 +49,14 @@ for (const m of sqlTodo.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?
   unicos[m[1]] = uq;
 }
 // Columnas añadidas por migraciones posteriores (ALTER TABLE … ADD COLUMN IF NOT EXISTS).
-for (const m of sinComentariosSql(sqlTodo).matchAll(new RegExp(`ALTER TABLE (\\w+) ADD COLUMN IF NOT EXISTS ([a-z_0-9]+)\\s+(?:${TIPOS})\\b`, 'gi'))) {
+for (const m of sinComentariosSql(sqlTodo).matchAll(new RegExp(`ALTER TABLE (\\w+)\\s+ADD COLUMN IF NOT EXISTS ([a-z_0-9]+)\\s+(?:${TIPOS})\\b`, 'gi'))) {
   assert.ok(tablas[m[1]], `ALTER TABLE sobre una tabla desconocida: ${m[1]}`);
   tablas[m[1]].add(m[2]);
 }
 for (const m of sqlTodo.matchAll(/CREATE UNIQUE INDEX IF NOT EXISTS \w+ ON (\w+)\s*\(([^)]*)\)/g)) {
   unicos[m[1]].add(m[2].split(',').map((x) => x.trim()).join(','));
 }
-const vistaTexto = /CREATE OR REPLACE VIEW (\w+)[\s\S]*?\bAS\s+SELECT([\s\S]*?);\s*$/m.exec(sqlTodo);
+const vistaTexto = [...sinComentariosSql(sqlTodo).matchAll(/CREATE OR REPLACE VIEW (\w+)[\s\S]*?\bAS\s+SELECT([\s\S]*?);\s*$/gm)].pop(); // la última definición manda (005 añade sede_id)
 const vista = { nombre: vistaTexto[1], cols: new Set([...vistaTexto[2].matchAll(/\bAS\s+(\w+)\s*[,\n]/g)].map((m) => m[1])) };
 for (const m of vistaTexto[2].matchAll(/\be\.(\w+)\s*,/g)) vista.cols.add(m[1]);
 vista.cols.add('proximo_vencimiento');
@@ -65,11 +65,11 @@ const objetos = new Set([...Object.keys(tablas), vista.nombre]);
 for (const [, t] of codigo) for (const m of t.matchAll(/(?:\bWITH|,)\s+(\w+)\s+AS\s*\(\s*SELECT/g)) objetos.add(m[1]);
 
 test('el esquema define las tablas del Core Base', () => {
-  for (const t of ['usuarios_admin', 'representantes', 'estudiantes', 'documentos_estudiante', 'cuotas', 'pagos_referencias', 'tasas_bcv', 'cuentas_pago',
+  for (const t of ['sedes', 'invitaciones_inscripcion', 'usuarios_admin', 'representantes', 'estudiantes', 'documentos_estudiante', 'cuotas', 'pagos_referencias', 'tasas_bcv', 'cuentas_pago',
     'personal', 'horas_clase', 'nomina_pagos', 'egresos', 'notificaciones_whatsapp', 'portal_tokens', 'modulos_premium', 'parametros', 'schema_migrations']) {
     assert.ok(tablas[t] && tablas[t].size >= 2, `falta la tabla ${t} (o no se pudo leer)`);
   }
-  assert.ok(vista.cols.has('estado_dinamico') && vista.cols.has('estatus_pago') && vista.cols.has('deuda_vencida_usd'));
+  assert.ok(vista.cols.has('estado_dinamico') && vista.cols.has('estatus_pago') && vista.cols.has('deuda_vencida_usd') && vista.cols.has('sede_id'));
 });
 
 test('todo objeto referenciado en FROM/JOIN/INTO/UPDATE existe en las migraciones', () => {
@@ -178,9 +178,16 @@ test('PostgreSQL: DDL idempotente, paréntesis balanceados y nombres de índice/
   assert.ok(idx.includes('ux_pagos_referencia_activa') && idx.includes('ux_estudiantes_identidad') && idx.includes('ux_egresos_nomina'));
 });
 
-test('Supabase: RLS activado en las 17 tablas del Core Base, vista con security_invoker y sin tipos de dinero flotantes', () => {
+test('Supabase: RLS activado en las 19 tablas (004 para el Core Base; 005/006 para las nuevas), vista con security_invoker y sin dinero flotante', () => {
   const seg = migraciones.find(([f]) => f.startsWith('004'))[1];
-  for (const t of Object.keys(tablas)) assert.ok(new RegExp(`'${t}'`).test(seg), `004 no activa RLS en ${t}`);
+  const nuevas = new Set(['sedes', 'invitaciones_inscripcion']);
+  for (const t of Object.keys(tablas)) {
+    if (nuevas.has(t)) {
+      const dueña = migraciones.find(([, txt]) => new RegExp(`CREATE TABLE IF NOT EXISTS ${t}\\b`).test(txt));
+      assert.match(dueña[1], new RegExp(`ALTER TABLE ${t} ENABLE ROW LEVEL SECURITY`), `${dueña[0]} no activa RLS en ${t}`);
+      assert.match(dueña[1], new RegExp(`REVOKE ALL ON TABLE ${t} FROM`), `${dueña[0]} no revoca anon/authenticated en ${t}`);
+    } else assert.ok(new RegExp(`'${t}'`).test(seg), `004 no activa RLS en ${t}`);
+  }
   assert.match(sqlTodo, /VIEW vw_estudiantes_estado WITH \(security_invoker = true\)/);
   assert.ok(!/\b(FLOAT|REAL|DOUBLE PRECISION|MONEY)\b/i.test(sinComentariosSql(sqlTodo)), 'dinero/tasas deben ser NUMERIC');
   assert.ok(/AT TIME ZONE 'America\/Caracas'/.test(sqlTodo), 'la vista debe calcular "hoy" en hora de Caracas');
@@ -208,4 +215,47 @@ test('el código usa el contrato { rows, rowCount } y params como arreglo (nada 
     if (/ejecutar\([^)]*,\s*\{[^}]*\[\s*sql\./.test(t)) malos.push(`${f}: params como objeto`);
   }
   assert.deepEqual(malos, []);
+});
+
+// ── Multi-sede: cableado del alcance (estático) ─────────────────────────────────────────────────
+test('multi-sede: todo servicio segmentado por sede se invoca desde los controladores con alcanceDe(req.usuario) (fail-closed)', () => {
+  const sinAlcance = [];
+  let revisadas = 0;
+  for (const f of ['crm', 'facturacion', 'notificaciones', 'exportaciones', 'contabilidad', 'sedes']) {
+    const t = sinComentariosJs(leer(`controllers/${f}.controller.js`));
+    assert.match(t, /require\('\.\.\/utils\/alcance'\)/, `${f}.controller no importa utils/alcance`);
+    for (const m of t.matchAll(/\b(crm|pagos|facturacion|notificaciones|invitaciones|conta)\.(resumen|listar|detalle|retirar|reactivar|tablero|auditoria|bandeja|aprobar|rechazar|listarCuotas|crearCuota|generarMensualidades|generarAlerta|historial|listarEgresos|crearEgreso|balance|revocar)\(([^;]*)\)/g)) {
+      revisadas += 1;
+      if (!/alcanceDe\(req\.usuario\)/.test(m[0])) sinAlcance.push(`${f}.controller: ${m[1]}.${m[2]}`);
+    }
+  }
+  assert.ok(revisadas >= 18, `se esperaban >= 18 llamadas revisadas (hubo ${revisadas})`);
+  assert.deepEqual(sinAlcance, []);
+});
+
+test('multi-sede: datos sin sede (personal, horas, nómina, configuración, sedes) y el Excel contable exigen acceso consolidado; la ruta pública de invitación existe', () => {
+  const rutas = sinComentariosJs(leer('routes/index.js'));
+  const sinCandado = [];
+  for (const m of rutas.matchAll(/api\.(get|post|put)\('(\/(?:contabilidad\/(?:personal|horas|nomina)|exportaciones\/contabilidad\.xlsx|configuracion|sedes))[^']*',([^;]*)\);/g)) {
+    if (m[2] === '/sedes' && m[1] === 'get') continue; // listar sedes: cada usuario ve las suyas (alcance)
+    if (!/soloConsolidado/.test(m[3])) sinCandado.push(`${m[1].toUpperCase()} ${m[0].slice(m[0].indexOf("'"), m[0].indexOf("',") + 1)}`);
+  }
+  assert.deepEqual(sinCandado, []);
+  assert.match(rutas, /api\.get\('\/public\/admisiones\/invitacion\/:token', crearLimitador\(/);
+  assert.match(rutas, /api\.post\('\/premium|catalogoRouter/, 'el catálogo premium sigue montado');
+  const prem = leer('modules/premium/premium.routes.js');
+  assert.match(prem, /catalogoRouter\.post\('\/activar-prueba', requireAuth, requireRol\('admin'\), requireConsolidado/);
+});
+
+test('multi-sede: toda consulta de lectura/escritura sobre tablas segmentadas usa el predicado ($n::int IS NULL OR …sede_id = $n::int) o hereda por trigger', () => {
+  const t = (f) => sinComentariosJs(leer(f));
+  const predicado = /\(\$\d+::int IS NULL OR [a-z]*\.?(?:sede_)?id = \$\d+::int\)/; // sede_id en tablas segmentadas; id en la propia tabla sedes
+  for (const f of ['services/crm.service.js', 'services/facturacion.service.js', 'services/pagos.service.js', 'services/contabilidad.service.js',
+    'services/notificaciones.service.js', 'services/invitaciones.service.js', 'services/sedes.service.js', 'services/exportacion.service.js']) {
+    assert.match(t(f), predicado, `${f} no aplica el predicado de sede`);
+  }
+  // los INSERT de filas segmentadas no pueden escribir una sede distinta de la que da el trigger/servidor
+  assert.match(t('services/admisiones.service.js'), /emergencia_telefono, sede_id\)/);
+  assert.match(sqlTodo, /CREATE TRIGGER trg_cuotas_heredar_sede BEFORE INSERT ON cuotas/);
+  assert.match(sqlTodo, /CREATE TRIGGER trg_pagos_heredar_sede BEFORE INSERT ON pagos_referencias/);
 });

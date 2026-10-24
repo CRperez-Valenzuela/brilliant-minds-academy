@@ -36,8 +36,8 @@ async function declararReferencia({ estudianteId, cuotaId, referencia, metodo, t
 }
 
 /** Bandeja de auditoría: cronológica (la más antigua primero) para validar rápido contra las cuentas. */
-async function bandeja({ estado = 'Por Validar', offset, limite }) {
-  const filtro = '($1::text IS NULL OR p.estado = $1::text)';
+async function bandeja({ estado = 'Por Validar', offset, limite, sedeId = null }) {
+  const filtro = '($1::text IS NULL OR p.estado = $1::text) AND ($2::int IS NULL OR p.sede_id = $2::int)';
   const [items, total] = await Promise.all([
     ejecutar(
       `SELECT p.id, p.referencia, p.metodo_pago, p.monto_usd, p.tasa_bcv, p.monto_bs, p.estado, p.declarado_en, p.revisado_en, p.nota_revision,
@@ -50,18 +50,19 @@ async function bandeja({ estado = 'Por Validar', offset, limite }) {
        JOIN cuotas c ON c.id = p.cuota_id
        WHERE ${filtro}
        ORDER BY p.declarado_en ASC, p.id ASC
-       LIMIT $2 OFFSET $3`,
-      [estado || null, limite, offset]),
-    ejecutar(`SELECT COUNT(*)::int AS n FROM pagos_referencias p WHERE ${filtro}`, [estado || null]),
+       LIMIT $3 OFFSET $4`,
+      [estado || null, sedeId, limite, offset]),
+    ejecutar(`SELECT COUNT(*)::int AS n FROM pagos_referencias p WHERE ${filtro}`, [estado || null, sedeId]),
   ]);
   return { items: items.rows, total: total.rows[0].n };
 }
 
 /** Bloquea la fila del pago (FOR UPDATE) mientras dura la transacción: dos auditores no pueden procesar el mismo pago a la vez. */
-async function cargarPendiente(tx, pagoId) {
+async function cargarPendiente(tx, pagoId, sedeId = null) {
+  // Un pago de otra sede se comporta como inexistente (404): no se revela que existe.
   const r = await ejecutar(
-    'SELECT id, estado, cuota_id, estudiante_id FROM pagos_referencias WHERE id = $1 FOR UPDATE',
-    [pagoId], tx);
+    'SELECT id, estado, cuota_id, estudiante_id FROM pagos_referencias WHERE id = $1 AND ($2::int IS NULL OR sede_id = $2::int) FOR UPDATE',
+    [pagoId, sedeId], tx);
   const p = r.rows[0];
   if (!p) throw e.noEncontrado('El pago');
   if (p.estado !== 'Por Validar') throw e.conflicto('PAGO_YA_PROCESADO', `Este pago ya fue ${p.estado.toLowerCase()}.`);
@@ -73,9 +74,9 @@ async function cargarPendiente(tx, pagoId) {
  * "Pendiente por Validación Administrativa" a "Activo". Devuelve el estatus de pago recalculado en tiempo real
  * ("Al día" solo si no quedan otras cuotas vencidas).
  */
-async function aprobar({ pagoId, usuarioId, nota }) {
+async function aprobar({ pagoId, usuarioId, nota, sedeId = null }) {
   return conTransaccion(async (tx) => {
-    const p = await cargarPendiente(tx, pagoId);
+    const p = await cargarPendiente(tx, pagoId, sedeId);
     await ejecutar(
       `UPDATE pagos_referencias SET estado = 'Aprobada', revisado_por = $2, revisado_en = NOW(), nota_revision = $3 WHERE id = $1`,
       [pagoId, usuarioId, nota || null], tx);
@@ -93,9 +94,9 @@ async function aprobar({ pagoId, usuarioId, nota }) {
 }
 
 /** Rechaza la referencia (motivo obligatorio) y devuelve la cuota a "Pendiente" para que se pueda declarar otra. */
-async function rechazar({ pagoId, usuarioId, nota }) {
+async function rechazar({ pagoId, usuarioId, nota, sedeId = null }) {
   return conTransaccion(async (tx) => {
-    const p = await cargarPendiente(tx, pagoId);
+    const p = await cargarPendiente(tx, pagoId, sedeId);
     await ejecutar(
       `UPDATE pagos_referencias SET estado = 'Rechazada', revisado_por = $2, revisado_en = NOW(), nota_revision = $3 WHERE id = $1`,
       [pagoId, usuarioId, nota], tx);

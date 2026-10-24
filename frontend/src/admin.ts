@@ -26,6 +26,7 @@ import type {
   ReferenciaAuditoria,
   RespuestaLogin,
   RespuestaMe,
+  RespuestaPrueba,
   ResultadoRevision,
   TableroFacturacion,
   TipoAlertaWhatsapp,
@@ -823,14 +824,53 @@ function vistaPremium(ctx: Contexto, codigo: string): void {
     return;
   }
   if (m.bloqueado) {
-    montar(ctx.zona, seccionBloqueada(m));
+    // Prueba gratuita de 15 días: solo el acceso consolidado (admin sin sede) puede abrirla, una vez por módulo.
+    const ofrecerPrueba = m.prueba_utilizada === false && esConsolidado();
+    montar(
+      ctx.zona,
+      html`${seccionBloqueada(m)}${ofrecerPrueba
+        ? html`<div class="mt-6">${aviso('info', html`<p>Prueba este módulo sin costo durante 15 días. Al vencer se bloquea solo.</p>
+            <button type="button" id="activar-prueba" class="${boton(CLS.btnPrimario, 'mt-3')}">${icono('check', 'h-4 w-4')}<span>Activar prueba gratuita de 15 días</span></button>`, 'Prueba gratuita disponible')}</div>`
+        : null}`,
+    );
+    const activar = buscar('#activar-prueba', HTMLButtonElement);
+    activar?.addEventListener('click', () => {
+      void conBotonOcupado(activar, () => activarPrueba(m)).catch((e: unknown) => notificar('bad', mensajeDeError(e)));
+    });
     return;
   }
+  const hasta = m.en_prueba === true && m.expira_prueba_en ? m.expira_prueba_en : null;
   montar(
     ctx.zona,
     html`${encabezado(m.nombre, m.descripcion)}
-    <div class="${CLS.tarjeta} p-6">${aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}</div>`,
+    <div class="${CLS.tarjeta} flex flex-col gap-4 p-6">
+      ${hasta ? aviso('warn', `Prueba gratuita vigente hasta el ${fechaHora(hasta)}. Después de esa fecha el módulo se bloquea automáticamente.`, 'Estás en periodo de prueba') : null}
+      ${aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}
+    </div>`,
   );
+}
+
+/** Admin sin sede asignada (SuperAdmin): único perfil que contrata/prueba módulos de la academia. */
+const esConsolidado = (): boolean => estado.usuario?.rol === 'admin' && (estado.usuario.sede_id ?? null) === null;
+
+/** Redibuja SOLO el ítem del menú de un módulo (quita/pone el candado) sin reconstruir el panel. */
+function refrescarItemPremium(m: ModuloPremium): void {
+  const actual = buscar(`[data-nav="premium:${m.codigo}"]`, HTMLElement);
+  if (!actual) return;
+  const nuevo = document.createElement('div');
+  montar(nuevo, itemNav({ id: `premium:${m.codigo}`, titulo: m.nombre, icono: ICONO_MODULO[m.codigo] ?? 'chat', tooltip: m.bloqueado ? `${m.nombre} · ${m.tooltip ?? AVISO_PREMIUM}` : m.nombre, bloqueado: m.bloqueado }));
+  const item = nuevo.firstElementChild;
+  if (item) actual.replaceWith(item);
+}
+
+/** POST /api/premium/activar-prueba → vuelve a leer el catálogo (el servidor es la fuente de verdad) y abre el módulo. */
+async function activarPrueba(m: ModuloPremium): Promise<void> {
+  await bma.post<RespuestaPrueba>('/premium/activar-prueba', { modulo: m.codigo });
+  const modulos = await bma.get<readonly ModuloPremium[]>('/premium/modulos');
+  actualizar({ modulos });
+  for (const x of modulos) refrescarItemPremium(x);
+  notificar('ok', 'Prueba gratuita de 15 días activada.');
+  await navegar(`premium:${m.codigo}`);
 }
 
 /** Si el servidor responde 403 MODULO_PREMIUM_DESHABILITADO para cualquier sección, se muestra el mismo candado. */

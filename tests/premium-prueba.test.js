@@ -159,7 +159,7 @@ test('POST /premium/activar-prueba: solo admin, valida el módulo, responde 201 
 
   const ruta = registros.find((r) => r.m === 'POST' && r.path === '/activar-prueba');
   assert.ok(ruta, 'la ruta POST /activar-prueba existe');
-  assert.equal(ruta.h.length, 3, 'requireAuth → requireRol(admin) → handler');
+  assert.equal(ruta.h.length, 4, 'requireAuth → requireRol(admin) → requireConsolidado (sin sede) → handler');
 
   const correr = async (rol, cuerpo) => {
     const req = { get: (h) => (h.toLowerCase() === 'authorization' ? `Bearer ${JSON.stringify({ sub: 7, rol, nombre: 'U' })}` : ''), body: cuerpo };

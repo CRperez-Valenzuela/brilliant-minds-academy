@@ -63,13 +63,13 @@ const inscripcion = (ov = {}) => ({
 });
 
 /** Siembra directa (sin pasar por los servicios) un representante + estudiante + cuota. */
-async function sembrar({ estatus = 'Activo', vence = sumarDias(svc.hoy(), 10), monto = 25, estadoCuota = 'Pendiente', nombres = 'Sofía', apellidos = 'Gómez' } = {}) {
+async function sembrar({ estatus = 'Activo', vence = sumarDias(svc.hoy(), 10), monto = 25, estadoCuota = 'Pendiente', nombres = 'Sofía', apellidos = 'Gómez', sedeId = null } = {}) {
   seq += 1;
   const rep = await uno(
     `INSERT INTO representantes (nombres, apellidos, cedula, telefono) VALUES ('Rep', 'Siembra', $1, '584120000000') RETURNING id`, [`V-S${seq}${Date.now() % 100000}`]);
   const est = await uno(
-    `INSERT INTO estudiantes (representante_id, nombres, apellidos, fecha_nacimiento, grado_solicitado, estatus_academico)
-     VALUES ($1, $2, $3, '2014-05-06', '4to grado', $4) RETURNING id`, [rep.id, nombres, apellidos, estatus]);
+    `INSERT INTO estudiantes (representante_id, nombres, apellidos, fecha_nacimiento, grado_solicitado, estatus_academico, sede_id)
+     VALUES ($1, $2, $3, '2014-05-06', '4to grado', $4, $5) RETURNING id`, [rep.id, nombres, apellidos, estatus, sedeId]);
   const cuota = await uno(
     `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento, estado) VALUES ($1, 'MENSUALIDAD', $2, $3, $4, $5) RETURNING id`,
     [est.id, `Mensualidad S${seq}`, monto, vence, estadoCuota]);
@@ -110,6 +110,9 @@ test.before(async () => {
     parametros: require('../services/parametros.service'),
     exportacion: require('../services/exportacion.service'),
     guard: require('../modules/premium/guard'),
+    sedes: require('../services/sedes.service'),
+    invitaciones: require('../services/invitaciones.service'),
+    alcance: require('../utils/alcance'),
     bcv: require('../services/bcv.service'),
     normalizar: require('../middlewares/errorHandler').normalizar,
   };
@@ -125,23 +128,23 @@ test.after(async () => {
 });
 
 // ── Migraciones y scripts ───────────────────────────────────────────────────────────────────────
-t('migrate.js: aplica las 5 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
+t('migrate.js: aplica las 7 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
   const primera = hijo('scripts/migrate.js');
   for (const f of fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql'))) assert.match(primera, new RegExp(`Aplicada ${f}`));
   const segunda = hijo('scripts/migrate.js');
   assert.ok(!/Aplicada/.test(segunda), segunda);
-  assert.equal((segunda.match(/ya aplicada/g) || []).length, 5);
+  assert.equal((segunda.match(/ya aplicada/g) || []).length, 7);
   assert.match(segunda, /Migraciones al día/);
 });
 
-t(`el esquema real contiene las 17 tablas + la vista, con RLS activo y la vista con security_invoker (driver: ${origenPg})`, async () => {
+t(`el esquema real contiene las 19 tablas + la vista, con RLS activo y la vista con security_invoker (driver: ${origenPg})`, async () => {
   const tablas = await filas(`SELECT relname, relrowsecurity FROM pg_class WHERE relkind = 'r' AND relnamespace = 'public'::regnamespace ORDER BY 1`);
-  assert.equal(tablas.length, 17);
+  assert.equal(tablas.length, 19); // 17 del Core Base + sedes + invitaciones_inscripcion
   assert.ok(tablas.every((x) => x.relrowsecurity), 'todas las tablas deben tener RLS');
   const v = await uno(`SELECT array_to_string(reloptions, ',') AS opciones FROM pg_class WHERE relname = 'vw_estudiantes_estado'`);
   assert.equal(v.opciones, 'security_invoker=true');
   const reg = await filas('SELECT nombre FROM schema_migrations ORDER BY nombre');
-  assert.equal(reg.length, 5);
+  assert.equal(reg.length, 7);
 });
 
 t('crear-admin.js: upsert por correo (ON CONFLICT), normaliza a minúsculas, reactiva y no duplica', async () => {
@@ -629,13 +632,226 @@ t('premium: 5 módulos sembrados y deshabilitados; el guard bloquea con 403 y se
   await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE WHERE codigo = 'BANCAMIGA'`);
 });
 
+// ── Multi-sede ──────────────────────────────────────────────────────────────────────────────────
+let sedeA; let sedeB;
+const usuarioAdminId = async () => (await uno('SELECT id FROM usuarios_admin ORDER BY id LIMIT 1')).id;
+
+t('multi-sede: alcanceDe es FAIL-CLOSED (secretaria sin sede ≠ global) y solo el admin sin sede es consolidado', () => {
+  const { alcanceDe } = svc.alcance;
+  assert.equal(alcanceDe({ rol: 'admin', sede_id: null }), null);
+  assert.equal(alcanceDe({ rol: 'admin', sede_id: 3 }), 3);
+  assert.equal(alcanceDe({ rol: 'secretaria', sede_id: 7 }), 7);
+  for (const u of [{ rol: 'secretaria', sede_id: null }, { rol: 'secretaria' }]) {
+    assert.throws(() => alcanceDe(u), (e) => e.status === 403 && e.codigo === 'SEDE_NO_ASIGNADA');
+  }
+  assert.throws(() => alcanceDe({ rol: 'admin', sede_id: 'x' }), (e) => e.status === 403);
+  assert.throws(() => alcanceDe(undefined), (e) => e.status === 401);
+  const out = {};
+  svc.alcance.requireConsolidado({ usuario: { rol: 'admin', sede_id: 2 } }, {}, (e) => { out.sede = e; });
+  svc.alcance.requireConsolidado({ usuario: { rol: 'admin', sede_id: null } }, {}, (e) => { out.global = e; });
+  assert.equal(out.sede.status, 403);
+  assert.equal(out.global, undefined);
+});
+
+t('multi-sede: sedes (nombre único → 409) y el trigger hace que cuotas y pagos HEREDEN la sede del estudiante', async () => {
+  sedeA = (await svc.sedes.crear({ nombre: 'Sede Norte' })).id;
+  sedeB = (await svc.sedes.crear({ nombre: 'Sede Sur' })).id;
+  await assert.rejects(svc.sedes.crear({ nombre: 'Sede Norte' }), (e) => e.status === 409 && e.codigo === 'SEDE_DUPLICADA');
+  assert.deepEqual((await svc.sedes.listar(sedeA)).map((s) => s.nombre), ['Sede Norte']);
+  assert.ok((await svc.sedes.listar(null)).length >= 2);
+
+  const a = await sembrar({ sedeId: sedeA, nombres: 'AlumnoA' });
+  assert.equal((await uno('SELECT sede_id FROM cuotas WHERE id = $1', [a.cuotaId])).sede_id, sedeA);
+  const p = await svc.pagos.declararReferencia({ estudianteId: a.estId, cuotaId: a.cuotaId, referencia: 'HER-1', metodo: 'ZELLE', tasa: 36.5 });
+  assert.equal((await uno('SELECT sede_id FROM pagos_referencias WHERE id = $1', [p.pagoId])).sede_id, sedeA);
+  // una sede explícita no la pisa el trigger
+  const e2 = await uno(`INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento, sede_id) VALUES ($1, 'OTRO', 'Explícita', 5, $2, $3) RETURNING sede_id`, [a.estId, svc.hoy(), sedeB]);
+  assert.equal(e2.sede_id, sedeB);
+  // estudiante sin sede → cuota sin sede (dato "global")
+  const g = await sembrar({ nombres: 'SinSede' });
+  assert.equal((await uno('SELECT sede_id FROM cuotas WHERE id = $1', [g.cuotaId])).sede_id, null);
+});
+
+t('multi-sede: CRM, tablero, cuotas y mensualidades se filtran por sede; sede NULL (SuperAdmin) ve todo; fuera de sede = 404', async () => {
+  const hoy = svc.hoy();
+  const a = await sembrar({ sedeId: sedeA, nombres: 'IsoA', apellidos: 'Norte', vence: sumarDias(hoy, -5) });
+  const b = await sembrar({ sedeId: sedeB, nombres: 'IsoB', apellidos: 'Sur', vence: sumarDias(hoy, -5) });
+  const g = await sembrar({ nombres: 'IsoG', apellidos: 'Global', vence: sumarDias(hoy, -5) });
+  const c = await sembrar({ sedeId: sedeB, nombres: 'IsoC', apellidos: 'Sur' });
+
+  const nombresDe = async (sedeId) => (await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId })).items.map((x) => x.nombres).sort();
+  assert.deepEqual(await nombresDe(sedeA), ['IsoA']);
+  assert.deepEqual(await nombresDe(sedeB), ['IsoB', 'IsoC']);
+  assert.deepEqual(await nombresDe(null), ['IsoA', 'IsoB', 'IsoC', 'IsoG']);
+  assert.equal((await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId: sedeA })).total, 1, 'el conteo respeta la sede');
+
+  assert.equal((await svc.crm.resumen(sedeA)).morosos, 1);
+  assert.equal((await svc.crm.resumen(sedeB)).morosos, 1);
+  assert.ok((await svc.crm.resumen(null)).morosos >= 3);
+
+  await assert.rejects(svc.crm.detalle(b.estId, sedeA), (e) => e.status === 404);
+  await assert.rejects(svc.crm.detalle(g.estId, sedeA), (e) => e.status === 404, 'un dato sin sede NO lo ve un usuario de sede');
+  assert.equal((await svc.crm.detalle(b.estId, sedeB)).nombres, 'IsoB');
+  assert.equal((await svc.crm.detalle(g.estId, null)).nombres, 'IsoG');
+
+  await assert.rejects(svc.crm.retirar({ id: c.estId, sedeId: sedeA }), (e) => e.status === 404);
+  assert.equal((await uno('SELECT estatus_academico FROM estudiantes WHERE id = $1', [c.estId])).estatus_academico, 'Activo');
+  assert.equal((await svc.crm.retirar({ id: c.estId, sedeId: sedeB })).estatus_academico, 'Fuera de la Academia');
+  await assert.rejects(svc.crm.reactivar({ id: c.estId, sedeId: sedeA }), (e) => e.status === 409);
+  assert.equal((await svc.crm.reactivar({ id: c.estId, sedeId: sedeB })).estatus_academico, 'Activo');
+
+  const periodo = svc.periodo();
+  assert.equal((await svc.facturacion.tablero(periodo, sedeA)).saldos_vencidos.cantidad, 1);
+  assert.equal((await svc.facturacion.tablero(periodo, sedeB)).saldos_vencidos.cantidad, 1);
+  assert.ok((await svc.facturacion.tablero(periodo, null)).saldos_vencidos.cantidad >= 3);
+
+  const cuotasA = await svc.facturacion.listarCuotas({ sedeId: sedeA, offset: 0, limite: 100 });
+  assert.ok(cuotasA.items.length >= 2 && cuotasA.items.every((x) => ['AlumnoA', 'IsoA'].includes(x.estudiante.split(' ')[0])));
+
+  await assert.rejects(svc.facturacion.crearCuota({ estudiante_id: b.estId, tipo: 'OTRO', concepto: 'x', monto_usd: 5, fecha_vencimiento: hoy }, sedeA), (e) => e.status === 404);
+  const nueva = await svc.facturacion.crearCuota({ estudiante_id: b.estId, tipo: 'OTRO', concepto: 'Cuota B', monto_usd: 5, fecha_vencimiento: hoy }, sedeB);
+  assert.equal((await uno('SELECT sede_id FROM cuotas WHERE id = $1', [nueva.id])).sede_id, sedeB);
+
+  const activosA = (await uno(`SELECT COUNT(*)::int AS n FROM estudiantes WHERE sede_id = $1 AND estatus_academico = 'Activo'`, [sedeA])).n;
+  const gen = await svc.facturacion.generarMensualidades({ concepto: 'Mens-ISO', monto_usd: 10, fecha_vencimiento: hoy }, sedeA);
+  assert.equal(gen.creadas, activosA);
+  assert.deepEqual((await filas(`SELECT DISTINCT sede_id FROM cuotas WHERE concepto = 'Mens-ISO'`)), [{ sede_id: sedeA }]);
+
+  // notificaciones: un estudiante de otra sede es inexistente (404, antes de consultar tasa BCV ni enviar nada)
+  await assert.rejects(svc.notif.generarAlerta({ tipo: 'MOROSIDAD', estudianteId: b.estId, sedeId: sedeA }, { bcvSvc: bcvFalso, waSvc: { enviarTexto: async () => { throw new Error('no debía enviar'); } } }), (e) => e.status === 404);
+});
+
+t('multi-sede: auditoría de pagos (bandeja, aprobar, rechazar) y egresos/balance respetan la sede', async () => {
+  const usuarioId = await usuarioAdminId();
+  const b = await sembrar({ sedeId: sedeB, nombres: 'PagoB', apellidos: 'Sur' });
+  const pago = await svc.pagos.declararReferencia({ estudianteId: b.estId, cuotaId: b.cuotaId, referencia: 'ISO-B-1', metodo: 'ZELLE', tasa: 36.5 });
+  const ids = async (sedeId) => (await svc.pagos.bandeja({ estado: 'Por Validar', offset: 0, limite: 100, sedeId })).items.map((x) => x.id);
+  assert.ok(!(await ids(sedeA)).includes(pago.pagoId));
+  assert.ok((await ids(sedeB)).includes(pago.pagoId));
+  assert.ok((await ids(null)).includes(pago.pagoId));
+  await assert.rejects(svc.pagos.aprobar({ pagoId: pago.pagoId, usuarioId, sedeId: sedeA }), (e) => e.status === 404);
+  await assert.rejects(svc.pagos.rechazar({ pagoId: pago.pagoId, usuarioId, nota: 'x', sedeId: sedeA }), (e) => e.status === 404);
+  assert.equal((await uno('SELECT estado FROM pagos_referencias WHERE id = $1', [pago.pagoId])).estado, 'Por Validar');
+  assert.equal((await svc.pagos.aprobar({ pagoId: pago.pagoId, usuarioId, sedeId: sedeB })).pagoId, pago.pagoId);
+
+  // el cobro aprobado cuenta en la sede B y no en la A
+  const periodo = svc.periodo();
+  assert.ok((await svc.facturacion.tablero(periodo, sedeB)).cobrado.monto_usd >= 25);
+  assert.equal((await svc.facturacion.tablero(periodo, sedeA)).cobrado.monto_usd, 0);
+
+  // egresos: un usuario de sede siempre registra en la suya (aunque mande otra); el consolidado elige la sede
+  const hoy = svc.hoy();
+  await svc.conta.crearEgreso({ fecha: hoy, categoria: 'IsoCat', descripcion: 'A', monto_usd: 12.5, referencia: null, sede_id: sedeB }, sedeA);
+  await svc.conta.crearEgreso({ fecha: hoy, categoria: 'IsoCat', descripcion: 'B', monto_usd: 7.25, referencia: null, sede_id: sedeB }, null);
+  assert.deepEqual((await filas(`SELECT descripcion, sede_id FROM egresos WHERE categoria = 'IsoCat' ORDER BY id`)), [{ descripcion: 'A', sede_id: sedeA }, { descripcion: 'B', sede_id: sedeB }]);
+  assert.equal((await svc.conta.listarEgresos({ periodo, offset: 0, limite: 50, sedeId: sedeA })).total_usd, 12.5);
+  assert.equal((await svc.conta.balance(periodo, sedeA)).egresos_usd, 12.5);
+  assert.equal((await svc.conta.balance(periodo, sedeB)).egresos_usd, 7.25);
+  assert.ok((await svc.conta.balance(periodo, null)).egresos_usd >= 19.75);
+});
+
+t('multi-sede: cuentas de cobro = comunes + las de la propia sede; sin sede solo las comunes (nunca las de otra sede)', async () => {
+  await db.ejecutar(
+    `INSERT INTO cuentas_pago (metodo, titular, detalle, sede_id) VALUES ('ZELLE', 'Común', 'comun@bma.example', NULL),
+       ('PAYPAL', 'Norte', 'norte@bma.example', $1), ('BINANCE', 'Sur', 'sur@bma.example', $2)`, [sedeA, sedeB]);
+  const titulares = async (sedeId) => (await svc.parametros.cuentasActivas(undefined, sedeId)).map((c) => c.titular);
+  const a = await titulares(sedeA);
+  assert.ok(a.includes('Común') && a.includes('Norte') && !a.includes('Sur'));
+  const sin = await titulares(null);
+  assert.ok(sin.includes('Común') && !sin.includes('Norte') && !sin.includes('Sur'));
+});
+
+// ── Invitaciones de inscripción ─────────────────────────────────────────────────────────────────
+t('invitaciones: token hasheado y de un solo uso; el SERVIDOR impone nivel y sede (el grado del cliente se descarta)', async () => {
+  await svc.parametros.guardar('MATRICULA_USD', '100.00');
+  const inv = await svc.invitaciones.crear({ sedeId: sedeA, nivel: '5to grado', creadoPor: await usuarioAdminId() });
+  assert.match(inv.token, /^[a-f0-9]{48}$/);
+  assert.match(inv.enlace, /\/admisiones\/\?invitacion=[a-f0-9]{48}$/);
+  const fila = await uno('SELECT token_hash, estado FROM invitaciones_inscripcion WHERE id = $1', [inv.id]);
+  assert.match(fila.token_hash, /^[a-f0-9]{64}$/);
+  assert.notEqual(fila.token_hash, inv.token);
+  assert.equal(fila.estado, 'Pendiente');
+
+  const cfgInv = await svc.admisiones.configInvitacion(inv.token, { bcvSvc: bcvFalso });
+  assert.deepEqual(cfgInv.sede, { id: sedeA, nombre: 'Sede Norte' });
+  assert.equal(cfgInv.nivel_asignado, '5to grado');
+  assert.equal(cfgInv.matricula_usd, 100);
+  const titulares = cfgInv.cuentas.map((c) => c.titular);
+  assert.ok(titulares.includes('Norte') && titulares.includes('Común') && !titulares.includes('Sur'));
+
+  const resuelta = await svc.invitaciones.resolver(inv.token);
+  const drive = driveFalso();
+  const r = await svc.admisiones.registrarInscripcion(
+    { datos: inscripcion({ alumno_nombres: 'Invitado', referencia_bancaria: 'INV-0001', representante_cedula: 'V-INV1', grado_solicitado: '1er grado (manipulado)' }), archivos, invitacion: resuelta },
+    { bcvSvc: bcvFalso, driveSvc: drive });
+  assert.equal(r.grado_solicitado, '5to grado');
+  assert.equal(r.sede_id, sedeA);
+  assert.deepEqual(await uno('SELECT grado_solicitado, sede_id FROM estudiantes WHERE id = $1', [r.estudiante_id]), { grado_solicitado: '5to grado', sede_id: sedeA });
+  assert.deepEqual(await uno('SELECT sede_id FROM cuotas WHERE estudiante_id = $1', [r.estudiante_id]), { sede_id: sedeA });
+  assert.deepEqual(await uno('SELECT sede_id FROM pagos_referencias WHERE estudiante_id = $1', [r.estudiante_id]), { sede_id: sedeA });
+  const usada = await uno('SELECT estado, estudiante_id, usada_en IS NOT NULL AS tiene_fecha FROM invitaciones_inscripcion WHERE id = $1', [inv.id]);
+  assert.deepEqual(usada, { estado: 'Usada', estudiante_id: r.estudiante_id, tiene_fecha: true });
+
+  // reutilizar el enlace: 410 (tanto al resolverlo como con el objeto ya resuelto) y sin tocar Drive
+  await assert.rejects(svc.invitaciones.resolver(inv.token), (e) => e.status === 410 && e.codigo === 'INVITACION_NO_VALIDA');
+  const drive2 = driveFalso();
+  await assert.rejects(
+    svc.admisiones.registrarInscripcion({ datos: inscripcion({ alumno_nombres: 'Otro', referencia_bancaria: 'INV-0002', representante_cedula: 'V-INV2' }), archivos, invitacion: resuelta }, { bcvSvc: bcvFalso, driveSvc: drive2 }),
+    (e) => e.status === 410);
+  assert.equal(drive2.subidas.length, 0);
+  assert.equal((await filas(`SELECT 1 FROM estudiantes WHERE nombres = 'Otro'`)).length, 0);
+});
+
+t('invitaciones: si la inscripción falla (Drive) se revierte y el enlace sigue Pendiente; dos envíos simultáneos → una sola inscripción', async () => {
+  const inv = await svc.invitaciones.crear({ sedeId: sedeA, nivel: '2do grado' });
+  const resuelta = await svc.invitaciones.resolver(inv.token);
+  await assert.rejects(
+    svc.admisiones.registrarInscripcion({ datos: inscripcion({ alumno_nombres: 'Caido', referencia_bancaria: 'INV-CAIDO', representante_cedula: 'V-CAIDO' }), archivos, invitacion: resuelta }, { bcvSvc: bcvFalso, driveSvc: driveFalso('falla') }),
+    (e) => e.status === 502);
+  assert.equal((await uno('SELECT estado FROM invitaciones_inscripcion WHERE id = $1', [inv.id])).estado, 'Pendiente');
+
+  const intento = (n) => svc.admisiones.registrarInscripcion(
+    { datos: inscripcion({ alumno_nombres: `Carrera${n}`, referencia_bancaria: `CAR-000${n}`, representante_cedula: `V-CAR${n}` }), archivos, invitacion: resuelta },
+    { bcvSvc: bcvFalso, driveSvc: driveFalso() }).then(() => 'ok', (e) => e.codigo);
+  const resultados = (await Promise.all([intento(1), intento(2)])).sort();
+  assert.deepEqual(resultados, ['INVITACION_NO_VALIDA', 'ok']);
+  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM estudiantes WHERE nombres LIKE 'Carrera%'`)).n, 1);
+});
+
+t('invitaciones: revocada, vencida o de sede inactiva → 410; listado con estado efectivo; revocar fuera de sede → 404', async () => {
+  const i1 = await svc.invitaciones.crear({ sedeId: sedeA, nivel: '1er grado' });
+  assert.equal((await svc.invitaciones.revocar(i1.id, sedeA)).estado, 'Revocada');
+  await assert.rejects(svc.invitaciones.resolver(i1.token), (e) => e.status === 410);
+  await assert.rejects(svc.invitaciones.revocar(i1.id, sedeA), (e) => e.status === 409 && e.codigo === 'INVITACION_NO_REVOCABLE');
+
+  const i2 = await svc.invitaciones.crear({ sedeId: sedeA, nivel: '1er grado' });
+  await db.ejecutar(`UPDATE invitaciones_inscripcion SET expira_en = NOW() - INTERVAL '1 minute' WHERE id = $1`, [i2.id]);
+  await assert.rejects(svc.invitaciones.resolver(i2.token), (e) => e.status === 410);
+  const vencidas = await svc.invitaciones.listar({ sedeId: sedeA, estado: 'Vencida', offset: 0, limite: 50 });
+  assert.ok(vencidas.items.some((x) => x.id === i2.id && x.estado === 'Vencida'));
+
+  const i3 = await svc.invitaciones.crear({ sedeId: sedeB, nivel: '3er grado', dias: 3 });
+  await assert.rejects(svc.invitaciones.revocar(i3.id, sedeA), (e) => e.status === 404);
+  assert.ok(!(await svc.invitaciones.listar({ sedeId: sedeA, offset: 0, limite: 200 })).items.some((x) => x.id === i3.id));
+  await svc.sedes.cambiarActiva(sedeB, false);
+  await assert.rejects(svc.invitaciones.crear({ sedeId: sedeB, nivel: 'x' }), (e) => e.status === 422 && e.codigo === 'SEDE_INACTIVA');
+  await assert.rejects(svc.invitaciones.resolver(i3.token), (e) => e.status === 410);
+  await svc.sedes.cambiarActiva(sedeB, true);
+  assert.equal((await svc.invitaciones.resolver(i3.token)).sede_id, sedeB);
+
+  for (const malo of ['', 'xyz', 'A'.repeat(48), 'a'.repeat(47)]) await assert.rejects(svc.invitaciones.resolver(malo), (e) => e.status === 410);
+});
+
 // ── Supabase: RLS ───────────────────────────────────────────────────────────────────────────────
 t('Supabase: con los privilegios por defecto de anon/authenticated, la migración 004 les cierra el acceso (RLS + REVOKE)', async () => {
   await db.ejecutar('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated');
   await db.ejecutar('GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated');
-  await db.ejecutarScript(fs.readFileSync(path.join(RAIZ, 'database', 'migrations', '004_seguridad_supabase.sql'), 'utf8'));
+  // 004 (Core Base) + 006/007 (sedes e invitaciones: su propio bloque RLS/REVOKE; además prueban que re-ejecutarlas es inocuo).
+  for (const m of ['004_seguridad_supabase.sql', '006_multisede.sql', '007_invitaciones_inscripcion.sql']) {
+    await db.ejecutarScript(fs.readFileSync(path.join(RAIZ, 'database', 'migrations', m), 'utf8'));
+  }
   for (const rol of ['anon', 'authenticated']) {
-    for (const objeto of ['estudiantes', 'pagos_referencias', 'usuarios_admin', 'vw_estudiantes_estado']) {
+    for (const objeto of ['estudiantes', 'pagos_referencias', 'usuarios_admin', 'vw_estudiantes_estado', 'sedes', 'invitaciones_inscripcion']) {
       const err = await db.conTransaccion(async (tx) => {
         await db.ejecutar(`SET LOCAL ROLE ${rol}`, [], tx);
         await db.ejecutar(`SELECT * FROM ${objeto}`, [], tx);
@@ -804,6 +1020,51 @@ t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en re
   assert.deepEqual([r.estado, r.motivo], ['OMITIDO', 'PRUEBA_EXPIRADA']);
   assert.equal((await uno(`SELECT habilitado FROM modulos_premium WHERE codigo = 'WHATSAPP_AUTOMATICO'`)).habilitado, false);
 });
+
+t('cron WhatsApp por sede: cada sede activa se despacha por separado (Preventiva → Morosidad), después los estudiantes sin sede; una sede desactivada no recibe nada', async () => {
+  const { crearCronWhatsapp, candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
+  const hoy = svc.hoy();
+  const ventana = svc.notif.VENTANA_PREVENTIVA;
+  const pA = await sembrar({ sedeId: sedeA, nombres: 'SdPrevA', vence: sumarDias(hoy, 4) });
+  const mA = await sembrar({ sedeId: sedeA, nombres: 'SdMorA', vence: sumarDias(hoy, -3) });
+  const pB = await sembrar({ sedeId: sedeB, nombres: 'SdPrevB', vence: sumarDias(hoy, 5) });
+  const mB = await sembrar({ sedeId: sedeB, nombres: 'SdMorB', vence: sumarDias(hoy, -1) });
+  const lejos = await sembrar({ sedeId: sedeA, nombres: 'SdLejos', vence: sumarDias(hoy, 20) });
+  const libre = await sembrar({ nombres: 'SdSinSede', vence: sumarDias(hoy, 4) });
+  const cerrada = (await svc.sedes.crear({ nombre: 'Sede Cerrada Cron' })).id;
+  const enCerrada = await sembrar({ sedeId: cerrada, nombres: 'SdCerrada', vence: sumarDias(hoy, 4) });
+  await svc.sedes.cambiarActiva(cerrada, false);
+
+  // Consultas masivas: el ámbito es exacto (sede entera, o solo "sin sede" con NULL).
+  const ids = (rows) => rows.map((r) => r.estudiante_id);
+  const lim = 10000;
+  const prevA = ids(await candidatosPreventiva({ hoy, ventana, limite: lim, sedeId: sedeA }));
+  assert.ok(prevA.includes(pA.estId) && !prevA.includes(pB.estId) && !prevA.includes(lejos.estId) && !prevA.includes(libre.estId));
+  assert.ok(ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim, sedeId: sedeB })).includes(mB.estId));
+  assert.ok(!ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim, sedeId: sedeB })).includes(mA.estId));
+  const sinSede = ids(await candidatosPreventiva({ hoy, ventana, limite: lim, sedeId: null }));
+  assert.ok(sinSede.includes(libre.estId) && !sinSede.includes(pA.estId));
+
+  // Ciclo completo con el candado real (módulo contratado) y servicios dobles que registran el orden.
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
+  const llamadas = []; const pausas = [];
+  const notificaciones = { VENTANA_PREVENTIVA: ventana, generarAlerta: async (a) => { llamadas.push([a.tipo, a.estudianteId]); return { notificacion_id: 0 }; } };
+  const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: lim, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
+  const cron = crearCronWhatsapp({ db, guard: svc.guard.crearGuard({ ttlMs: 0 }), notificaciones, whatsapp: { configurado: () => true }, bcv: { obtenerTasa: async () => ({}) },
+    config, esperar: async (ms) => { pausas.push(ms); }, log: () => {}, logError: () => {} });
+  const r = await cron.ejecutarCiclo();
+  assert.equal(r.estado, 'COMPLETADO');
+  const mios = new Map([[pA.estId, 'pA'], [mA.estId, 'mA'], [pB.estId, 'pB'], [mB.estId, 'mB'], [lejos.estId, 'lejos'], [libre.estId, 'libre'], [enCerrada.estId, 'cerrada']]);
+  assert.deepEqual(llamadas.filter(([, id]) => mios.has(id)).map(([tipo, id]) => [mios.get(id), tipo]),
+    [['pA', 'PREVENTIVA'], ['mA', 'MOROSIDAD'], ['pB', 'PREVENTIVA'], ['mB', 'MOROSIDAD'], ['libre', 'PREVENTIVA']]);
+  assert.ok(pausas.every((ms) => ms === 1500));
+  const ambitos = r.por_sede.map((x) => x.sede_id);
+  assert.ok(ambitos.includes(sedeA) && ambitos.includes(sedeB) && !ambitos.includes(cerrada), 'la sede desactivada no entra en el ciclo');
+  assert.equal(ambitos[ambitos.length - 1], null, 'los estudiantes sin sede van al final');
+
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
+});
+
 
 t('salud: SELECT 1 responde y una segunda llamada a closePool es inocua', async () => {
   assert.equal((await uno('SELECT 1 AS ok')).ok, 1);

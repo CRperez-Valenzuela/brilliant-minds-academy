@@ -11,9 +11,11 @@ import { html, montar, raw, type HtmlSeguro } from './lib/html';
 import { icono } from './lib/icons';
 import { bs, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
 import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
+import { esConfigInvitacion } from './types/index';
 import type {
   CampoArchivoAdmision,
   ConfigAdmisiones,
+  ConfigInvitacion,
   CuentaPago,
   MetodoPago,
   RespuestaAdmision,
@@ -31,6 +33,28 @@ const TIPOS_SANGRE: readonly TipoSangre[] = ['A+', 'A-', 'B+', 'B-', 'AB+', 'AB-
 const RE_CEDULA = /^[A-Za-z0-9.-]{4,20}$/;
 const RE_REFERENCIA = /^[A-Za-z0-9-]{4,40}$/;
 const RE_EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const RE_INVITACION = /^[a-f0-9]{48}$/;
+
+/**
+ * Señal visual del nivel bloqueado (el bloqueo REAL lo impone el servidor: ignora el grado enviado y usa `nivel_asignado`).
+ * `pointer-events-none` impide el clic, `select-none` la selección y `bg-slate-100` lo muestra como no editable.
+ */
+export const CLASES_NIVEL_BLOQUEADO = 'bg-slate-100 pointer-events-none select-none';
+
+/** Invitación presente en la URL (`?invitacion=<48 hex>`). Un parámetro mal formado NO habilita el formulario libre. */
+export type InvitacionDeUrl =
+  | { readonly tipo: 'ninguna' }
+  | { readonly tipo: 'invalida' }
+  | { readonly tipo: 'token'; readonly token: string };
+
+export function leerInvitacion(busqueda: string): InvitacionDeUrl {
+  const v = new URLSearchParams(busqueda).get('invitacion');
+  if (v === null) return { tipo: 'ninguna' };
+  return RE_INVITACION.test(v) ? { tipo: 'token', token: v } : { tipo: 'invalida' };
+}
+
+const INVITACION: InvitacionDeUrl = leerInvitacion(window.location.search);
+const MENSAJE_INVITACION_INVALIDA = 'El enlace de invitación no es válido, ya fue utilizado o venció. Solicita uno nuevo a la academia.';
 
 /** Quita TODO espacio en blanco (pegar «0012 3456» o «ABC 123» deja una referencia válida). */
 export function sanearReferencia(valor: string): string {
@@ -324,8 +348,9 @@ export function leerTextos(formulario: HTMLFormElement): SolicitudAdmisionTexto 
 }
 
 /** FormData transaccional: solo los campos del contrato (omite los opcionales vacíos) + los 3 archivos ya validados. */
-export function construirFormData(textos: SolicitudAdmisionTexto, archivos: ReadonlyMap<CampoArchivoAdmision, File>): FormData {
+export function construirFormData(textos: SolicitudAdmisionTexto, archivos: ReadonlyMap<CampoArchivoAdmision, File>, invitacion: string | null = null): FormData {
   const datos = new FormData();
+  if (invitacion !== null) datos.append('invitacion', invitacion); // el servidor resuelve sede y nivel a partir del enlace
   for (const def of CAMPOS) {
     const valor = textos[def.nombre];
     if (valor !== '' || def.requerido) datos.append(def.nombre, valor);
@@ -346,9 +371,14 @@ interface EstadoPantalla {
   readonly errorConfig: string | null;
   readonly cargandoConfig: boolean;
   readonly enviando: boolean;
+  /** Mensaje del servidor cuando rechazó el enlace de invitación (410): la planilla queda deshabilitada. */
+  readonly invitacionRechazada: string | null;
 }
 
-let estado: EstadoPantalla = { config: null, consultadoEn: null, errorConfig: null, cargandoConfig: true, enviando: false };
+let estado: EstadoPantalla = {
+  config: null, consultadoEn: null, errorConfig: null, cargandoConfig: true, enviando: false,
+  invitacionRechazada: INVITACION.tipo === 'invalida' ? MENSAJE_INVITACION_INVALIDA : null,
+};
 
 function actualizar(parcial: Partial<EstadoPantalla>): void {
   estado = { ...estado, ...parcial };
@@ -410,6 +440,8 @@ function esqueleto(): HtmlSeguro {
       </div>
     </header>
 
+    <div id="invitacion"></div>
+
     <section id="costo" class="${CLS.tarjetaCristal} p-6" aria-labelledby="t-costo"></section>
 
     <div id="resumen-errores" tabindex="-1"></div>
@@ -451,12 +483,57 @@ function costoHtml(): HtmlSeguro {
     <p class="mt-4 text-sm text-slate-700">Las cuentas autorizadas y los pasos para pagar están en el <a href="#t-pago" class="font-semibold text-slate-900 underline">paso 5 · Pago de la matrícula</a>.</p>`;
 }
 
+/** Aplica el bloqueo visual del campo «Grado a cursar» con el nivel asignado por la invitación (idempotente). */
+function aplicarNivelBloqueado(nivel: string): void {
+  const control = buscar('#f-grado_solicitado', HTMLInputElement);
+  if (!control) return;
+  control.value = nivel;
+  control.readOnly = true;
+  control.tabIndex = -1;
+  control.setAttribute('aria-readonly', 'true');
+  control.classList.remove('bg-white');
+  control.classList.add(...CLASES_NIVEL_BLOQUEADO.split(' '));
+  if (!buscar('#a-grado_solicitado', HTMLElement)) {
+    const nota = document.createElement('p');
+    nota.id = 'a-grado_solicitado';
+    nota.className = CLS.ayuda;
+    nota.textContent = 'Nivel asignado por la academia en tu invitación; no se puede cambiar.';
+    control.insertAdjacentElement('afterend', nota);
+    control.setAttribute('aria-describedby', 'a-grado_solicitado e-grado_solicitado');
+  }
+}
+
+/** Banner de la invitación (sede + nivel) o, si el enlace no sirve, el aviso de error y la planilla deshabilitada. */
+function pintarInvitacion(): void {
+  const zona = obtener('#invitacion', HTMLElement);
+  const planilla = obtener('#planilla', HTMLElement);
+  const costo = obtener('#costo', HTMLElement);
+  if (estado.invitacionRechazada !== null) {
+    montar(zona, aviso('bad', estado.invitacionRechazada, 'Invitación no válida'));
+    planilla.hidden = true;
+    costo.hidden = true;
+    return;
+  }
+  planilla.hidden = false;
+  costo.hidden = false;
+  if (INVITACION.tipo === 'token' && esConfigInvitacion(estado.config)) {
+    const c = estado.config;
+    montar(zona, aviso('info', html`Inscripción en <strong>${c.sede.nombre}</strong> · Nivel asignado: <strong>${c.nivel_asignado}</strong>`, 'Invitación válida'));
+    aplicarNivelBloqueado(c.nivel_asignado);
+  } else if (INVITACION.tipo === 'token') {
+    montar(zona, html`<p class="text-sm text-slate-600" role="status">Validando tu invitación…</p>`);
+  } else {
+    montar(zona, html``);
+  }
+}
+
 function pintarCosto(): void {
   const zona = obtener('#costo', HTMLElement);
   montar(zona, costoHtml());
   buscar('#reintentar', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
   buscar('#actualizar-tasa', HTMLButtonElement)?.addEventListener('click', () => void refrescarConfig(false));
   pintarCuentas();
+  pintarInvitacion();
 }
 
 // ───────────────────────── Cuentas autorizadas (instrucciones de pago dinámicas) ─────────────────────────
@@ -570,12 +647,19 @@ async function refrescarConfig(silencioso: boolean): Promise<boolean> {
     actualizar({ cargandoConfig: true, errorConfig: null });
     if (!estado.config) pintarCosto();
   }
+  if (estado.invitacionRechazada !== null) return false; // enlace inválido: no hay nada que consultar
+  const ruta = INVITACION.tipo === 'token' ? `/public/admisiones/invitacion/${INVITACION.token}` : '/public/admisiones/config';
   try {
-    const config = await bma.get<ConfigAdmisiones>('/public/admisiones/config', undefined, { sinAuth: true });
+    const config = await bma.get<ConfigAdmisiones | ConfigInvitacion>(ruta, undefined, { sinAuth: true });
     actualizar({ config, consultadoEn: new Date(), errorConfig: null, cargandoConfig: false });
     pintarCosto();
     return true;
   } catch (e: unknown) {
+    if (INVITACION.tipo === 'token' && e instanceof BmaApiError && e.estado === 410) {
+      actualizar({ cargandoConfig: false, config: null, invitacionRechazada: e.message });
+      pintarCosto();
+      return false;
+    }
     actualizar({ cargandoConfig: false, errorConfig: estado.config ? null : mensajeDeError(e) });
     if (!silencioso || !estado.config) pintarCosto();
     return false;
@@ -628,6 +712,7 @@ function mostrarExito(r: RespuestaAdmision): void {
       </div>
       <dl class="mt-6 grid gap-4 text-sm sm:grid-cols-2">
         <div><dt class="text-slate-600">Estatus</dt><dd class="font-semibold text-slate-900">${r.estatus}</dd></div>
+        ${r.grado_solicitado ? html`<div><dt class="text-slate-600">Nivel asignado</dt><dd class="font-semibold text-slate-900">${r.grado_solicitado}</dd></div>` : null}
         <div><dt class="text-slate-600">Método</dt><dd class="font-semibold text-slate-900">${nombreMetodo(r.metodo_pago)}</dd></div>
         <div><dt class="text-slate-600">Referencia declarada</dt><dd class="break-all font-semibold text-slate-900">${r.referencia}</dd></div>
         <div><dt class="text-slate-600">Monto de la matrícula</dt><dd class="font-semibold text-slate-900">${usd(r.monto_usd)} · ${bs(r.monto_bs)}</dd></div>
@@ -646,6 +731,10 @@ async function alEnviar(formulario: HTMLFormElement): Promise<void> {
   if (estado.enviando) return;
   limpiarErrores();
 
+  if (INVITACION.tipo === 'token' && !esConfigInvitacion(estado.config)) {
+    mostrarErrores([{ campo: '', mensaje: 'Estamos validando tu invitación. Intenta de nuevo en unos segundos.' }], 'Un momento');
+    return;
+  }
   const textos = leerTextos(formulario);
   const inspeccion = inspeccionarArchivos(formulario);
   const errores = [...validarTextos(textos), ...inspeccion.errores];
@@ -672,7 +761,17 @@ async function alEnviar(formulario: HTMLFormElement): Promise<void> {
         );
         return;
       }
-      const datos = construirFormData(textos, inspeccion.archivos);
+      if (estado.invitacionRechazada !== null) {
+        mostrarErrores([{ campo: '', mensaje: estado.invitacionRechazada }], 'Invitación no válida');
+        return;
+      }
+      // Con invitación el nivel es el asignado por el servidor (el campo bloqueado ya lo muestra; esto cierra cualquier edición por consola).
+      const nivelAsignado = esConfigInvitacion(estado.config) ? estado.config.nivel_asignado : null;
+      const datos = construirFormData(
+        nivelAsignado !== null ? { ...textos, grado_solicitado: nivelAsignado } : textos,
+        inspeccion.archivos,
+        INVITACION.tipo === 'token' ? INVITACION.token : null,
+      );
       const respuesta = await bma.post<RespuestaAdmision>('/public/admisiones', datos, { sinAuth: true, timeoutMs: 120_000 });
       mostrarExito(respuesta);
     });

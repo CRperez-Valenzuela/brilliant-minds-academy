@@ -82,7 +82,7 @@ function notFound(req, _res, next) {
 // eslint-disable-next-line no-unused-vars
 function errorHandler(err, req, res, next) {
   const r = normalizar(err);
-  if (r.status >= 500) console.error(`[error] ${req.id || '-'} ${req.method} ${req.originalUrl}`, err);
+  if (r.status >= 500) console.error(`[error] ${req.id || '-'} ${req.method} ${String(req.originalUrl ?? '').replace(/(invitacion|portal)\/[a-f0-9]{48}/g, '$1/<token>').replace(/([?&]invitacion=)[^&]*/g, '$1<token>')}`, err);
   // Si ya se enviaron cabeceras (p. ej. un .xlsx a medias) no se puede enviar JSON: se corta la conexión.
   if (res.headersSent) return res.destroy(err);
   // Si el error ocurrió antes del primer byte de una descarga (.xlsx), el navegador no debe guardar el JSON como archivo.

@@ -11,10 +11,11 @@ const REGLAS_CUENTA = {
   titular: { requerido: true, max: 150 },
   detalle: { requerido: true, max: 500 },
   activa: { tipo: 'booleano', defecto: true },
+  sede_id: { tipo: 'entero', min: 1 }, // NULL = cuenta común a todas las sedes
 };
 
 const obtener = asyncHandler(async (_req, res) => {
-  const cuentas = await ejecutar('SELECT id, metodo, titular, detalle, activa FROM cuentas_pago ORDER BY metodo, id');
+  const cuentas = await ejecutar('SELECT id, metodo, titular, detalle, activa, sede_id FROM cuentas_pago ORDER BY metodo, id');
   ok(res, { matricula_usd: Number(await parametros.obtener('MATRICULA_USD')), cuentas: cuentas.rows });
 });
 
@@ -27,8 +28,8 @@ const fijarMatricula = asyncHandler(async (req, res) => {
 const crearCuenta = asyncHandler(async (req, res) => {
   const d = validar(req.body, REGLAS_CUENTA);
   const r = await ejecutar(
-    'INSERT INTO cuentas_pago (metodo, titular, detalle, activa) VALUES ($1, $2, $3, $4) RETURNING id',
-    [d.metodo, d.titular, d.detalle, d.activa]);
+    'INSERT INTO cuentas_pago (metodo, titular, detalle, activa, sede_id) VALUES ($1, $2, $3, $4, $5) RETURNING id',
+    [d.metodo, d.titular, d.detalle, d.activa, d.sede_id]);
   ok(res, { id: r.rows[0].id }, 201);
 });
 
@@ -36,8 +37,8 @@ const actualizarCuenta = asyncHandler(async (req, res) => {
   const id = idParam(req.params.id);
   const d = validar(req.body, REGLAS_CUENTA);
   const r = await ejecutar(
-    'UPDATE cuentas_pago SET metodo = $2, titular = $3, detalle = $4, activa = $5 WHERE id = $1 RETURNING id',
-    [id, d.metodo, d.titular, d.detalle, d.activa]);
+    'UPDATE cuentas_pago SET metodo = $2, titular = $3, detalle = $4, activa = $5, sede_id = $6 WHERE id = $1 RETURNING id',
+    [id, d.metodo, d.titular, d.detalle, d.activa, d.sede_id]);
   if (!r.rowCount) throw e.noEncontrado('La cuenta');
   ok(res, { id });
 });

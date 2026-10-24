@@ -7,6 +7,7 @@ const { bcv } = require('./bcv.service');
 const { drive } = require('./drive.service');
 const parametros = require('./parametros.service');
 const pagos = require('./pagos.service');
+const invitaciones = require('./invitaciones.service');
 
 /** Datos que necesita el formulario público: costo en USD y Bs. a la tasa BCV del día + cuentas de la academia. */
 async function configPublica({ bcvSvc = bcv } = {}) {
@@ -21,14 +22,36 @@ async function configPublica({ bcvSvc = bcv } = {}) {
 }
 
 /**
+ * Configuración del formulario para un enlace de invitación: nivel BLINDADO (`nivel_asignado`), sede y las cuentas de cobro de ESA sede.
+ * El token se valida en cada llamada (un solo uso, vigencia, sede activa); la respuesta no incluye datos de otras sedes.
+ */
+async function configInvitacion(token, { bcvSvc = bcv } = {}) {
+  const inv = await invitaciones.resolver(token);
+  const [matricula, tasa, cuentas] = await Promise.all([parametros.matriculaUsd(), bcvSvc.obtenerTasa(), parametros.cuentasActivas(undefined, inv.sede_id)]);
+  return {
+    sede: { id: inv.sede_id, nombre: inv.sede },
+    nivel_asignado: inv.nivel_asignado,
+    matricula_usd: matricula,
+    tasa_bcv: tasa.tasa,
+    tasa_desactualizada: tasa.desactualizada,
+    matricula_bs: usdABs(matricula, tasa.tasa),
+    cuentas,
+  };
+}
+
+/**
  * Inscripción completa en UNA transacción:
  *   1) representante (upsert por cédula) → 2) estudiante "Pendiente por Validación Administrativa"
  *   3) cuota de matrícula + referencia bancaria "Por Validar" a la tasa BCV del momento
  *   4) carpeta 'Nombre_Apellido_ID' en Drive con los 3 documentos → 5) COMMIT.
+ * Con `invitacion` ({ id, sede_id, nivel_asignado } ya resuelta por el controlador) el SERVIDOR impone el nivel y la sede (se ignora el
+ * grado enviado por el cliente) y consume el enlace de forma atómica en esta misma transacción.
  * Si Drive falla, TODO se revierte (no quedan estudiantes sin expediente). Si la transacción falla después de subir a Drive
  * (error en una consulta posterior o en el COMMIT), la carpeta se envía a la papelera (compensación) para no dejar huérfanos.
  */
-async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSvc = drive } = {}) {
+async function registrarInscripcion({ datos, archivos, invitacion = null }, { bcvSvc = bcv, driveSvc = drive } = {}) {
+  const gradoSolicitado = invitacion ? invitacion.nivel_asignado : datos.grado_solicitado;
+  const sedeId = invitacion ? invitacion.sede_id : null;
   const tasa = await bcvSvc.obtenerTasa();
   const matricula = await parametros.matriculaUsd();
   let carpetaCreada = null;
@@ -38,6 +61,9 @@ async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSv
 
   try {
     return await conTransaccion(async (tx) => {
+      // El enlace se consume PRIMERO: si otro envío lo usó entre tanto, falla aquí (410) antes de tocar Drive ni crear nada.
+      if (invitacion) await invitaciones.consumir(tx, invitacion.id);
+
       // Upsert atómico por cédula (UNIQUE): sin ventana de carrera entre SELECT e INSERT. El correo existente no se borra si llega vacío.
       const rep = await ejecutar(
         `INSERT INTO representantes (nombres, apellidos, cedula, email, telefono)
@@ -54,16 +80,18 @@ async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSv
       const est = await ejecutar(
         `INSERT INTO estudiantes
            (representante_id, nombres, apellidos, cedula_identidad, fecha_nacimiento, grado_solicitado, colegio_procedencia, ultimo_grado_aprobado,
-            tipo_sangre, alergias, condiciones_medicas, medicamentos, emergencia_nombre, emergencia_telefono)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            tipo_sangre, alergias, condiciones_medicas, medicamentos, emergencia_nombre, emergencia_telefono, sede_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          RETURNING id`,
         [
           representanteId, datos.alumno_nombres, datos.alumno_apellidos, datos.alumno_cedula ? datos.alumno_cedula.toUpperCase() : null,
-          aFechaSql(datos.alumno_fecha_nacimiento), datos.grado_solicitado, datos.colegio_procedencia, datos.ultimo_grado_aprobado,
+          aFechaSql(datos.alumno_fecha_nacimiento), gradoSolicitado, datos.colegio_procedencia, datos.ultimo_grado_aprobado,
           datos.tipo_sangre, datos.alergias, datos.condiciones_medicas, datos.medicamentos, datos.emergencia_nombre, datos.emergencia_telefono,
+          sedeId,
         ], tx);
       const estudianteId = est.rows[0].id;
       estudianteIdCreado = estudianteId;
+      if (invitacion) await invitaciones.vincularEstudiante(tx, invitacion.id, estudianteId);
 
       const cuota = await ejecutar(
         `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento)
@@ -94,6 +122,8 @@ async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSv
       resultado = {
         estudiante_id: estudianteId,
         estatus: 'Pendiente por Validación Administrativa',
+        sede_id: sedeId,
+        grado_solicitado: gradoSolicitado,
         carpeta_drive: expediente.carpetaUrl,
         referencia: datos.referencia_bancaria,
         metodo_pago: datos.metodo_pago,
@@ -148,4 +178,4 @@ async function compensarDrive(driveSvc, carpetaId) {
   }
 }
 
-module.exports = { configPublica, registrarInscripcion };
+module.exports = { configPublica, configInvitacion, registrarInscripcion };
