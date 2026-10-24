@@ -57,6 +57,8 @@ const config = Object.freeze({
     carpetaPadreId: process.env.GOOGLE_DRIVE_PARENT_FOLDER_ID || '',
     // JSON de la cuenta de servicio en línea o ruta a un archivo (nunca se versiona).
     credenciales: process.env.GOOGLE_SERVICE_ACCOUNT_JSON || '',
+    // Tope por petición a Drive: la subida ocurre con una transacción abierta, así que no puede quedar colgada indefinidamente.
+    timeoutMs: entero('GOOGLE_DRIVE_TIMEOUT_MS', 60000),
   }),
   bcv: Object.freeze({
     url: process.env.BCV_API_URL || 'https://ve.dolarapi.com/v1/dolares/oficial',

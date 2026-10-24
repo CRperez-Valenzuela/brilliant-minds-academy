@@ -25,13 +25,16 @@ async function configPublica({ bcvSvc = bcv } = {}) {
  *   1) representante (upsert por cédula) → 2) estudiante "Pendiente por Validación Administrativa"
  *   3) cuota de matrícula + referencia bancaria "Por Validar" a la tasa BCV del momento
  *   4) carpeta 'Nombre_Apellido_ID' en Drive con los 3 documentos → 5) COMMIT.
- * Si Drive falla, TODO se revierte (no quedan estudiantes sin expediente). Si el COMMIT fallara después de subir a Drive,
- * la carpeta se envía a la papelera (compensación).
+ * Si Drive falla, TODO se revierte (no quedan estudiantes sin expediente). Si la transacción falla después de subir a Drive
+ * (error en una consulta posterior o en el COMMIT), la carpeta se envía a la papelera (compensación) para no dejar huérfanos.
  */
 async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSvc = drive } = {}) {
   const tasa = await bcvSvc.obtenerTasa();
   const matricula = await parametros.matriculaUsd();
   let carpetaCreada = null;
+  let estudianteIdCreado = null;
+  let resultado = null;
+  let callbackTerminado = false; // true = solo faltaba el COMMIT: si algo falla ya, el resultado en la base es ambiguo
 
   try {
     return await conTransaccion(async (tx) => {
@@ -60,6 +63,7 @@ async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSv
           datos.tipo_sangre, datos.alergias, datos.condiciones_medicas, datos.medicamentos, datos.emergencia_nombre, datos.emergencia_telefono,
         ], tx);
       const estudianteId = est.rows[0].id;
+      estudianteIdCreado = estudianteId;
 
       const cuota = await ejecutar(
         `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento)
@@ -87,7 +91,7 @@ async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSv
           [estudianteId, d.tipo, d.nombre, d.mime, d.bytes, d.fileId, d.url], tx);
       }
 
-      return {
+      resultado = {
         estudiante_id: estudianteId,
         estatus: 'Pendiente por Validación Administrativa',
         carpeta_drive: expediente.carpetaUrl,
@@ -98,11 +102,49 @@ async function registrarInscripcion({ datos, archivos }, { bcvSvc = bcv, driveSv
         tasa_bcv: tasa.tasa,
         tasa_desactualizada: tasa.desactualizada,
       };
+      callbackTerminado = true;
+      return resultado;
     });
   } catch (err) {
-    // Compensación: si la transacción falló DESPUÉS de crear la carpeta (p. ej. error en el COMMIT), no dejar huérfanos.
-    if (carpetaCreada) await driveSvc.eliminarCarpeta(carpetaCreada);
+    if (!carpetaCreada) throw err; // nada que compensar en Drive (la subida se limpia a sí misma si falla)
+
+    // Falla DENTRO de la transacción (consulta, duplicado, cuota…): el ROLLBACK es seguro → la carpeta no tiene dueño.
+    // Falla en el COMMIT: el servidor pudo haber confirmado antes de caerse la conexión. No se destruye un expediente
+    // cuyo estudiante sí quedó inscrito: primero se verifica en la base.
+    if (callbackTerminado) {
+      const persistida = await inscripcionPersistida(estudianteIdCreado, carpetaCreada);
+      if (persistida === true) {
+        console.error(`[admisiones] El COMMIT reportó error pero la inscripción ${estudianteIdCreado} sí quedó registrada; se conserva su carpeta.`);
+        return resultado;
+      }
+      if (persistida === null) {
+        console.error(`[admisiones] REVISIÓN MANUAL: no se pudo confirmar si la inscripción ${estudianteIdCreado} se guardó; se conserva la carpeta Drive ${carpetaCreada}.`);
+        throw err;
+      }
+    }
+    await compensarDrive(driveSvc, carpetaCreada);
     throw err;
+  }
+}
+
+/** ¿Quedó el estudiante enlazado a esa carpeta? true/false, o null si la base no pudo responder (estado desconocido). */
+async function inscripcionPersistida(estudianteId, carpetaId) {
+  try {
+    const r = await ejecutar('SELECT 1 FROM estudiantes WHERE id = $1 AND drive_folder_id = $2', [estudianteId, carpetaId]);
+    return r.rowCount > 0;
+  } catch (err) {
+    console.error('[admisiones] No se pudo verificar la inscripción tras el fallo del COMMIT:', err.message);
+    return null;
+  }
+}
+
+/** Compensación en Drive. Nunca lanza: un fallo aquí no puede tapar el error original que recibe el cliente (JSON de errorHandler). */
+async function compensarDrive(driveSvc, carpetaId) {
+  try {
+    const limpia = await driveSvc.eliminarCarpeta(carpetaId);
+    if (limpia === false) console.error(`[admisiones] CARPETA HUÉRFANA en Drive; requiere limpieza manual: ${carpetaId}`);
+  } catch (errLimpieza) {
+    console.error(`[admisiones] La compensación en Drive falló (carpeta ${carpetaId}):`, errLimpieza.message);
   }
 }
 

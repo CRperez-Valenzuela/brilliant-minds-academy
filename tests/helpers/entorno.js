@@ -38,6 +38,8 @@ const db = {
   async conTransaccion(fn) {
     try {
       const r = await fn({ tx: true });
+      // Simula un COMMIT que falla (p. ej. conexión caída) DESPUÉS de ejecutar todo el callback.
+      if (db.fallarCommit) throw new Error('Connection terminated unexpectedly');
       db.commits += 1;
       return r;
     } catch (err) {
@@ -47,7 +49,8 @@ const db = {
   },
   async getPool() { return {}; },
   async closePool() {},
-  reiniciar() { db.llamadas.length = 0; db.rollbacks = 0; db.commits = 0; db.handler = async () => ({ rows: [], rowCount: 0 }); },
+  fallarCommit: false,
+  reiniciar() { db.llamadas.length = 0; db.rollbacks = 0; db.commits = 0; db.fallarCommit = false; db.handler = async () => ({ rows: [], rowCount: 0 }); },
 };
 
 const cargaOriginal = Module._load;

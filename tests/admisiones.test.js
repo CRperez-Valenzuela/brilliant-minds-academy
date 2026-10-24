@@ -136,3 +136,62 @@ test('formulario: el teléfono es obligatorio y la referencia bancaria no admite
   assert.throws(() => prepararInscripcion(sinTel, files()), (e) => e.detalles.some((d) => d.campo === 'telefono'));
   assert.throws(() => prepararInscripcion({ ...body, referencia_bancaria: '' }, files()), (e) => e.detalles.some((d) => d.campo === 'referencia_bancaria'));
 });
+
+// ── Compensación ante COMMIT fallido y errores de limpieza ─────────────────────────────────────
+/** Simula un COMMIT que falla (conexión caída) DESPUÉS de ejecutar todo el callback. */
+async function conCommitFallido(fn) {
+  db.fallarCommit = true;
+  try { return await fn(); } finally { db.fallarCommit = false; }
+}
+const conVerificacion = (respuesta) => {
+  const base = db.handler;
+  db.handler = async (texto, params) => {
+    if (/SELECT 1 FROM estudiantes WHERE id = \$1 AND drive_folder_id = \$2/.test(texto)) return typeof respuesta === 'function' ? respuesta(params) : respuesta;
+    return base(texto, params);
+  };
+};
+const silenciar = async (fn) => { const o = console.error; console.error = () => {}; try { return await fn(); } finally { console.error = o; } };
+
+test('COMMIT fallido y la inscripción NO quedó guardada: la carpeta se envía a la papelera y el error se propaga', async () => {
+  programar();
+  conVerificacion(rs());
+  const drive = driveFalso();
+  await silenciar(() => conCommitFallido(() => assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: drive }), /Connection terminated/)));
+  assert.deepEqual(drive.eliminadas, ['carpeta-1']);
+  const verif = db.llamadas.find((l) => /SELECT 1 FROM estudiantes/.test(l.texto));
+  assert.deepEqual(verif.params, [10, 'carpeta-1']);
+});
+
+test('COMMIT fallido pero la base SÍ lo confirmó: no se destruye el expediente y se devuelve la inscripción', async () => {
+  programar();
+  conVerificacion(rs({ '?column?': 1 }));
+  const drive = driveFalso();
+  const r = await silenciar(() => conCommitFallido(() => registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: drive })));
+  assert.equal(r.estudiante_id, 10);
+  assert.equal(r.carpeta_drive, 'https://drive.test/carpeta-1');
+  assert.deepEqual(drive.eliminadas, []);
+});
+
+test('COMMIT fallido y la base no responde la verificación: estado desconocido → se conserva la carpeta y se propaga el error original', async () => {
+  programar();
+  conVerificacion(() => { throw new Error('base caída'); });
+  const drive = driveFalso();
+  await silenciar(() => conCommitFallido(() => assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: drive }), /Connection terminated/)));
+  assert.deepEqual(drive.eliminadas, []);
+});
+
+test('si eliminarCarpeta lanza durante la compensación, el cliente recibe el error ORIGINAL (23505), no el de la limpieza', async () => {
+  programar({ fallaEn: /INSERT INTO documentos_estudiante/ });
+  const drive = driveFalso();
+  drive.eliminarCarpeta = async () => { throw new Error('limpieza explotó'); };
+  await silenciar(() => assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: drive }), (e) => e.code === '23505'));
+  assert.equal(db.rollbacks, 1);
+});
+
+test('si eliminarCarpeta devuelve false (no se pudo limpiar) el error original igual se propaga', async () => {
+  programar({ fallaEn: /INSERT INTO documentos_estudiante/ });
+  const drive = driveFalso();
+  drive.eliminarCarpeta = async (id) => { drive.eliminadas.push(id); return false; };
+  await silenciar(() => assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: drive }), (e) => e.code === '23505'));
+  assert.deepEqual(drive.eliminadas, ['carpeta-1']);
+});
