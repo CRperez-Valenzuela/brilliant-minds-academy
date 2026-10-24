@@ -239,16 +239,14 @@ export interface ConteoEstudiantes {
   readonly total: number;
 }
 
-/** `GET /api/facturacion/tablero?periodo=AAAA-MM` */
+/** `GET /api/facturacion/tablero?periodo=AAAA-MM` (el conteo de estudiantes vive en `GET /api/estudiantes/resumen` → `ConteoEstudiantes`). */
 export interface TableroFacturacion {
   readonly periodo: string;
   readonly cobrado: TotalConCantidad;
   readonly saldos_vencidos: TotalConCantidad;
   readonly cuentas_pendientes: TotalConCantidad;
-  readonly facturado_mes_usd: number;
   readonly referencias_por_validar: number;
   readonly cobrado_por_dia: readonly CobroDiario[];
-  readonly estudiantes: ConteoEstudiantes;
 }
 
 /** Fila de `GET /api/facturacion/auditoria`. */

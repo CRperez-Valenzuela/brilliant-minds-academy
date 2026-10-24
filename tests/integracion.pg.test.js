@@ -432,14 +432,14 @@ t('generarMensualidades es idempotente, también con ejecuciones simultáneas (�
   assert.equal((await svc.facturacion.generarMensualidades(args)).creadas, 1);
 });
 
-t('tablero: KPIs numéricos, cobrado por día en hora de Caracas y resumen del CRM', async () => {
+t('tablero: contrato exacto, KPIs numéricos y cobrado por día en hora de Caracas', async () => {
   const r = await svc.facturacion.tablero(svc.periodo());
-  for (const k of [r.cobrado.monto_usd, r.saldos_vencidos.monto_usd, r.cuentas_pendientes.monto_usd, r.facturado_mes_usd]) assert.equal(typeof k, 'number');
+  assert.deepEqual(Object.keys(r), ['periodo', 'cobrado', 'saldos_vencidos', 'cuentas_pendientes', 'referencias_por_validar', 'cobrado_por_dia']);
+  for (const k of [r.cobrado.monto_usd, r.saldos_vencidos.monto_usd, r.cuentas_pendientes.monto_usd]) assert.equal(typeof k, 'number');
   assert.ok(r.cobrado.cantidad >= 2 && r.cobrado.monto_usd >= 100);
   assert.ok(r.saldos_vencidos.cantidad >= 1);
   assert.ok(r.cobrado_por_dia.length >= 1 && /^\d{4}-\d{2}-\d{2}$/.test(r.cobrado_por_dia[0].dia));
   assert.equal(r.cobrado_por_dia.reduce((a, d) => a + d.monto_usd, 0), r.cobrado.monto_usd);
-  assert.ok(r.estudiantes.total > 0);
   assert.equal(r.referencias_por_validar, (await uno(`SELECT COUNT(*)::int AS n FROM pagos_referencias WHERE estado = 'Por Validar'`)).n);
 });
 

@@ -1,0 +1,426 @@
+diff --git a/CAMBIOS_BMA_FACTURACION.md b/CAMBIOS_BMA_FACTURACION.md
+new file mode 100644
+index 0000000..40f3def
+--- /dev/null
++++ b/CAMBIOS_BMA_FACTURACION.md
+@@ -0,0 +1,60 @@
++# CAMBIOS_BMA_FACTURACION — Endpoint del tablero financiero (BMA)
++
++**Rama:** `development` · **Motor:** PostgreSQL / Supabase (paquete `pg`, helper `ejecutar` con `$1…$n`) · **Autor:** Astra Digital Solutions
++
++## 1. Archivos
++
++| Archivo | Acción | Qué cambió |
++|---|---|---|
++| `services/facturacion.service.js` | Modificado | `tablero(periodo)` devuelve **exactamente** el contrato pedido. SQL extraído a dos constantes (`SQL_KPI`, `SQL_COBRADO_POR_DIA`). Se eliminaron `facturado_mes_usd`, `estudiantes` y la dependencia de `crm.service` (una consulta menos por petición). Las barras diarias ahora agrupan por `(revisado_en AT TIME ZONE 'America/Caracas')::date`, con `GROUP BY 1 ORDER BY dia`. |
++| `controllers/facturacion.controller.js` | Modificado | `periodoDe()` endurecido: sin `periodo` → mes en curso en Caracas; valor inválido, vacío-con-basura, repetido (`?periodo=a&periodo=b`) u objeto → `422 VALIDACION`. Documentación del contrato. |
++| `routes/index.js` | **Sin cambios** | `GET /api/facturacion/tablero` ya estaba conectado tras `requireAuth` (verificado). |
++| `frontend/src/types/index.ts` | Modificado | `TableroFacturacion` sin `facturado_mes_usd` ni `estudiantes`. |
++| `frontend/src/admin.ts` | Modificado | El dashboard pide `/facturacion/tablero` y `/estudiantes/resumen` en paralelo (`Promise.all`); «Facturado del mes» pasa a «Cobrado del mes» (`d.cobrado.monto_usd`). |
++| `tests/facturacion-tablero.test.js` | **Nuevo** | 8 pruebas: contrato exacto, ceros/`[]`, parametrización y paralelismo, límites UTC de Caracas, sobre `{ok,data}`, período por defecto, 422 por período inválido, error de PostgreSQL (57014 → 504). |
++| `tests/integracion.pg.test.js` | Modificado | La prueba del tablero valida el contrato nuevo (claves exactas) y ya no espera `estudiantes`/`facturado_mes_usd`. |
++| `CAMBIOS_BMA_FACTURACION.md` | **Nuevo** | Este resumen. |
++
++## 2. Contrato `GET /api/facturacion/tablero?periodo=AAAA-MM`
++
++```json
++{
++  "ok": true,
++  "data": {
++    "periodo": "2026-10",
++    "cobrado":            { "monto_usd": 165.30, "cantidad": 4 },
++    "saldos_vencidos":    { "monto_usd": 100.00, "cantidad": 2 },
++    "cuentas_pendientes": { "monto_usd": 55.50,  "cantidad": 2 },
++    "referencias_por_validar": 2,
++    "cobrado_por_dia": [
++      { "dia": "2026-10-01", "monto_usd": 100.10 },
++      { "dia": "2026-10-15", "monto_usd": 60.20 }
++    ]
++  }
++}
++```
++
++Errores (formato JSON estable del Core): `{ "ok": false, "error": { "codigo", "mensaje", "detalles?", "requestId" } }` — p. ej. `422 VALIDACION` (período), `504 BASE_DATOS_TIMEOUT`, `503 BASE_DATOS_NO_DISPONIBLE`. Nunca se expone SQL ni stack.
++
++Semántica (sin cambios respecto a la versión previa): **cobrado** = referencias `Aprobada` con `revisado_en` dentro del mes (medianoche→medianoche de Caracas); **saldos_vencidos** = cuotas `Pendiente`/`En Revisión` ya vencidas, acumuladas de cualquier mes; **cuentas_pendientes** = cuotas del mes aún por vencer (incluye las que vencen hoy); **referencias_por_validar** = bandeja de auditoría completa.
++
++## 3. Reglas del Core Base verificadas
++
++- **Esquema PostgreSQL:** solo tablas/columnas de `001_core_base.sql` (`pagos_referencias`, `cuotas`); la auditoría estática `schema-consistencia` sigue en verde. Sin T-SQL (`DATETIME2`, `GETDATE`, `ISNULL`, `TOP`): una prueba lo vigila.
++- **Parametrización:** datos solo como `$1…$5` / `$1…$2` (arreglos posicionales); el texto SQL no contiene fechas ni importes.
++- **Paralelismo:** las dos consultas viajan con `Promise.all` (prueba mide 2 consultas en vuelo).
++- **Zona horaria:** intervalos como instantes `TIMESTAMPTZ` (`aInstanteSql`) y agrupación con `AT TIME ZONE` nativo; `DATE` llega como cadena `YYYY-MM-DD` (parser 1082 de `config/db.js`).
++- **Capas:** el SQL permanece en el servicio y el controlador solo valida y responde (convención del repo); no se movió lógica al controlador.
++
++## 4. Verificación realizada
++
++- `npm test`: **76 pasan, 0 fallan, 34 omitidas** (las omitidas son la integración, que exige `PG_TEST_PORT`). Antes: 68 / 0 / 34.
++- Mutaciones sobre el servicio (consultas secuenciales, sin `AT TIME ZONE`, campo extra) → las pruebas nuevas **fallan** como deben.
++- **SQL real en PostgreSQL 16** (clúster temporal, migraciones 001–003 y datos de borde): cobros a 30/sep 22:30, 1/oct 00:00, 15/oct 22:00 (= 16 en UTC), 31/oct 23:59:59 y 1/nov 00:00 hora Caracas. Resultado idéntico con `TimeZone` de sesión `UTC`, `Asia/Tokyo` y `America/Caracas`; el cobro de las 22:00 del 15/oct queda en el **día 15**.
++
++## 5. Pendientes y advertencias
++
++1. **Reconstruir el frontend antes de desplegar.** `public/` (build de Vite) está versionado y el bundle actual (`public/assets/admin-*.js`) aún lee `estudiantes` y `facturado_mes_usd`; con este backend el dashboard fallaría. Ejecutar `npm run frontend:install && npm run frontend:build` y commitear `public/`. En esta sesión el registro de npm no era alcanzable, por lo que **no pude reconstruir ni correr `tsc`**; los cambios TypeScript son mínimos y se revisaron a mano (`ConteoEstudiantes` ya se exportaba; `bma.get<T>(ruta)` admite consulta opcional).
++2. **`npm run test:integracion`** (PostgreSQL real, `PG_TEST_PORT`) no se pudo ejecutar aquí por falta del paquete `pg`; el SQL sí se validó con `psql` (sección 4).
++3. **Instrucciones del proyecto mencionan MSSQL**, pero el repositorio ya migró a PostgreSQL/Supabase (`bma-core-postgres.patch`, `config/db.js`); se trabajó contra PostgreSQL. Conviene actualizar esas instrucciones.
++4. `saldos_vencidos` es acumulado y no depende del `periodo`; al consultar meses pasados solo cambian `cobrado`, `cuentas_pendientes` y `cobrado_por_dia`.
+diff --git a/controllers/facturacion.controller.js b/controllers/facturacion.controller.js
+index d65fe08..586a688 100644
+--- a/controllers/facturacion.controller.js
++++ b/controllers/facturacion.controller.js
+@@ -9,12 +9,18 @@ const { asyncHandler, ok } = require('../utils/http');
+ const ESTADOS_PAGO = ['Por Validar', 'Aprobada', 'Rechazada'];
+ const ESTADOS_CUOTA = ['Pendiente', 'En Revisión', 'Pagada', 'Anulada'];
+ 
++/** `?periodo=AAAA-MM`; si falta, el mes en curso en hora de Caracas. Un valor inválido (o repetido) → 422 VALIDACION. */
+ function periodoDe(query) {
+-  const p = query.periodo || periodoActual();
+-  if (!esPeriodoValido(p)) throw e.validacion([{ campo: 'periodo', mensaje: 'Formato AAAA-MM.' }]);
++  const p = query.periodo === undefined || query.periodo === '' ? periodoActual() : query.periodo;
++  if (typeof p !== 'string' || !esPeriodoValido(p)) throw e.validacion([{ campo: 'periodo', mensaje: 'Formato AAAA-MM.' }]);
+   return p;
+ }
+ 
++/**
++ * GET /api/facturacion/tablero?periodo=AAAA-MM  →  200 { ok:true, data:{ periodo, cobrado, saldos_vencidos, cuentas_pendientes,
++ * referencias_por_validar, cobrado_por_dia[] } }. Los errores (validación, base de datos) los traduce middlewares/errorHandler a
++ * { ok:false, error:{ codigo, mensaje, detalles?, requestId } }.
++ */
+ const tablero = asyncHandler(async (req, res) => ok(res, await facturacion.tablero(periodoDe(req.query))));
+ 
+ const auditoria = asyncHandler(async (req, res) => {
+diff --git a/frontend/src/admin.ts b/frontend/src/admin.ts
+index ef92bee..5c861fd 100644
+--- a/frontend/src/admin.ts
++++ b/frontend/src/admin.ts
+@@ -16,6 +16,7 @@ import type {
+   AlertaWhatsapp,
+   BalanceContable,
+   CodigoModuloPremium,
++  ConteoEstudiantes,
+   DetalleModuloPremium,
+   EstadoPagoReferencia,
+   EstudianteListado,
+@@ -439,14 +440,13 @@ function aplicarAlturas(raiz: ParentNode): void {
+   }
+ }
+ 
+-function tableroHtml(d: TableroFacturacion): HtmlSeguro {
++function tableroHtml(d: TableroFacturacion, e: ConteoEstudiantes): HtmlSeguro {
+   const kpis: readonly TarjetaKpi[] = [
+     { titulo: 'Cobrado', valor: usd(d.cobrado.monto_usd), detalle: `${d.cobrado.cantidad} pago(s) aprobados`, icono: 'wallet', tono: 'normal' },
+     { titulo: 'Saldos vencidos', valor: usd(d.saldos_vencidos.monto_usd), detalle: `${d.saldos_vencidos.cantidad} cuota(s) vencida(s)`, icono: 'alert', tono: 'malo' },
+     { titulo: 'Cuentas pendientes del mes', valor: usd(d.cuentas_pendientes.monto_usd), detalle: `${d.cuentas_pendientes.cantidad} cuota(s) por cobrar`, icono: 'book', tono: 'normal' },
+     { titulo: 'Referencias por validar', valor: String(d.referencias_por_validar), detalle: 'en la bandeja de auditoría', icono: 'inbox', tono: 'normal' },
+   ];
+-  const e = d.estudiantes;
+   return html`
+     <section aria-label="Indicadores del mes" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">${kpis.map(tarjetaKpi)}</section>
+     <section aria-label="Estudiantes por estado" class="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+@@ -460,7 +460,7 @@ function tableroHtml(d: TableroFacturacion): HtmlSeguro {
+     <section class="${CLS.tarjeta} mt-6 p-6" aria-labelledby="t-barras">
+       <div class="mb-4 flex flex-wrap items-baseline justify-between gap-2">
+         <h2 id="t-barras" class="text-base font-bold text-slate-900">Recaudación diaria</h2>
+-        <p class="text-sm text-slate-600">Facturado del mes: <strong class="text-slate-900">${usd(d.facturado_mes_usd)}</strong></p>
++        <p class="text-sm text-slate-600">Cobrado del mes: <strong class="text-slate-900">${usd(d.cobrado.monto_usd)}</strong></p>
+       </div>
+       ${barrasHtml(d)}
+     </section>`;
+@@ -470,9 +470,12 @@ async function cargarTablero(ctx: Contexto, silencioso: boolean): Promise<void>
+   const destino = obtener('#tablero', HTMLElement, ctx.zona);
+   if (!silencioso) montar(destino, html`<div class="h-48 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando tablero"></div>`);
+   try {
+-    const datos = await bma.get<TableroFacturacion>('/facturacion/tablero', { periodo: estado.periodo });
++    const [datos, estudiantes] = await Promise.all([
++      bma.get<TableroFacturacion>('/facturacion/tablero', { periodo: estado.periodo }),
++      bma.get<ConteoEstudiantes>('/estudiantes/resumen'),
++    ]);
+     if (!ctx.vigente()) return;
+-    montar(destino, tableroHtml(datos));
++    montar(destino, tableroHtml(datos, estudiantes));
+     aplicarAlturas(destino);
+     const reloj = buscar('#actualizado', HTMLElement, ctx.zona);
+     if (reloj) reloj.textContent = `Actualizado a las ${horaConSegundos(new Date())}`;
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 4b270c0..4217e5a 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -239,16 +239,14 @@ export interface ConteoEstudiantes {
+   readonly total: number;
+ }
+ 
+-/** `GET /api/facturacion/tablero?periodo=AAAA-MM` */
++/** `GET /api/facturacion/tablero?periodo=AAAA-MM` (el conteo de estudiantes vive en `GET /api/estudiantes/resumen` → `ConteoEstudiantes`). */
+ export interface TableroFacturacion {
+   readonly periodo: string;
+   readonly cobrado: TotalConCantidad;
+   readonly saldos_vencidos: TotalConCantidad;
+   readonly cuentas_pendientes: TotalConCantidad;
+-  readonly facturado_mes_usd: number;
+   readonly referencias_por_validar: number;
+   readonly cobrado_por_dia: readonly CobroDiario[];
+-  readonly estudiantes: ConteoEstudiantes;
+ }
+ 
+ /** Fila de `GET /api/facturacion/auditoria`. */
+diff --git a/services/facturacion.service.js b/services/facturacion.service.js
+index d99b8d6..ce67ef7 100644
+--- a/services/facturacion.service.js
++++ b/services/facturacion.service.js
+@@ -2,33 +2,54 @@
+ const { ejecutar } = require('../config/db');
+ const { e } = require('../errors/AppError');
+ const { hoyCaracas, aFechaSql, aInstanteSql, limitesPeriodo } = require('../utils/fechas');
+-const crm = require('./crm.service');
++
++// ── Tablero financiero ──────────────────────────────────────────────────────────────────────────
++// Parámetros posicionales compartidos por las consultas del tablero:
++//   $1/$2 = intervalo [inicio, fin) del mes como instantes TIMESTAMPTZ (medianoche de Caracas, expresada en UTC)
++//   $3/$4 = primer y último día del mes (DATE)   ·   $5 = hoy en Caracas (DATE)
++// `pagos_referencias.revisado_en` es TIMESTAMPTZ: se compara contra instantes (sin desfase) y, para agrupar por día, se
++// proyecta a la hora de pared de Caracas con `AT TIME ZONE` antes de truncar a DATE.
++
++/** KPIs del mes: una sola ida a la base con subconsultas escalares independientes (cada una usa su índice). */
++const SQL_KPI = `
++  SELECT
++    (SELECT COALESCE(SUM(monto_usd), 0) FROM pagos_referencias
++      WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz)  AS cobrado_usd,
++    (SELECT COUNT(*)::int FROM pagos_referencias
++      WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz)  AS cobrado_n,
++    (SELECT COALESCE(SUM(monto_usd), 0) FROM cuotas
++      WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento < $5::date)                   AS vencido_usd,
++    (SELECT COUNT(*)::int FROM cuotas
++      WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento < $5::date)                   AS vencido_n,
++    (SELECT COALESCE(SUM(monto_usd), 0) FROM cuotas
++      WHERE estado IN ('Pendiente', 'En Revisión')
++        AND fecha_vencimiento BETWEEN $3::date AND $4::date AND fecha_vencimiento >= $5::date)         AS pendiente_usd,
++    (SELECT COUNT(*)::int FROM cuotas
++      WHERE estado IN ('Pendiente', 'En Revisión')
++        AND fecha_vencimiento BETWEEN $3::date AND $4::date AND fecha_vencimiento >= $5::date)         AS pendiente_n,
++    (SELECT COUNT(*)::int FROM pagos_referencias WHERE estado = 'Por Validar')                         AS por_validar_n`;
++
++/** Barras de recaudación diaria: SUM(monto_usd) por día calendario de Caracas (DATE → 'YYYY-MM-DD' por el parser de config/db). */
++const SQL_COBRADO_POR_DIA = `
++  SELECT (revisado_en AT TIME ZONE 'America/Caracas')::date AS dia, SUM(monto_usd) AS monto_usd
++    FROM pagos_referencias
++   WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz
++   GROUP BY 1
++   ORDER BY dia`;
+ 
+ /**
+- * Tablero financiero en tiempo real del período (por defecto, el mes en curso en hora de Caracas):
+- *   cobrado = referencias aprobadas en el mes · vencido = saldo de cuotas ya vencidas sin pagar (acumulado)
+- *   pendiente = cuotas del mes aún por vencer sin pagar · por_validar = referencias esperando auditoría
++ * Tablero financiero en tiempo real del período AAAA-MM (el controlador entrega por defecto el mes en curso en Caracas):
++ *   cobrado = referencias aprobadas dentro del mes · saldos_vencidos = cuotas ya vencidas sin pagar (acumulado, de cualquier mes)
++ *   cuentas_pendientes = cuotas del mes que aún no vencen y siguen sin pagar · referencias_por_validar = bandeja de auditoría
++ * Contrato de salida (estable, consumido por el panel y por `graphify`): ver CAMBIOS_BMA_FACTURACION.md.
+  */
+ async function tablero(periodo) {
+   const lim = limitesPeriodo(periodo);
+-  // $1/$2 = intervalo [inicio, fin) del mes en instantes UTC · $3/$4 = primer y último día del mes · $5 = hoy (Caracas)
+   const p = [aInstanteSql(lim.inicioUtc), aInstanteSql(lim.finUtc), aFechaSql(lim.desde), aFechaSql(lim.hasta), aFechaSql(hoyCaracas())];
+-  const [kpi, porDia, estudiantes] = await Promise.all([
+-    ejecutar(
+-      `SELECT
+-         (SELECT COALESCE(SUM(monto_usd), 0) FROM pagos_referencias WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz) AS cobrado_usd,
+-         (SELECT COUNT(*)::int FROM pagos_referencias WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz)                 AS cobrado_n,
+-         (SELECT COALESCE(SUM(monto_usd), 0) FROM cuotas WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento < $5::date)                               AS vencido_usd,
+-         (SELECT COUNT(*)::int FROM cuotas WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento < $5::date)                                              AS vencido_n,
+-         (SELECT COALESCE(SUM(monto_usd), 0) FROM cuotas WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento BETWEEN $3::date AND $4::date AND fecha_vencimiento >= $5::date) AS pendiente_usd,
+-         (SELECT COUNT(*)::int FROM cuotas WHERE estado IN ('Pendiente', 'En Revisión') AND fecha_vencimiento BETWEEN $3::date AND $4::date AND fecha_vencimiento >= $5::date)                AS pendiente_n,
+-         (SELECT COALESCE(SUM(monto_usd), 0) FROM cuotas WHERE estado <> 'Anulada' AND fecha_vencimiento BETWEEN $3::date AND $4::date)                               AS facturado_mes_usd,
+-         (SELECT COUNT(*)::int FROM pagos_referencias WHERE estado = 'Por Validar')                                                                                    AS por_validar_n`, p),
+-    ejecutar(
+-      `SELECT to_char(revisado_en AT TIME ZONE 'America/Caracas', 'YYYY-MM-DD') AS dia, SUM(monto_usd) AS cobrado_usd
+-       FROM pagos_referencias WHERE estado = 'Aprobada' AND revisado_en >= $1::timestamptz AND revisado_en < $2::timestamptz
+-       GROUP BY 1 ORDER BY 1`, p.slice(0, 2)),
+-    crm.resumen(),
++  // Las dos consultas son independientes: viajan en paralelo (cada una toma su propia conexión del pool).
++  const [kpi, porDia] = await Promise.all([
++    ejecutar(SQL_KPI, p),
++    ejecutar(SQL_COBRADO_POR_DIA, p.slice(0, 2)),
+   ]);
+   const k = kpi.rows[0];
+   return {
+@@ -36,10 +57,8 @@ async function tablero(periodo) {
+     cobrado: { monto_usd: Number(k.cobrado_usd), cantidad: k.cobrado_n },
+     saldos_vencidos: { monto_usd: Number(k.vencido_usd), cantidad: k.vencido_n },
+     cuentas_pendientes: { monto_usd: Number(k.pendiente_usd), cantidad: k.pendiente_n },
+-    facturado_mes_usd: Number(k.facturado_mes_usd),
+     referencias_por_validar: k.por_validar_n,
+-    cobrado_por_dia: porDia.rows.map((r) => ({ dia: r.dia, monto_usd: Number(r.cobrado_usd) })),
+-    estudiantes,
++    cobrado_por_dia: porDia.rows.map((r) => ({ dia: r.dia, monto_usd: Number(r.monto_usd) })),
+   };
+ }
+ 
+diff --git a/tests/facturacion-tablero.test.js b/tests/facturacion-tablero.test.js
+new file mode 100644
+index 0000000..feb131f
+--- /dev/null
++++ b/tests/facturacion-tablero.test.js
+@@ -0,0 +1,141 @@
++'use strict';
++const { db } = require('./helpers/entorno');
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const facturacion = require('../services/facturacion.service');
++const ctrl = require('../controllers/facturacion.controller');
++const { normalizar } = require('../middlewares/errorHandler');
++const { limitesPeriodo, periodoActual } = require('../utils/fechas');
++
++const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
++
++const CLAVES_CONTRATO = ['periodo', 'cobrado', 'saldos_vencidos', 'cuentas_pendientes', 'referencias_por_validar', 'cobrado_por_dia'];
++
++/** Base simulada del tablero: responde a las dos consultas y mide cuántas viajan a la vez. */
++function programarTablero({ kpi, dias = [] } = {}) {
++  db.reiniciar();
++  const estado = { enVuelo: 0, maxEnVuelo: 0 };
++  db.handler = async (texto) => {
++    estado.enVuelo += 1;
++    estado.maxEnVuelo = Math.max(estado.maxEnVuelo, estado.enVuelo);
++    await new Promise((r) => setImmediate(r)); // cede el turno: si fueran secuenciales, enVuelo nunca llegaría a 2
++    estado.enVuelo -= 1;
++    if (/AS cobrado_usd/.test(texto)) {
++      return rs(kpi || { cobrado_usd: 0, cobrado_n: 0, vencido_usd: 0, vencido_n: 0, pendiente_usd: 0, pendiente_n: 0, por_validar_n: 0 });
++    }
++    if (/GROUP BY 1/.test(texto)) return rs(...dias);
++    return rs();
++  };
++  return estado;
++}
++
++/** Simula (req, res, next) de Express para invocar el handler del controlador directamente. */
++async function invocar(handler, query = {}) {
++  const salida = { status: null, cuerpo: null, error: null };
++  const res = { status(c) { salida.status = c; return this; }, json(b) { salida.cuerpo = b; return this; } };
++  await new Promise((resolve) => {
++    const next = (err) => { salida.error = err || null; resolve(); };
++    const original = res.json.bind(res);
++    res.json = (b) => { original(b); resolve(); return res; };
++    handler({ query }, res, next);
++  });
++  return salida;
++}
++
++test('tablero: devuelve exactamente el contrato (sin campos extra) con importes numéricos', async () => {
++  programarTablero({
++    kpi: { cobrado_usd: 150.3, cobrado_n: 3, vencido_usd: 80, vencido_n: 2, pendiente_usd: 45.5, pendiente_n: 1, por_validar_n: 4 },
++    dias: [{ dia: '2026-10-02', monto_usd: 100.1 }, { dia: '2026-10-15', monto_usd: 50.2 }],
++  });
++  const r = await facturacion.tablero('2026-10');
++  assert.deepEqual(Object.keys(r), CLAVES_CONTRATO);
++  assert.deepEqual(r, {
++    periodo: '2026-10',
++    cobrado: { monto_usd: 150.3, cantidad: 3 },
++    saldos_vencidos: { monto_usd: 80, cantidad: 2 },
++    cuentas_pendientes: { monto_usd: 45.5, cantidad: 1 },
++    referencias_por_validar: 4,
++    cobrado_por_dia: [{ dia: '2026-10-02', monto_usd: 100.1 }, { dia: '2026-10-15', monto_usd: 50.2 }],
++  });
++});
++
++test('tablero: sin movimientos devuelve ceros y un arreglo vacío (nunca null)', async () => {
++  programarTablero();
++  const r = await facturacion.tablero('2026-01');
++  assert.equal(r.cobrado.monto_usd, 0);
++  assert.equal(r.saldos_vencidos.cantidad, 0);
++  assert.deepEqual(r.cobrado_por_dia, []);
++});
++
++test('tablero: dos consultas parametrizadas ($1…$n posicionales, sin concatenar datos) y en paralelo', async () => {
++  const estado = programarTablero();
++  await facturacion.tablero('2026-10');
++  assert.equal(db.llamadas.length, 2);
++  assert.equal(estado.maxEnVuelo, 2, 'las consultas del tablero deben viajar a la vez (Promise.all)');
++
++  const [kpi, porDia] = db.llamadas;
++  assert.ok(Array.isArray(kpi.params) && kpi.params.length === 5);
++  assert.ok(Array.isArray(porDia.params) && porDia.params.length === 2);
++  // Los datos viajan SOLO como parámetros: el texto SQL no contiene fechas ni importes incrustados.
++  for (const l of db.llamadas) assert.doesNotMatch(l.texto, /\d{4}-\d{2}-\d{2}/);
++  // Barras diarias: SUM por día calendario de Caracas con AT TIME ZONE nativo de PostgreSQL.
++  assert.match(porDia.texto, /SUM\(monto_usd\)/);
++  assert.match(porDia.texto, /revisado_en AT TIME ZONE 'America\/Caracas'/);
++  assert.match(porDia.texto, /GROUP BY 1\s+ORDER BY dia/);
++  assert.doesNotMatch(porDia.texto, /\b(DATETIME2|GETDATE|ISNULL|TOP\s+\d+)\b/i); // sin rastros de T-SQL
++});
++
++test('tablero: el intervalo del mes son instantes UTC a medianoche de Caracas (UTC-4), sin desfase de fechas', async () => {
++  programarTablero();
++  await facturacion.tablero('2026-10');
++  const { params } = db.llamadas[0];
++  assert.equal(params[0], '2026-10-01T04:00:00.000Z'); // 2026-10-01 00:00 en Caracas
++  assert.equal(params[1], '2026-11-01T04:00:00.000Z');
++  assert.equal(params[2], '2026-10-01');
++  assert.equal(params[3], '2026-10-31');
++  assert.match(params[4], /^\d{4}-\d{2}-\d{2}$/);
++  // Un cobro revisado el 30/sep a las 22:30 en Caracas (= 2026-10-01T02:30Z) pertenece a septiembre, no a octubre.
++  const lim = limitesPeriodo('2026-10');
++  assert.ok(Date.parse('2026-10-01T02:30:00Z') < lim.inicioUtc.getTime());
++});
++
++test('controlador tablero: sobre { ok:true, data } con el período de la query', async () => {
++  programarTablero();
++  const r = await invocar(ctrl.tablero, { periodo: '2026-09' });
++  assert.equal(r.error, null);
++  assert.equal(r.status, 200);
++  assert.equal(r.cuerpo.ok, true);
++  assert.deepEqual(Object.keys(r.cuerpo), ['ok', 'data']);
++  assert.deepEqual(Object.keys(r.cuerpo.data), CLAVES_CONTRATO);
++  assert.equal(r.cuerpo.data.periodo, '2026-09');
++});
++
++test('controlador tablero: sin período usa el mes en curso en hora de Caracas', async () => {
++  programarTablero();
++  const r = await invocar(ctrl.tablero, {});
++  assert.equal(r.cuerpo.data.periodo, periodoActual());
++  assert.match(r.cuerpo.data.periodo, /^\d{4}-(0[1-9]|1[0-2])$/);
++});
++
++test('controlador tablero: período inválido → AppError 422 VALIDACION (formato JSON de errores del Core)', async () => {
++  for (const periodo of ['2026-13', '2026-1', 'octubre', '2026-10-01', ['2026-10', '2026-11'], { a: 1 }]) {
++    programarTablero();
++    const r = await invocar(ctrl.tablero, { periodo });
++    assert.equal(r.cuerpo, null, `no debe responder datos para ${JSON.stringify(periodo)}`);
++    const n = normalizar(r.error);
++    assert.equal(n.status, 422);
++    assert.equal(n.codigo, 'VALIDACION');
++    assert.deepEqual(n.detalles, [{ campo: 'periodo', mensaje: 'Formato AAAA-MM.' }]);
++    assert.equal(db.llamadas.length, 0, 'un período inválido no debe tocar la base de datos');
++  }
++});
++
++test('controlador tablero: un fallo de PostgreSQL llega al errorHandler (no se traga ni expone SQL)', async () => {
++  db.reiniciar();
++  db.handler = async () => { throw Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014', severity: 'ERROR' }); };
++  const r = await invocar(ctrl.tablero, { periodo: '2026-10' });
++  const n = normalizar(r.error);
++  assert.equal(n.status, 504);
++  assert.equal(n.codigo, 'BASE_DATOS_TIMEOUT');
++  assert.doesNotMatch(JSON.stringify(n), /SELECT|pagos_referencias/);
++});
+diff --git a/tests/integracion.pg.test.js b/tests/integracion.pg.test.js
+index d66830b..f09cd48 100644
+--- a/tests/integracion.pg.test.js
++++ b/tests/integracion.pg.test.js
+@@ -432,14 +432,14 @@ t('generarMensualidades es idempotente, también con ejecuciones simultáneas (
+   assert.equal((await svc.facturacion.generarMensualidades(args)).creadas, 1);
+ });
+ 
+-t('tablero: KPIs numéricos, cobrado por día en hora de Caracas y resumen del CRM', async () => {
++t('tablero: contrato exacto, KPIs numéricos y cobrado por día en hora de Caracas', async () => {
+   const r = await svc.facturacion.tablero(svc.periodo());
+-  for (const k of [r.cobrado.monto_usd, r.saldos_vencidos.monto_usd, r.cuentas_pendientes.monto_usd, r.facturado_mes_usd]) assert.equal(typeof k, 'number');
++  assert.deepEqual(Object.keys(r), ['periodo', 'cobrado', 'saldos_vencidos', 'cuentas_pendientes', 'referencias_por_validar', 'cobrado_por_dia']);
++  for (const k of [r.cobrado.monto_usd, r.saldos_vencidos.monto_usd, r.cuentas_pendientes.monto_usd]) assert.equal(typeof k, 'number');
+   assert.ok(r.cobrado.cantidad >= 2 && r.cobrado.monto_usd >= 100);
+   assert.ok(r.saldos_vencidos.cantidad >= 1);
+   assert.ok(r.cobrado_por_dia.length >= 1 && /^\d{4}-\d{2}-\d{2}$/.test(r.cobrado_por_dia[0].dia));
+   assert.equal(r.cobrado_por_dia.reduce((a, d) => a + d.monto_usd, 0), r.cobrado.monto_usd);
+-  assert.ok(r.estudiantes.total > 0);
+   assert.equal(r.referencias_por_validar, (await uno(`SELECT COUNT(*)::int AS n FROM pagos_referencias WHERE estado = 'Por Validar'`)).n);
+ });
+ 

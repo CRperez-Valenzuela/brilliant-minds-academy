@@ -9,12 +9,18 @@ const { asyncHandler, ok } = require('../utils/http');
 const ESTADOS_PAGO = ['Por Validar', 'Aprobada', 'Rechazada'];
 const ESTADOS_CUOTA = ['Pendiente', 'En Revisión', 'Pagada', 'Anulada'];
 
+/** `?periodo=AAAA-MM`; si falta, el mes en curso en hora de Caracas. Un valor inválido (o repetido) → 422 VALIDACION. */
 function periodoDe(query) {
-  const p = query.periodo || periodoActual();
-  if (!esPeriodoValido(p)) throw e.validacion([{ campo: 'periodo', mensaje: 'Formato AAAA-MM.' }]);
+  const p = query.periodo === undefined || query.periodo === '' ? periodoActual() : query.periodo;
+  if (typeof p !== 'string' || !esPeriodoValido(p)) throw e.validacion([{ campo: 'periodo', mensaje: 'Formato AAAA-MM.' }]);
   return p;
 }
 
+/**
+ * GET /api/facturacion/tablero?periodo=AAAA-MM  →  200 { ok:true, data:{ periodo, cobrado, saldos_vencidos, cuentas_pendientes,
+ * referencias_por_validar, cobrado_por_dia[] } }. Los errores (validación, base de datos) los traduce middlewares/errorHandler a
+ * { ok:false, error:{ codigo, mensaje, detalles?, requestId } }.
+ */
 const tablero = asyncHandler(async (req, res) => ok(res, await facturacion.tablero(periodoDe(req.query))));
 
 const auditoria = asyncHandler(async (req, res) => {

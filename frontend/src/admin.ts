@@ -16,6 +16,7 @@ import type {
   AlertaWhatsapp,
   BalanceContable,
   CodigoModuloPremium,
+  ConteoEstudiantes,
   DetalleModuloPremium,
   EstadoPagoReferencia,
   EstudianteListado,
@@ -439,14 +440,13 @@ function aplicarAlturas(raiz: ParentNode): void {
   }
 }
 
-function tableroHtml(d: TableroFacturacion): HtmlSeguro {
+function tableroHtml(d: TableroFacturacion, e: ConteoEstudiantes): HtmlSeguro {
   const kpis: readonly TarjetaKpi[] = [
     { titulo: 'Cobrado', valor: usd(d.cobrado.monto_usd), detalle: `${d.cobrado.cantidad} pago(s) aprobados`, icono: 'wallet', tono: 'normal' },
     { titulo: 'Saldos vencidos', valor: usd(d.saldos_vencidos.monto_usd), detalle: `${d.saldos_vencidos.cantidad} cuota(s) vencida(s)`, icono: 'alert', tono: 'malo' },
     { titulo: 'Cuentas pendientes del mes', valor: usd(d.cuentas_pendientes.monto_usd), detalle: `${d.cuentas_pendientes.cantidad} cuota(s) por cobrar`, icono: 'book', tono: 'normal' },
     { titulo: 'Referencias por validar', valor: String(d.referencias_por_validar), detalle: 'en la bandeja de auditoría', icono: 'inbox', tono: 'normal' },
   ];
-  const e = d.estudiantes;
   return html`
     <section aria-label="Indicadores del mes" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">${kpis.map(tarjetaKpi)}</section>
     <section aria-label="Estudiantes por estado" class="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -460,7 +460,7 @@ function tableroHtml(d: TableroFacturacion): HtmlSeguro {
     <section class="${CLS.tarjeta} mt-6 p-6" aria-labelledby="t-barras">
       <div class="mb-4 flex flex-wrap items-baseline justify-between gap-2">
         <h2 id="t-barras" class="text-base font-bold text-slate-900">Recaudación diaria</h2>
-        <p class="text-sm text-slate-600">Facturado del mes: <strong class="text-slate-900">${usd(d.facturado_mes_usd)}</strong></p>
+        <p class="text-sm text-slate-600">Cobrado del mes: <strong class="text-slate-900">${usd(d.cobrado.monto_usd)}</strong></p>
       </div>
       ${barrasHtml(d)}
     </section>`;
@@ -470,9 +470,12 @@ async function cargarTablero(ctx: Contexto, silencioso: boolean): Promise<void> 
   const destino = obtener('#tablero', HTMLElement, ctx.zona);
   if (!silencioso) montar(destino, html`<div class="h-48 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando tablero"></div>`);
   try {
-    const datos = await bma.get<TableroFacturacion>('/facturacion/tablero', { periodo: estado.periodo });
+    const [datos, estudiantes] = await Promise.all([
+      bma.get<TableroFacturacion>('/facturacion/tablero', { periodo: estado.periodo }),
+      bma.get<ConteoEstudiantes>('/estudiantes/resumen'),
+    ]);
     if (!ctx.vigente()) return;
-    montar(destino, tableroHtml(datos));
+    montar(destino, tableroHtml(datos, estudiantes));
     aplicarAlturas(destino);
     const reloj = buscar('#actualizado', HTMLElement, ctx.zona);
     if (reloj) reloj.textContent = `Actualizado a las ${horaConSegundos(new Date())}`;
