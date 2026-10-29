@@ -1,0 +1,1430 @@
+diff --git a/CAMBIOS_BMA_INTEGRACION.md b/CAMBIOS_BMA_INTEGRACION.md
+new file mode 100644
+index 0000000..78cb624
+--- /dev/null
++++ b/CAMBIOS_BMA_INTEGRACION.md
+@@ -0,0 +1,108 @@
++# CAMBIOS_BMA_INTEGRACION — Animación de login, seed multi-sede y vista de configuración de cobro
++
++**Proyecto:** Brilliant Minds Academy · **Base:** `origin/development` @ `277958c` · **Agente:** Arquitecto Principal, Astra Digital Solutions
++**Motor:** PostgreSQL 15+ / Supabase (`pg` nativo, parámetros posicionales `$1…$n`, errores JSON estables). Sin residuos de MSSQL.
++
++> **Importante — el enunciado asumía un esquema que no es el real.** Antes de escribir código se leyeron las migraciones 001–007, `config/db.js`, `configuracion.controller.js`, `parametros.service.js`, `utils/alcance.js` y las utilidades del frontend. Las diferencias (tabla de decisiones más abajo) cambiaron el diseño del seed y de la vista; un primer borrador hecho sobre el esquema supuesto se descartó.
++
++## Verificación realizada
++
++| Verificación | Resultado |
++|---|---|
++| `npm test` sin BD (incluye la auditoría estática `schema-consistencia`: tablas/columnas/`ON CONFLICT`/`$n` del `seed.js`) | 155 pruebas: **107 OK · 0 fallos** · 48 omitidas |
++| `PG_TEST_PORT=… npm test` contra **PostgreSQL 16 real** (clúster temporal con roles `anon`/`authenticated`) | **155/155** |
++| `scripts/seed.js` sobre PG 16 con migraciones 001–007 aplicadas | Corrida 1: 2 sedes, 3 usuarios, 3 cuentas, 5 representantes, 5 estudiantes, 14 cuotas, 2 referencias · **11/11 comprobaciones OK** |
++| Idempotencia | Corrida 2: solo fija la matrícula (0.00 → 120.00) · Corrida 3: **0 filas nuevas** · `--reset`: borra y recrea las mismas filas |
++| Caso negativo | Con el trigger `trg_cuotas_heredar_sede` deshabilitado, el seed **falla** (`SEED_VERIFICACION`), hace **ROLLBACK** y no deja datos (verificado con `COUNT(*)`) |
++| Verificación independiente con `psql` | 3 Activo/Moroso por sede correctos vía `vw_estudiantes_estado`; `sede_id` heredado en cuotas y pagos; secretarias con sede y admin con `sede_id` NULL |
++| `tsc` 7.0.2 sobre `frontend/src` con el `tsconfig` estricto del proyecto (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`…) | 0 errores |
++| Lógica de validación (`validarCuenta`, `parsearMonto`, `esAccesoConsolidado`) ejecutada sobre el TS real | 17/17 |
++| **Chromium real** (Playwright) con API simulada | 21/21: ver «Pruebas de navegador» |
++| Tailwind 4.3.3 compilando los tokens literales de `login-animation.ts` | Las 7 animaciones y `motion-reduce` se generan con los valores esperados |
++
++**Pruebas de navegador (21):** 3 capas + destello con ID único; cada capa con su animación; keyframes registrados; «A» acentuada; promesa de fin; transform final = identidad; `prefers-reduced-motion` sin animación; secretaria ve «Sección restringida» y no dispara peticiones; admin consolidado carga `/configuracion` + `/sedes`; aviso de matrícula sin configurar; **XSS** (`<img onerror>` en un titular se ve como texto y no se ejecuta); ámbito común/sede en la tabla; matrícula inválida no envía `PUT`; `PUT /configuracion/matricula` con `125.5`; formulario vacío exige método/ámbito/titular; campos de Pago Móvil; `POST` con `detalle` tipado y `sede_id` 2; cuenta común con `sede_id: null` y correo normalizado; detalle antiguo con aviso; activar/desactivar reenvía el cuerpo completo.
++Además se muestreó la animación con la Web Animations API: en t=0 estructura en (0, −64) con blur 6 px, flecha en (−56, +56) y pata en (0, +56); acople magnético a escala 1.028 hacia 1.3 s; destello visible entre 1.4 s y 2.25 s.
++
++**Límites honestos**
++- `pg` real, `vite`, `tailwindcss` 3.4 y `bcryptjs` **no se pudieron instalar** (registro de npm inaccesible). El seed corrió con el cliente mínimo `tests/helpers/pg-minimo.js` (misma precarga que usa la integración del repo) contra un PostgreSQL 16 real. **No se probó contra Supabase en la nube ni con TLS/pooler.** Por eso los arreglos se envían como literal (`'{1,2}'` + `::int[]`): funciona igual con `pg` real y con el cliente mínimo.
++- El CSS de las pruebas de navegador se compiló con Tailwind **4.3.3** (único disponible); el frontend declara **3.4**. La sintaxis usada (`[animation:…]`, `motion-reduce:`) es idéntica en ambas. **Falta ejecutar `npm run frontend:install && npm run frontend:build`** y mirar el login y la nueva vista en pantalla.
++- **`public/` NO se regeneró** (salida de Vite con hashes): los cambios de `frontend/src` no se ven hasta recompilar.
++- La geometría del logotipo es **provisional** (ver «Qué depende de la marca»). No se midió contraste ni responsive en pantalla real.
++- Este clon del repositorio es de **solo lectura** para la sesión: los cambios están en el árbol de trabajo (sin commit ni push). Se entrega también `bma-integracion.patch` (convención del repo) para aplicarlos con `git apply`.
++
++## Decisiones y desviaciones respecto al enunciado
++
++| Enunciado | Qué se hizo y por qué |
++|---|---|
++| `public.sedes` con «Sede Acarigua / Barquisimeto» | La tabla real es `sedes(id SERIAL, nombre UNIQUE, activa)`: **no existe `codigo`**. Se siembran por `nombre` (`ON CONFLICT (nombre)`). |
++| «SuperAdmin con `sede_id = NULL`» | El `CHECK` de `usuarios_admin.rol` solo admite `'admin'`/`'secretaria'`. El SuperAdmin es **`rol='admin'` con `sede_id NULL`** (así lo define `utils/alcance.js`). Una secretaria sin sede sería rechazada (`SEDE_NO_ASIGNADA`). |
++| Pool propio de `pg` con `DATABASE_URL` | Se reutiliza **`config/db.js`** (`conTransaccion`, `ejecutar`, `closePool`): mismas variables `DB_*`, TLS de Supabase, rollback seguro y conversión de tipos del proyecto. No hay segunda configuración de conexión. |
++| 5 estudiantes «Morosos» con `Vencida` | No existe el estado `Vencida`: la mora es **derivada** (`vw_estudiantes_estado`: cuota `Pendiente`/`En Revisión` con vencimiento pasado, hora de Caracas). El seed crea esos casos y la verificación confirma 3 `Activo` + 2 `Moroso` desde la vista. |
++| «Referencias en la bandeja de auditoría» | `pagos_referencias` con estado `Por Validar`, `tasa_bcv` y `monto_bs` obligatorios (calculado con `ROUND($n * $m, 2)`), y su cuota en `En Revisión` como lo hace `pagos.service.js`. |
++| «Verificar herencia de sede y RLS» | `sede_id` se **omite** en `cuotas` y `pagos_referencias` (los hereda el trigger 006) y se **asigna explícito** en `estudiantes` (no tiene trigger). El aislamiento se prueba con el mismo predicado de la app `($n::int IS NULL OR x.sede_id = $n::int)`. RLS se prueba **funcionalmente** (`SET LOCAL ROLE anon/authenticated` dentro de un `SAVEPOINT`): `42501` o 0 filas = correcto; si esos roles no existen (PG común) se informa «no aplica». No se leen catálogos porque `schema-consistencia` lo prohíbe. |
++| `--reset` («limpiar e insertar») | Borra **solo** las filas de prueba (cédulas `V-9000000x`, correos `@seed.bma.test`, cuentas «(prueba)»). Una sede solo se elimina si **nada ajeno** al seed depende de ella. Bloqueado con `NODE_ENV=production` salvo `SEED_ALLOW_PROD=1`. |
++| Contraseñas de las cuentas de prueba | `password_hash` es obligatorio. Se usa `SEED_PASSWORD` (≥ 12) o una aleatoria **mostrada una sola vez** al crear las cuentas; nunca queda en el código. Mismo criterio que `crear-admin.js`. |
++| `PUT /api/configuracion/matricula` | Existe y es **global** (parámetro `MATRICULA_USD`), no por sede. La vista lo respeta; no se inventó un backend por sede. |
++| `POST /api/configuracion/cuentas` para «añadir o editar» | Añadir = `POST`. **Editar y activar/desactivar = `PUT /configuracion/cuentas/:id`**, que ya existe. El `PUT` exige el cuerpo completo (si falta `activa`, el servidor lo pone en `true`): la vista siempre lo reenvía completo. |
++| «Datos públicos de cuenta tipados» | El backend guarda `{metodo, titular, detalle ≤ 500}` (texto). La vista define campos por método (correo, Pay ID, banco/teléfono/cédula), los valida y **compone** un `detalle` de formato fijo (`Banco 0102 · Tel 04141234567 · Cédula/RIF V12345678`); al editar lo **interpreta**. Un `detalle` antiguo que no siga el formato se muestra tal cual y se pide re-ingresarlo. Sin cambios de esquema. |
++| «Secretaría o administrador» gestionan cuentas | Las 4 rutas son `soloConsolidado` en `routes/index.js`: una secretaria (o un admin con sede) recibe 403. La vista **no finge** permiso: muestra «Sección restringida» sin llamar a la API. Ver propuesta en «Piezas adelantables». |
++| «`sede_id` o común» obligatorio | El selector de ámbito **no tiene valor por defecto**: hay que elegir «Común» (`sede_id: null`) o una sede. Una cuenta de sede solo la ven las familias de esa sede (`cuentasActivas`). |
++| Animación con «transiciones atómicas de Tailwind» | Las clases `[animation:…]` van **literales** en el código (Tailwind solo genera CSS de clases escritas tal cual; componerlas con `${…}` no habría funcionado en producción — defecto detectado y corregido en la verificación). Los `@keyframes` no existen como clase: se registran una vez con `adoptedStyleSheets` (válido bajo CSP estricta) con respaldo `<style>`. `clasesCoherentes()` comprueba que los tiempos de JS y de las clases coinciden. |
++| Imagotipo en 3 capas | IDs únicos: `bma-capa-estructura`, `bma-capa-flecha`, `bma-capa-pata` (+ `bma-destello`). La estructura es el trazo de una **«A»** y la flecha su travesaño ascendente; al final la «A» de «Astra Academy» se tiñe con el acento. |
++
++## Archivos creados
++
++| Archivo | Para qué |
++|---|---|
++| `scripts/seed.js` | Siembra idempotente y transaccional de 2 sedes, 3 usuarios, 5 estudiantes (3 Activo / 2 Moroso), cuotas, 2 referencias `Por Validar`, 3 cuentas y matrícula de prueba; verifica 11 reglas y revierte si alguna falla. `node scripts/seed.js [--reset]`. |
++| `frontend/src/configuracion.ts` | Vista «Configuración de cobro»: formulario de matrícula en USD y gestión tipada de cuentas (Zelle, Binance Pay, PayPal, Pago Móvil) por ámbito Común/sede. Exporta `vistaConfiguracion`, `validarCuenta`, `parsearMonto`, `esAccesoConsolidado`. |
++| `frontend/src/login-animation.ts` | Logotipo SVG de 3 capas con la animación de ensamblaje; exporta `montarAnimacionLogin`, `logotipoHtml`, `CLASES`, `TIEMPOS`, `KEYFRAMES_CSS`, `clasesCoherentes`. |
++| `CAMBIOS_BMA_INTEGRACION.md` | Este resumen. |
++| `bma-integracion.patch` | Todos los cambios anteriores como parche (convención del repo). |
++
++## Archivos modificados
++
++| Archivo | Cambio |
++|---|---|
++| `frontend/src/admin.ts` | Importa las dos piezas; nueva entrada de menú «Configuración de cobro» (`soloAdmin`) y su ruta en `navegar`; el login monta `#login-logo` con la animación (reemplaza el icono provisional). |
++| `frontend/src/api/bmaClient.ts` | Nuevo `bma.put()` (el cliente solo tenía `get/post`; `OpcionesPeticion` ya admitía `PUT`). |
++| `frontend/src/types/index.ts` | `VistaAdmin` suma `'configuracion'`; nuevos `CuentaCobro`, `ConfiguracionAcademia`, `SedeResumen`, `CuerpoCuenta`. |
++
++Sin cambios en backend, migraciones, `package.json` ni `tailwind.config.js`.
++
++## Cómo usarlo
++
++```bash
++# Semilla (requiere DB_* en .env y migraciones aplicadas: npm run migrate)
++SEED_PASSWORD='una-clave-de-12+' node scripts/seed.js          # idempotente
++node scripts/seed.js --reset                                   # solo filas de prueba
++
++# Frontend
++npm run frontend:install && npm run frontend:build             # regenera public/
++```
++
++## Qué depende de la marca del cliente (único pendiente de estas piezas)
++
++- **`TRAZOS`** (los `d` de los 3 paths) y **`METAL`** (degradado) en `login-animation.ts`: al llegar el logotipo final solo se sustituyen esas constantes; IDs, coreografía y API no cambian. La «A» acentuada usa `#0369a1` (provisional) en el keyframe `bma-acento-a`.
++- Paleta, tipografía y favicon (hoy Slate neutro y `data:,`).
++
++## Análisis del repositorio: piezas de lógica que se pueden adelantar hoy sin la marca
++
++Hallazgo principal: **el backend está bastante más completo que el frontend.** Endpoints ya implementados y sin ninguna pantalla que los consuma (verificado con búsqueda en `frontend/src`): `facturacion/cuotas`, `generar-mensualidades`, `contabilidad/{personal,horas,nomina,egresos}`, `/invitaciones` y las acciones de `/sedes`; tampoco hay UI para retirar/reactivar estudiantes ni detalle de estudiante. Ordenadas por valor/esfuerzo:
++
++| # | Pieza | Estado del backend | Depende de marca |
++|---|---|---|---|
++| 1 | **Vista Sedes e Invitaciones** (crear/activar sede; generar enlace de inscripción con nivel y vigencia, copiarlo y revocarlo). Es el flujo que sostiene el multi-sede. | Listo (`/sedes`, `/invitaciones`) | No |
++| 2 | **Vista Facturación**: crear cuota, generar mensualidades masivas (acción `soloAdmin`), listado de cuotas con filtros por sede/estado. | Listo | No |
++| 3 | **Contabilidad completa**: personal, registro de horas, cálculo y pago de nómina, egresos. Hoy solo existe el balance. | Listo (solo consolidado) | No |
++| 4 | **Ficha de estudiante** con retirar/reactivar y su historial de cuotas/pagos/notificaciones. | Listo (`/estudiantes/:id`, `retirar`, `reactivar`) | No |
++| 5 | **Pruebas del frontend en CI**: pasar `validarCuenta`/`parsearMonto`/`clasesCoherentes` a `node:test` (con `tsx`) y automatizar las pruebas de navegador usadas aquí. Hoy `tests/` no cubre `frontend/`. | — | No |
++| 6 | **Workflow de CI** (GitHub Actions): `tsc`, `frontend:build`, `npm test` y la integración con un servicio PostgreSQL; que el build regenere `public/`. | — | No |
++| 7 | **Seed en la integración**: una prueba que ejecute `seed.js` dos veces sobre la BD desechable de `integracion.pg.test.js` (idempotencia + herencia de sede) y un alias `npm run seed`. | — | No |
++| 8 | **Mecanismo de marca**: mover paleta y tipografía a variables CSS / `theme.extend` (alias `marca-*` apuntando hoy a Slate) para que el cambio de identidad sea de un solo archivo. | — | Solo el cambio final |
++| 9 | **Auditoría de cambios de configuración** (quién cambió la matrícula o una cuenta y cuándo): migración 008 + escritura en `configuracion.controller`. Es información sensible de cobro. | Requiere migración | No |
++| 10 | **Estados vacíos/carga/errores y accesibilidad** de las vistas nuevas con la skill `design:accessibility-review` (contraste y objetivos táctiles medidos en pantalla real tras el build). | — | No |
++
++**Decisiones de negocio que bloquean (no se programaron a propósito):**
++- **Matrícula por sede.** Hoy es un único valor global. Cambiarlo implica una migración (p. ej. `parametros` con alcance por sede o una tabla `matricula_sede`), ajustar `parametros.matriculaUsd(sedeId)` y el formulario de invitación. Confirmar con el cliente si las sedes cobran distinto.
++- **Autonomía de la secretaria.** Si cada secretaria debe administrar las cuentas de **su** sede, hay que relajar `soloConsolidado` en `POST/PUT /configuracion/cuentas` aplicando `alcanceDe(req.usuario)` (forzar `sede_id` = la suya y prohibir «común»). Además `GET /configuracion` (que también alimenta la matrícula) es solo-consolidado: haría falta una lectura por alcance y, en la vista, separar la sección de matrícula (consolidado) de la de cuentas (por sede) y relajar `esAccesoConsolidado` solo para esta última.
+diff --git a/frontend/src/admin.ts b/frontend/src/admin.ts
+index cdf8c6d..39236d3 100644
+--- a/frontend/src/admin.ts
++++ b/frontend/src/admin.ts
+@@ -12,6 +12,8 @@ import { html, montar, raw, urlSegura, type HtmlSeguro } from './lib/html';
+ import { icono, type NombreIcono } from './lib/icons';
+ import { bs, diasDelPeriodo, fechaCorta, fechaHora, horaConSegundos, nombreMetodo, periodoActual, tasa as formatoTasa, usd } from './lib/format';
+ import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiquetaEstado, notificar, obtener, todos } from './lib/ui';
++import { vistaConfiguracion } from './configuracion';
++import { montarAnimacionLogin } from './login-animation';
+ import type {
+   AlertaWhatsapp,
+   BalanceContable,
+@@ -54,6 +56,7 @@ const VISTAS: readonly DefVista[] = [
+   { id: 'estudiantes', titulo: 'Estudiantes', icono: 'users', soloAdmin: false },
+   { id: 'auditoria', titulo: 'Auditoría de referencias', icono: 'inbox', soloAdmin: false },
+   { id: 'contabilidad', titulo: 'Contabilidad', icono: 'book', soloAdmin: true },
++  { id: 'configuracion', titulo: 'Configuración de cobro', icono: 'wallet', soloAdmin: true },
+ ];
+ 
+ const ICONO_MODULO: Readonly<Record<CodigoModuloPremium, NombreIcono>> = {
+@@ -156,12 +159,10 @@ function mostrarLogin(mensaje?: string): void {
+   montar(
+     obtener('#app', HTMLElement),
+     html`<main class="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 px-4 py-12">
+-      <div class="flex items-center gap-4">
+-        <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-900 text-white">${icono('school', 'h-6 w-6')}</span>
+-        <div>
+-          <h1 class="${CLS.titulo}">Brilliant Minds Academy</h1>
+-          <p class="${CLS.subtitulo}">Panel administrativo</p>
+-        </div>
++      <div id="login-logo" class="w-full"></div>
++      <div class="text-center">
++        <h1 class="${CLS.titulo}">Brilliant Minds Academy</h1>
++        <p class="${CLS.subtitulo}">Panel administrativo</p>
+       </div>
+       <form id="login" novalidate class="${CLS.tarjetaCristal} flex flex-col gap-4 p-6" aria-label="Iniciar sesión">
+         <div id="login-aviso">${mensaje ? aviso('warn', mensaje) : null}</div>
+@@ -177,6 +178,7 @@ function mostrarLogin(mensaje?: string): void {
+       </form>
+     </main>`,
+   );
++  void montarAnimacionLogin(obtener('#login-logo', HTMLElement));
+   const form = obtener('#login', HTMLFormElement);
+   form.addEventListener('submit', (ev) => {
+     ev.preventDefault();
+@@ -340,6 +342,7 @@ async function navegar(id: string): Promise<void> {
+     else if (id === 'estudiantes') await vistaEstudiantes(ctx);
+     else if (id === 'auditoria') await vistaAuditoria(ctx);
+     else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
++    else if (id === 'configuracion' && esAdmin()) await vistaConfiguracion({ zona: ctx.zona, vigente: ctx.vigente, usuario: estado.usuario });
+     else await vistaDashboard(ctx);
+   } catch (e: unknown) {
+     manejarError(e, ctx);
+diff --git a/frontend/src/api/bmaClient.ts b/frontend/src/api/bmaClient.ts
+index 9eb8c53..c68810d 100644
+--- a/frontend/src/api/bmaClient.ts
++++ b/frontend/src/api/bmaClient.ts
+@@ -234,6 +234,10 @@ export const bma = {
+     return (await sobre<T>(ruta, { ...extra, metodo: 'POST', cuerpo })).data;
+   },
+ 
++  async put<T>(ruta: string, cuerpo: object = {}, extra: Omit<OpcionesPeticion, 'cuerpo' | 'metodo'> = {}): Promise<T> {
++    return (await sobre<T>(ruta, { ...extra, metodo: 'PUT', cuerpo })).data;
++  },
++
+   /** Listados paginados: `{ ok, data: T[], paginacion }`. */
+   async pagina<T>(ruta: string, consulta?: ParametrosConsulta): Promise<Pagina<T>> {
+     const s = await sobre<readonly T[]>(ruta, consulta ? { consulta } : {});
+diff --git a/frontend/src/configuracion.ts b/frontend/src/configuracion.ts
+new file mode 100644
+index 0000000..c53463a
+--- /dev/null
++++ b/frontend/src/configuracion.ts
+@@ -0,0 +1,541 @@
++/**
++ * Vista administrativa «Configuración de cobro» (acceso consolidado: rol admin sin sede).
++ *  - Costo de la matrícula en USD            → GET /api/configuracion · PUT  /api/configuracion/matricula
++ *  - Cuentas de cobro (Zelle, Binance Pay, PayPal y Pago Móvil)
++ *                                            → GET /api/configuracion · POST /api/configuracion/cuentas
++ *                                              (editar / activar / desactivar: PUT /api/configuracion/cuentas/:id)
++ *  - Ámbito de cada cuenta: «Común» (sede_id NULL) o una sede concreta. El portal público muestra a cada familia las cuentas
++ *    activas comunes + las de SU sede (services/parametros.service.js → cuentasActivas), por eso el ámbito es obligatorio.
++ *
++ * El backend guarda cada cuenta como { metodo, titular, detalle (texto ≤ 500) }. Para que el dato sea TIPADO, cada método define sus
++ * campos (correo, banco, teléfono…), se validan en el cliente y se COMPONEN en un `detalle` con formato fijo; al editar se
++ * INTERPRETAN de vuelta. Un `detalle` antiguo que no siga el formato se muestra tal cual y se pide re-ingresarlo con campos.
++ * El servidor repite todas las validaciones: aquí solo se evita el viaje de ida y vuelta.
++ *
++ * Todo texto dinámico pasa por la etiqueta `html` (escape XSS automático); los errores se escriben con `textContent`.
++ */
++import { bma, BmaApiError, BmaSesionExpiradaError, mensajeDeError } from './api/bmaClient';
++import { html, montar, type HtmlSeguro } from './lib/html';
++import { icono } from './lib/icons';
++import { nombreMetodo, usd } from './lib/format';
++import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos, type Modal } from './lib/ui';
++import type { ConfiguracionAcademia, CuentaCobro, CuerpoCuenta, MetodoPago, SedeResumen, Usuario } from './types/index';
++
++// ───────────────────────── Definición tipada de cada método ─────────────────────────
++
++type Valores = Readonly<Record<string, string>>;
++const v = (valores: Valores, clave: string): string => valores[clave] ?? '';
++
++interface DefCampo {
++  readonly id: string;
++  readonly etiqueta: string;
++  readonly tipo: 'text' | 'email';
++  readonly inputmode: 'text' | 'email' | 'numeric' | 'tel';
++  readonly placeholder: string;
++  readonly ayuda: string;
++  readonly error: string;
++  readonly patron: RegExp;
++  readonly normalizar: (texto: string) => string;
++}
++
++interface DefMetodo {
++  readonly campos: readonly DefCampo[];
++  readonly componer: (valores: Valores) => string;
++  /** `null` si el detalle guardado no sigue el formato estructurado (cuenta cargada antes de esta vista). */
++  readonly interpretar: (detalle: string) => Valores | null;
++}
++
++const RE_CORREO = /^[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,}$/;
++const RE_PAY_ID = /^(?:\d{6,20}|[^\s@]{1,64}@[^\s@]+\.[^\s@]{2,})$/;
++const RE_PAGO_MOVIL = /^Banco (\d{4}) · Tel (0\d{10}) · Cédula\/RIF ([VEJGP]\d{5,10})$/;
++
++const campoCorreo = (id: string, etiquetaTexto: string, ayuda: string): DefCampo => ({
++  id,
++  etiqueta: etiquetaTexto,
++  tipo: 'email',
++  inputmode: 'email',
++  placeholder: 'pagos@academia.com',
++  ayuda,
++  error: 'Escribe un correo válido, por ejemplo pagos@academia.com.',
++  patron: RE_CORREO,
++  normalizar: (t) => t.trim().toLowerCase(),
++});
++
++const DEFINICIONES: Readonly<Record<MetodoPago, DefMetodo>> = {
++  ZELLE: {
++    campos: [campoCorreo('correo', 'Correo de Zelle', 'Correo con el que la academia recibe pagos por Zelle.')],
++    componer: (x) => v(x, 'correo'),
++    interpretar: (d) => (RE_CORREO.test(d) ? { correo: d } : null),
++  },
++  PAYPAL: {
++    campos: [campoCorreo('correo', 'Correo de PayPal', 'Cuenta de PayPal que recibe los pagos.')],
++    componer: (x) => v(x, 'correo'),
++    interpretar: (d) => (RE_CORREO.test(d) ? { correo: d } : null),
++  },
++  BINANCE: {
++    campos: [
++      {
++        id: 'idBinance',
++        etiqueta: 'Pay ID o correo de Binance',
++        tipo: 'text',
++        inputmode: 'text',
++        placeholder: '123456789',
++        ayuda: 'Pay ID numérico (6 a 20 dígitos) o el correo de la cuenta Binance.',
++        error: 'Escribe un Pay ID numérico de 6 a 20 dígitos o un correo válido.',
++        patron: RE_PAY_ID,
++        normalizar: (t) => t.trim().toLowerCase(),
++      },
++    ],
++    componer: (x) => v(x, 'idBinance'),
++    interpretar: (d) => (RE_PAY_ID.test(d) ? { idBinance: d } : null),
++  },
++  PAGO_MOVIL: {
++    campos: [
++      {
++        id: 'banco',
++        etiqueta: 'Código del banco',
++        tipo: 'text',
++        inputmode: 'numeric',
++        placeholder: '0102',
++        ayuda: 'Cuatro dígitos (0102 = Banco de Venezuela, 0105 = Mercantil…).',
++        error: 'El código del banco son exactamente 4 dígitos.',
++        patron: /^\d{4}$/,
++        normalizar: (t) => t.trim(),
++      },
++      {
++        id: 'telefono',
++        etiqueta: 'Teléfono afiliado',
++        tipo: 'text',
++        inputmode: 'tel',
++        placeholder: '04141234567',
++        ayuda: '11 dígitos, empezando por 0 (sin espacios ni guiones).',
++        error: 'Escribe 11 dígitos empezando por 0, por ejemplo 04141234567.',
++        patron: /^0\d{10}$/,
++        normalizar: (t) => t.replace(/[\s.-]/g, ''),
++      },
++      {
++        id: 'documento',
++        etiqueta: 'Cédula o RIF del titular',
++        tipo: 'text',
++        inputmode: 'text',
++        placeholder: 'V12345678',
++        ayuda: 'Letra (V, E, J, G o P) seguida de 5 a 10 dígitos.',
++        error: 'Escribe la letra (V, E, J, G o P) y de 5 a 10 dígitos, por ejemplo V12345678.',
++        patron: /^[VEJGP]\d{5,10}$/,
++        normalizar: (t) => t.replace(/[\s.-]/g, '').toUpperCase(),
++      },
++    ],
++    componer: (x) => `Banco ${v(x, 'banco')} · Tel ${v(x, 'telefono')} · Cédula/RIF ${v(x, 'documento')}`,
++    interpretar: (d) => {
++      const m = RE_PAGO_MOVIL.exec(d);
++      return m ? { banco: m[1] ?? '', telefono: m[2] ?? '', documento: m[3] ?? '' } : null;
++    },
++  },
++};
++
++const METODOS: readonly MetodoPago[] = ['ZELLE', 'BINANCE', 'PAYPAL', 'PAGO_MOVIL'];
++const MAX_TITULAR = 150;
++const MAX_MATRICULA = 99_999_999;
++
++const esMetodo = (x: string): x is MetodoPago => METODOS.some((m) => m === x);
++
++// ───────────────────────── Validación (pura, sin DOM) ─────────────────────────
++
++export interface ResultadoCuenta {
++  readonly errores: Readonly<Record<string, string>>;
++  readonly cuerpo: CuerpoCuenta | null;
++}
++
++/** `ambito`: '' (sin elegir) · 'comun' (sede_id NULL) · id de sede en texto. */
++export interface EntradaCuenta {
++  readonly metodo: string;
++  readonly titular: string;
++  readonly ambito: string;
++  readonly activa: boolean;
++  readonly campos: Valores;
++}
++
++export function validarCuenta(entrada: EntradaCuenta, sedes: readonly SedeResumen[]): ResultadoCuenta {
++  const errores: Record<string, string> = {};
++  const titular = entrada.titular.trim();
++  if (titular === '') errores['titular'] = 'El titular es obligatorio.';
++  else if (titular.length > MAX_TITULAR) errores['titular'] = `Máximo ${MAX_TITULAR} caracteres.`;
++
++  let sedeId: number | null = null;
++  if (entrada.ambito === '') {
++    errores['ambito'] = 'Elige a qué sede aplica la cuenta o márcala como común a todas.';
++  } else if (entrada.ambito !== 'comun') {
++    const id = Number(entrada.ambito);
++    if (Number.isInteger(id) && sedes.some((s) => s.id === id)) sedeId = id;
++    else errores['ambito'] = 'La sede elegida no existe. Recarga la página.';
++  }
++
++  const metodo = entrada.metodo;
++  if (!esMetodo(metodo)) {
++    errores['metodo'] = 'Elige un método de pago.';
++    return { errores, cuerpo: null };
++  }
++  const def = DEFINICIONES[metodo];
++  const limpios: Record<string, string> = {};
++  for (const campo of def.campos) {
++    const valor = campo.normalizar(v(entrada.campos, campo.id));
++    limpios[campo.id] = valor;
++    if (!campo.patron.test(valor)) errores[`campo_${campo.id}`] = campo.error;
++  }
++  if (Object.keys(errores).length > 0) return { errores, cuerpo: null };
++
++  return {
++    errores,
++    cuerpo: { metodo, titular, detalle: def.componer(limpios), activa: entrada.activa, sede_id: sedeId },
++  };
++}
++
++/** Texto → número con hasta 2 decimales (acepta coma). `null` si no es un monto válido (> 0 y ≤ máximo). */
++export function parsearMonto(texto: string): number | null {
++  const limpio = texto.trim().replace(',', '.');
++  if (!/^\d+(?:\.\d{1,2})?$/.test(limpio)) return null;
++  const n = Number(limpio);
++  return Number.isFinite(n) && n > 0 && n <= MAX_MATRICULA ? n : null;
++}
++
++// ───────────────────────── Acceso y datos ─────────────────────────
++
++/** Las rutas /api/configuracion exigen acceso consolidado: admin sin sede (misma regla que utils/alcance.js). */
++export const esAccesoConsolidado = (u: Usuario | null): boolean => u?.rol === 'admin' && (u.sede_id ?? null) === null;
++
++interface Datos {
++  readonly matricula_usd: number;
++  readonly cuentas: readonly CuentaCobro[];
++  readonly sedes: readonly SedeResumen[];
++}
++
++async function cargarDatos(): Promise<Datos> {
++  const [cfg, sedes] = await Promise.all([bma.get<ConfiguracionAcademia>('/configuracion'), bma.get<readonly SedeResumen[]>('/sedes')]);
++  return { matricula_usd: cfg.matricula_usd, cuentas: cfg.cuentas, sedes };
++}
++
++export interface ContextoConfiguracion {
++  readonly zona: HTMLElement;
++  readonly vigente: () => boolean;
++  readonly usuario: Usuario | null;
++}
++
++const nombreAmbito = (sedeId: number | null, sedes: readonly SedeResumen[]): string => {
++  if (sedeId === null) return 'Común (todas las sedes)';
++  const s = sedes.find((x) => x.id === sedeId);
++  return s ? s.nombre : `Sede #${sedeId}`;
++};
++
++function ordenarCuentas(cuentas: readonly CuentaCobro[], sedes: readonly SedeResumen[]): readonly CuentaCobro[] {
++  const clave = (c: CuentaCobro): string => `${c.sede_id === null ? '0' : '1'}|${nombreAmbito(c.sede_id, sedes)}|${METODOS.indexOf(c.metodo)}|${String(c.id).padStart(10, '0')}`;
++  return [...cuentas].sort((a, b) => clave(a).localeCompare(clave(b), 'es'));
++}
++
++// ───────────────────────── Helpers de formulario ─────────────────────────
++
++const texto = (fd: FormData, nombre: string): string => {
++  const x = fd.get(nombre);
++  return typeof x === 'string' ? x : '';
++};
++
++function pintarErrores(form: HTMLFormElement, errores: Readonly<Record<string, string>>): void {
++  for (const el of todos('[data-error]', HTMLElement, form)) {
++    const mensaje = errores[el.dataset['error'] ?? ''] ?? '';
++    el.textContent = mensaje;
++    el.hidden = mensaje === '';
++  }
++  for (const control of todos('[name]', HTMLElement, form)) {
++    if ((errores[control.getAttribute('name') ?? ''] ?? '') !== '') control.setAttribute('aria-invalid', 'true');
++    else control.removeAttribute('aria-invalid');
++  }
++  buscar('[aria-invalid="true"]', HTMLElement, form)?.focus();
++}
++
++/** Errores por campo del servidor (códigos VALIDACION) → nombres de control de este formulario. */
++function erroresDelServidor(e: BmaApiError): Readonly<Record<string, string>> {
++  const mapa: Readonly<Record<string, string>> = { titular: 'titular', sede_id: 'ambito', metodo: 'metodo', detalle: 'general', matricula_usd: 'matricula_usd' };
++  const salida: Record<string, string> = {};
++  for (const d of e.camposInvalidos()) salida[mapa[d.campo] ?? 'general'] = d.mensaje;
++  if (Object.keys(salida).length === 0) salida['general'] = e.message;
++  return salida;
++}
++
++// ───────────────────────── Vista principal ─────────────────────────
++
++function cuentasTablaHtml(cuentas: readonly CuentaCobro[], sedes: readonly SedeResumen[]): HtmlSeguro {
++  if (cuentas.length === 0) {
++    return aviso('warn', 'Todavía no hay cuentas de cobro. Mientras no exista ninguna activa, las familias verán «Consulta los datos de pago con la administración».');
++  }
++  const filas = ordenarCuentas(cuentas, sedes).map(
++    (c) => html`<tr>
++      <td class="${CLS.td}">${nombreAmbito(c.sede_id, sedes)}</td>
++      <td class="${CLS.td} font-semibold">${nombreMetodo(c.metodo)}</td>
++      <td class="${CLS.td}">${c.titular}</td>
++      <td class="${CLS.td} break-words">${c.detalle}</td>
++      <td class="${CLS.td}">${c.activa ? etiqueta('Activa', 'ok') : etiqueta('Inactiva', 'neutral')}</td>
++      <td class="${CLS.td}">
++        <div class="flex flex-wrap gap-2">
++          <button type="button" data-accion="editar" data-id="${c.id}" class="${boton(CLS.btnSecundario, CLS.btnPeq)}" aria-label="Editar la cuenta de ${nombreMetodo(c.metodo)} de ${c.titular}">Editar</button>
++          <button type="button" data-accion="alternar" data-id="${c.id}" class="${boton(CLS.btnSecundario, CLS.btnPeq)}" aria-label="${c.activa ? 'Desactivar' : 'Activar'} la cuenta de ${nombreMetodo(c.metodo)} de ${c.titular}">${c.activa ? 'Desactivar' : 'Activar'}</button>
++        </div>
++      </td>
++    </tr>`,
++  );
++  return html`<div class="overflow-x-auto rounded-xl border border-slate-200 bg-white/95">
++    <table class="${CLS.tabla}">
++      <caption class="sr-only">Cuentas de cobro de la academia</caption>
++      <thead><tr>
++        <th scope="col" class="${CLS.th}">Ámbito</th><th scope="col" class="${CLS.th}">Método</th><th scope="col" class="${CLS.th}">Titular</th>
++        <th scope="col" class="${CLS.th}">Datos públicos</th><th scope="col" class="${CLS.th}">Estado</th><th scope="col" class="${CLS.th}">Acciones</th>
++      </tr></thead>
++      <tbody>${filas}</tbody>
++    </table>
++  </div>`;
++}
++
++function vistaHtml(d: Datos): HtmlSeguro {
++  const sinMatricula = d.matricula_usd <= 0;
++  return html`<div id="config-raiz">
++    <header class="mb-6">
++      <h1 class="${CLS.titulo}">Configuración de cobro</h1>
++      <p class="${CLS.subtitulo}">Costo de la matrícula y cuentas donde las familias depositan.</p>
++    </header>
++
++    <section class="${CLS.tarjeta} mb-6 p-6" aria-labelledby="t-matricula">
++      <h2 id="t-matricula" class="text-base font-bold text-slate-900">Costo de la matrícula</h2>
++      <p class="${CLS.ayuda}">Monto único en dólares para todas las sedes. Se muestra en el formulario público de admisiones junto a su equivalente en bolívares a la tasa BCV.</p>
++      <div class="mt-4">${sinMatricula
++        ? aviso('warn', 'La matrícula aún no está configurada: las inscripciones públicas permanecen bloqueadas hasta que fijes un monto.')
++        : aviso('info', html`Matrícula vigente: <strong>${usd(d.matricula_usd)}</strong>.`)}</div>
++      <form id="form-matricula" novalidate class="mt-4 grid gap-4 sm:grid-cols-3 sm:items-start">
++        <div class="sm:col-span-1">
++          <label for="f-matricula" class="${CLS.etiqueta}">Monto en USD</label>
++          <input id="f-matricula" name="matricula_usd" type="text" inputmode="decimal" autocomplete="off" required placeholder="120.00"
++            value="${sinMatricula ? '' : d.matricula_usd.toFixed(2)}" class="${CLS.input}" aria-describedby="ay-matricula er-matricula">
++          <p id="ay-matricula" class="${CLS.ayuda}">Hasta dos decimales. Ejemplo: 120.00</p>
++          <p id="er-matricula" data-error="matricula_usd" class="${CLS.errorCampo}" hidden></p>
++        </div>
++        <div class="flex items-end sm:col-span-2 sm:pt-6">
++          <button type="submit" class="${boton(CLS.btnPrimario)}">${icono('check', 'h-4 w-4')}<span>Guardar matrícula</span></button>
++        </div>
++      </form>
++    </section>
++
++    <section class="${CLS.tarjeta} p-6" aria-labelledby="t-cuentas">
++      <div class="mb-4 flex flex-wrap items-start justify-between gap-4">
++        <div class="min-w-0">
++          <h2 id="t-cuentas" class="text-base font-bold text-slate-900">Cuentas de cobro</h2>
++          <p class="${CLS.ayuda}">Datos públicos de Zelle, Binance Pay, PayPal y Pago Móvil. Nunca registres contraseñas ni claves aquí: esta información se muestra a las familias.</p>
++        </div>
++        <button type="button" data-accion="nueva" class="${boton(CLS.btnPrimario)}">${icono('wallet', 'h-4 w-4')}<span>Agregar cuenta</span></button>
++      </div>
++      ${cuentasTablaHtml(d.cuentas, d.sedes)}
++      <div class="mt-4">${aviso('info', 'Una familia ve las cuentas activas comunes más las de su sede. Si entra sin enlace de invitación, solo ve las comunes.')}</div>
++    </section>
++  </div>`;
++}
++
++export async function vistaConfiguracion(ctx: ContextoConfiguracion): Promise<void> {
++  if (!esAccesoConsolidado(ctx.usuario)) {
++    montar(
++      ctx.zona,
++      html`<div class="mx-auto max-w-2xl pt-8">${aviso('info', 'La configuración de cobro es del acceso consolidado (administrador sin sede asignada). Pídele a esa persona que actualice la matrícula o las cuentas.', 'Sección restringida')}</div>`,
++    );
++    return;
++  }
++  const inicial = await cargarDatos(); // un fallo aquí lo muestra el manejador de errores del panel (con «Reintentar»)
++  if (!ctx.vigente()) return;
++
++  let datos = inicial;
++  const pintar = (): void => {
++    montar(ctx.zona, vistaHtml(datos));
++    enlazar();
++  };
++  const recargar = async (): Promise<void> => {
++    datos = await cargarDatos();
++    if (ctx.vigente()) pintar();
++  };
++
++  const enlazar = (): void => {
++    const raiz = obtener('#config-raiz', HTMLElement, ctx.zona);
++    obtener('#form-matricula', HTMLFormElement, raiz).addEventListener('submit', (ev) => {
++      ev.preventDefault();
++      void guardarMatricula(obtener('#form-matricula', HTMLFormElement, raiz), (valor) => {
++        datos = { ...datos, matricula_usd: valor };
++        pintar();
++      });
++    });
++    raiz.addEventListener('click', (ev) => {
++      const origen = ev.target instanceof Element ? ev.target.closest('[data-accion]') : null;
++      if (!(origen instanceof HTMLButtonElement)) return;
++      const accion = origen.dataset['accion'];
++      const cuenta = datos.cuentas.find((c) => c.id === Number(origen.dataset['id']));
++      if (accion === 'nueva') abrirFormularioCuenta(null, datos.sedes, recargar);
++      else if (accion === 'editar' && cuenta) abrirFormularioCuenta(cuenta, datos.sedes, recargar);
++      else if (accion === 'alternar' && cuenta) void alternarActiva(origen, cuenta, recargar);
++    });
++  };
++
++  pintar();
++}
++
++// ───────────────────────── Matrícula ─────────────────────────
++
++async function guardarMatricula(form: HTMLFormElement, alGuardar: (valor: number) => void): Promise<void> {
++  const monto = parsearMonto(texto(new FormData(form), 'matricula_usd'));
++  if (monto === null) {
++    pintarErrores(form, { matricula_usd: `Escribe un monto mayor que 0 y hasta ${MAX_MATRICULA.toLocaleString('en-US')}, con máximo 2 decimales.` });
++    return;
++  }
++  pintarErrores(form, {});
++  try {
++    const r = await conBotonOcupado(obtener('button[type="submit"]', HTMLButtonElement, form), () => bma.put<{ readonly matricula_usd: number }>('/configuracion/matricula', { matricula_usd: monto }));
++    notificar('ok', `Matrícula actualizada a ${usd(r.matricula_usd)}.`);
++    alGuardar(r.matricula_usd);
++  } catch (e: unknown) {
++    if (e instanceof BmaSesionExpiradaError) {
++      window.location.reload();
++      return;
++    }
++    pintarErrores(form, e instanceof BmaApiError ? erroresDelServidor(e) : { matricula_usd: mensajeDeError(e) });
++  }
++}
++
++// ───────────────────────── Cuentas: activar / desactivar ─────────────────────────
++
++async function alternarActiva(boton_: HTMLButtonElement, c: CuentaCobro, recargar: () => Promise<void>): Promise<void> {
++  // El PUT exige el cuerpo completo (la activación por defecto del servidor es TRUE): se reenvía todo con `activa` invertido.
++  const cuerpo: CuerpoCuenta = { metodo: c.metodo, titular: c.titular, detalle: c.detalle, activa: !c.activa, sede_id: c.sede_id };
++  try {
++    await conBotonOcupado(boton_, () => bma.put<{ readonly id: number }>(`/configuracion/cuentas/${c.id}`, cuerpo));
++    notificar('ok', cuerpo.activa ? 'Cuenta activada: ya la ven las familias.' : 'Cuenta desactivada: las familias ya no la ven.');
++    await recargar();
++  } catch (e: unknown) {
++    if (e instanceof BmaSesionExpiradaError) {
++      window.location.reload();
++      return;
++    }
++    notificar('bad', mensajeDeError(e));
++  }
++}
++
++// ───────────────────────── Cuentas: formulario (modal) ─────────────────────────
++
++function camposMetodoHtml(metodo: string, valores: Valores): HtmlSeguro {
++  if (!esMetodo(metodo)) return html`<p class="${CLS.ayuda}">Elige un método para ver los datos que se piden.</p>`;
++  return html`${DEFINICIONES[metodo].campos.map(
++    (c) => html`<div>
++      <label for="f-campo_${c.id}" class="${CLS.etiqueta}">${c.etiqueta}</label>
++      <input id="f-campo_${c.id}" name="campo_${c.id}" type="${c.tipo}" inputmode="${c.inputmode}" autocomplete="off" required
++        placeholder="${c.placeholder}" value="${v(valores, c.id)}" class="${CLS.input}" aria-describedby="ay-${c.id} er-${c.id}">
++      <p id="ay-${c.id}" class="${CLS.ayuda}">${c.ayuda}</p>
++      <p id="er-${c.id}" data-error="campo_${c.id}" class="${CLS.errorCampo}" hidden></p>
++    </div>`,
++  )}`;
++}
++
++function formularioCuentaHtml(cuenta: CuentaCobro | null, sedes: readonly SedeResumen[], valoresIniciales: Valores, legado: string | null): HtmlSeguro {
++  const metodo = cuenta?.metodo ?? '';
++  const ambito = cuenta === null ? '' : cuenta.sede_id === null ? 'comun' : String(cuenta.sede_id);
++  return html`<form id="form-cuenta" novalidate class="grid gap-4">
++    <div data-error="general" hidden></div>
++    ${legado === null ? null : aviso('warn', html`El dato guardado no sigue el formato estructurado: <span class="font-semibold">${legado}</span>. Complétalo con los campos de abajo para reemplazarlo.`, 'Datos anteriores')}
++    <div class="grid gap-4 sm:grid-cols-2">
++      <div>
++        <label for="f-metodo" class="${CLS.etiqueta}">Método de pago</label>
++        <select id="f-metodo" name="metodo" required class="${CLS.input}" aria-describedby="er-metodo">
++          <option value="" ${metodo === '' ? 'selected' : ''} disabled>Selecciona un método…</option>
++          ${METODOS.map((m) => html`<option value="${m}" ${m === metodo ? 'selected' : ''}>${nombreMetodo(m)}</option>`)}
++        </select>
++        <p id="er-metodo" data-error="metodo" class="${CLS.errorCampo}" hidden></p>
++      </div>
++      <div>
++        <label for="f-ambito" class="${CLS.etiqueta}">Sede a la que aplica</label>
++        <select id="f-ambito" name="ambito" required class="${CLS.input}" aria-describedby="ay-ambito er-ambito">
++          <option value="" ${ambito === '' ? 'selected' : ''} disabled>Selecciona el ámbito…</option>
++          <option value="comun" ${ambito === 'comun' ? 'selected' : ''}>Común (todas las sedes)</option>
++          ${sedes.map((s) => html`<option value="${s.id}" ${String(s.id) === ambito ? 'selected' : ''}>${s.nombre}${s.activa ? '' : ' (inactiva)'}</option>`)}
++        </select>
++        <p id="ay-ambito" class="${CLS.ayuda}">Las cuentas de una sede solo las ven las familias de esa sede.</p>
++        <p id="er-ambito" data-error="ambito" class="${CLS.errorCampo}" hidden></p>
++      </div>
++    </div>
++    <div>
++      <label for="f-titular" class="${CLS.etiqueta}">Titular de la cuenta</label>
++      <input id="f-titular" name="titular" type="text" maxlength="${MAX_TITULAR}" autocomplete="off" required value="${cuenta?.titular ?? ''}"
++        class="${CLS.input}" aria-describedby="er-titular">
++      <p id="er-titular" data-error="titular" class="${CLS.errorCampo}" hidden></p>
++    </div>
++    <div id="campos-metodo" class="grid gap-4" aria-live="polite">${camposMetodoHtml(metodo, valoresIniciales)}</div>
++    <label class="flex items-center gap-3 text-sm font-medium text-slate-800">
++      <input type="checkbox" name="activa" ${cuenta === null || cuenta.activa ? 'checked' : ''} class="h-4 w-4 rounded border-slate-300">
++      <span>Cuenta activa (visible para las familias)</span>
++    </label>
++    <div class="flex flex-wrap justify-end gap-3">
++      <button type="button" data-cancelar class="${boton(CLS.btnSecundario)}">Cancelar</button>
++      <button type="submit" class="${boton(CLS.btnPrimario)}">${icono('check', 'h-4 w-4')}<span>${cuenta === null ? 'Agregar cuenta' : 'Guardar cambios'}</span></button>
++    </div>
++  </form>`;
++}
++
++function leerEntrada(form: HTMLFormElement): EntradaCuenta {
++  const fd = new FormData(form);
++  const campos: Record<string, string> = {};
++  for (const [nombre, valor] of fd.entries()) {
++    if (nombre.startsWith('campo_') && typeof valor === 'string') campos[nombre.slice('campo_'.length)] = valor;
++  }
++  return { metodo: texto(fd, 'metodo'), titular: texto(fd, 'titular'), ambito: texto(fd, 'ambito'), activa: fd.get('activa') !== null, campos };
++}
++
++function abrirFormularioCuenta(cuenta: CuentaCobro | null, sedes: readonly SedeResumen[], recargar: () => Promise<void>): void {
++  const interpretado = cuenta ? DEFINICIONES[cuenta.metodo].interpretar(cuenta.detalle) : null;
++  const legado = cuenta !== null && interpretado === null ? cuenta.detalle : null;
++  const modal: Modal = abrirModal({
++    titulo: cuenta === null ? 'Agregar cuenta de cobro' : 'Editar cuenta de cobro',
++    ancho: 'lg',
++    cuerpo: formularioCuentaHtml(cuenta, sedes, interpretado ?? {}, legado),
++  });
++  const form = obtener('#form-cuenta', HTMLFormElement, modal.dialogo);
++
++  // Al cambiar de método se redibujan solo los campos propios del método (se conserva titular y ámbito).
++  obtener('#f-metodo', HTMLSelectElement, form).addEventListener('change', (ev) => {
++    const nuevo = ev.target instanceof HTMLSelectElement ? ev.target.value : '';
++    montar(obtener('#campos-metodo', HTMLElement, form), camposMetodoHtml(nuevo, cuenta !== null && cuenta.metodo === nuevo && interpretado ? interpretado : {}));
++  });
++  obtener('[data-cancelar]', HTMLButtonElement, form).addEventListener('click', () => modal.cerrar());
++
++  form.addEventListener('submit', (ev) => {
++    ev.preventDefault();
++    void enviarCuenta(form, cuenta, sedes, modal, recargar);
++  });
++  obtener('#f-metodo', HTMLSelectElement, form).focus();
++}
++
++async function enviarCuenta(form: HTMLFormElement, cuenta: CuentaCobro | null, sedes: readonly SedeResumen[], modal: Modal, recargar: () => Promise<void>): Promise<void> {
++  const r = validarCuenta(leerEntrada(form), sedes);
++  pintarErrores(form, r.errores);
++  const zonaGeneral = obtener('[data-error="general"]', HTMLElement, form);
++  zonaGeneral.hidden = true;
++  if (r.cuerpo === null) return;
++  const cuerpo = r.cuerpo;
++  try {
++    await conBotonOcupado(obtener('button[type="submit"]', HTMLButtonElement, form), () =>
++      cuenta === null ? bma.post<{ readonly id: number }>('/configuracion/cuentas', cuerpo) : bma.put<{ readonly id: number }>(`/configuracion/cuentas/${cuenta.id}`, cuerpo),
++    );
++    modal.cerrar();
++    notificar('ok', cuenta === null ? 'Cuenta agregada.' : 'Cuenta actualizada.');
++    await recargar();
++  } catch (e: unknown) {
++    if (e instanceof BmaSesionExpiradaError) {
++      window.location.reload();
++      return;
++    }
++    const errores = e instanceof BmaApiError ? erroresDelServidor(e) : { general: mensajeDeError(e) };
++    const general = errores['general'];
++    pintarErrores(form, { ...errores, general: '' });
++    if (general) {
++      zonaGeneral.hidden = false;
++      montar(zonaGeneral, aviso('bad', general));
++    }
++  }
++}
+diff --git a/frontend/src/login-animation.ts b/frontend/src/login-animation.ts
+new file mode 100644
+index 0000000..042137d
+--- /dev/null
++++ b/frontend/src/login-animation.ts
+@@ -0,0 +1,238 @@
++/**
++ * Animación de ensamblaje del imagotipo en el login / splash (Brilliant Minds Academy · suite Astra Academy).
++ *
++ * Tres capas vectoriales independientes, cada una con su ID único dentro del SVG:
++ *   #bma-capa-estructura  → estructura base: desciende desde el tope con un leve desenfoque.
++ *   #bma-capa-flecha      → flecha ascendente curva: entra en diagonal desde la esquina inferior izquierda.
++ *   #bma-capa-pata        → pata de apoyo: se acopla desde el extremo inferior.
++ * Al converger en el centro se «imantan» (rebote corto de acople, ya nítidas) y un destello lineal recorre el acabado metalizado.
++ * La letra «A» de Astra se insinúa de forma sutil: la estructura base es el trazo de una «A» (vértice y patas), la flecha hace de
++ * travesaño ascendente y, al terminar, la «A» del texto «Astra Academy» se tiñe con el acento de la marca.
++ *
++ * Técnica: transiciones/animaciones atómicas de Tailwind como propiedades arbitrarias (`[animation:…]`, `motion-reduce:…`) sobre cada
++ * capa. Los @keyframes no se pueden expresar en clases de Tailwind, así que se registran UNA vez con `adoptedStyleSheets`
++ * (CSSOM: no lo bloquea una CSP estricta de `style-src`; si el navegador no lo soporta se cae a un <style>).
++ * Aceleración fluida: cubic-bezier(0.22, 1, 0.36, 1) (ease-out-quint). `prefers-reduced-motion`: sin movimiento, estado final inmediato.
++ *
++ * ⚠ GEOMETRÍA PROVISIONAL: los trazos son un imagotipo de reemplazo hasta recibir la marca final del cliente. Cuando llegue, solo
++ * cambian las constantes `TRAZOS` (los `d` de los paths) y el degradado `METAL`; la coreografía, los IDs y la API no se tocan.
++ */
++import { html, montar, type HtmlSeguro } from './lib/html';
++
++// ───────────────────────── Marca provisional (única parte a sustituir con la marca real) ─────────────────────────
++
++const TRAZOS = {
++  /** Estructura base: la «A» (vértice superior y dos patas). */
++  estructura: 'M20 100 L60 18 L100 100',
++  /** Flecha ascendente curva (travesaño de la «A») con su punta. */
++  flecha: 'M32 84 C54 82 76 66 90 40 M78 42 L91 37 L93 51',
++  /** Pata de apoyo: base sobre la que descansa la estructura. */
++  pata: 'M46 108 L98 108',
++} as const;
++
++const METAL = { claro: '#e2e8f0', medio: '#94a3b8', oscuro: '#475569' } as const; // slate-200 / 400 / 600
++
++// ───────────────────────── Coreografía ─────────────────────────
++
++/** Milisegundos: cuándo empieza y cuánto dura cada fase. Todo se deriva de aquí. */
++export const TIEMPOS = {
++  estructura: { inicio: 0, duracion: 900 },
++  flecha: { inicio: 120, duracion: 900 },
++  pata: { inicio: 240, duracion: 900 },
++  acople: { inicio: 1_140, duracion: 320 },
++  destello: { inicio: 1_400, duracion: 850 },
++  texto: { inicio: 1_700, duracion: 600 },
++} as const;
++
++/** Duración total hasta que el destello termina (para sincronizar el paso siguiente del splash). */
++export const DURACION_TOTAL_MS = TIEMPOS.destello.inicio + TIEMPOS.destello.duracion;
++
++export const KEYFRAMES_CSS = `
++@keyframes bma-estructura-in {
++  from { transform: translate(0px, -64px); filter: blur(6px); opacity: 0; }
++  60%  { opacity: 1; }
++  to   { transform: translate(0px, 0px); filter: blur(0px); opacity: 1; }
++}
++@keyframes bma-flecha-in {
++  from { transform: translate(-56px, 56px); opacity: 0; }
++  60%  { opacity: 1; }
++  to   { transform: translate(0px, 0px); opacity: 1; }
++}
++@keyframes bma-pata-in {
++  from { transform: translate(0px, 56px); opacity: 0; }
++  60%  { opacity: 1; }
++  to   { transform: translate(0px, 0px); opacity: 1; }
++}
++@keyframes bma-acople {
++  0%   { transform: scale(1); }
++  45%  { transform: scale(1.045); }
++  100% { transform: scale(1); }
++}
++@keyframes bma-destello {
++  from { transform: translateX(-70px) skewX(-18deg); opacity: 0; }
++  20%  { opacity: 1; }
++  80%  { opacity: 1; }
++  to   { transform: translateX(190px) skewX(-18deg); opacity: 0; }
++}
++@keyframes bma-texto-in {
++  from { opacity: 0; transform: translateY(8px); }
++  to   { opacity: 1; transform: translateY(0px); }
++}
++@keyframes bma-acento-a {
++  from { color: inherit; }
++  to   { color: #0369a1; }
++}
++`;
++
++/**
++ * Clases de Tailwind LITERALES. Tailwind solo genera el CSS de las clases que aparecen escritas tal cual en el código fuente
++ * (escaneo de `./src/**\/*.ts`): componerlas con `${…}` en tiempo de ejecución haría que NO se generaran en producción.
++ * Por eso cada animación va completa y los tiempos de `TIEMPOS` solo se usan en JS; `clasesCoherentes()` comprueba que ambos coinciden.
++ * Forma: [animation:<keyframes>_<duración>_<curva>_<retardo>_both]  (los `_` son espacios en Tailwind).
++ */
++export const CLASES = {
++  estructura: '[animation:bma-estructura-in_900ms_cubic-bezier(0.22,1,0.36,1)_0ms_both] motion-reduce:[animation:none] will-change-transform',
++  flecha: '[animation:bma-flecha-in_900ms_cubic-bezier(0.22,1,0.36,1)_120ms_both] motion-reduce:[animation:none] will-change-transform',
++  pata: '[animation:bma-pata-in_900ms_cubic-bezier(0.22,1,0.36,1)_240ms_both] motion-reduce:[animation:none] will-change-transform',
++  acople: '[animation:bma-acople_320ms_cubic-bezier(0.22,1,0.36,1)_1140ms_both] motion-reduce:[animation:none]',
++  destello: '[animation:bma-destello_850ms_cubic-bezier(0.22,1,0.36,1)_1400ms_both] motion-reduce:hidden opacity-0',
++  texto: '[animation:bma-texto-in_600ms_cubic-bezier(0.22,1,0.36,1)_1700ms_both] motion-reduce:[animation:none]',
++  acento: '[animation:bma-acento-a_600ms_cubic-bezier(0.22,1,0.36,1)_1700ms_both] motion-reduce:[animation:none]',
++} as const;
++
++/** `true` si la duración y el retardo escritos en cada clase literal coinciden con `TIEMPOS` (lo usan las pruebas). */
++export function clasesCoherentes(): boolean {
++  const pares: ReadonlyArray<readonly [string, { readonly inicio: number; readonly duracion: number }]> = [
++    [CLASES.estructura, TIEMPOS.estructura],
++    [CLASES.flecha, TIEMPOS.flecha],
++    [CLASES.pata, TIEMPOS.pata],
++    [CLASES.acople, TIEMPOS.acople],
++    [CLASES.destello, TIEMPOS.destello],
++    [CLASES.texto, TIEMPOS.texto],
++    [CLASES.acento, TIEMPOS.texto],
++  ];
++  return pares.every(([clase, t]) => {
++    const m = /\[animation:[\w-]+_(\d+)ms_cubic-bezier\(0\.22,1,0\.36,1\)_(\d+)ms_both\]/.exec(clase);
++    return m !== null && Number(m[1]) === t.duracion && Number(m[2]) === t.inicio;
++  });
++}
++
++// ───────────────────────── Registro único de keyframes ─────────────────────────
++
++const ID_ESTILO = 'bma-login-keyframes';
++let hojaRegistrada = false;
++
++function registrarKeyframes(): void {
++  if (hojaRegistrada || document.getElementById(ID_ESTILO) !== null) return;
++  hojaRegistrada = true;
++  try {
++    const hoja = new CSSStyleSheet();
++    hoja.replaceSync(KEYFRAMES_CSS);
++    document.adoptedStyleSheets = [...document.adoptedStyleSheets, hoja];
++    return;
++  } catch {
++    /* sin constructable stylesheets: se usa un <style> */
++  }
++  const estilo = document.createElement('style');
++  estilo.id = ID_ESTILO;
++  estilo.textContent = KEYFRAMES_CSS;
++  document.head.append(estilo);
++}
++
++// ───────────────────────── Plantilla del logotipo ─────────────────────────
++
++const reducirMovimiento = (): boolean => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
++
++export function logotipoHtml(): HtmlSeguro {
++  return html`<div class="relative mx-auto flex w-full max-w-xs flex-col items-center gap-3 text-slate-900" data-bma-logo>
++    <svg viewBox="0 0 120 120" class="h-32 w-32 overflow-visible" role="img" aria-labelledby="bma-logo-titulo">
++      <title id="bma-logo-titulo">Brilliant Minds Academy</title>
++      <defs>
++        <linearGradient id="bma-metal" gradientUnits="userSpaceOnUse" x1="14" y1="10" x2="106" y2="112">
++          <stop offset="0" stop-color="${METAL.claro}" />
++          <stop offset="0.45" stop-color="${METAL.medio}" />
++          <stop offset="0.7" stop-color="${METAL.claro}" />
++          <stop offset="1" stop-color="${METAL.oscuro}" />
++        </linearGradient>
++        <linearGradient id="bma-brillo" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="26" y2="0">
++          <stop offset="0" stop-color="#ffffff" stop-opacity="0" />
++          <stop offset="0.5" stop-color="#ffffff" stop-opacity="0.95" />
++          <stop offset="1" stop-color="#ffffff" stop-opacity="0" />
++        </linearGradient>
++        <!-- Geometría estática (sin animar) reutilizada por la máscara del destello: el brillo solo se ve sobre el trazo. -->
++        <path id="bma-forma-estructura" d="${TRAZOS.estructura}" />
++        <path id="bma-forma-flecha" d="${TRAZOS.flecha}" />
++        <path id="bma-forma-pata" d="${TRAZOS.pata}" />
++        <mask id="bma-mascara-destello" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="120">
++          <g fill="none" stroke="#ffffff" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
++            <use href="#bma-forma-estructura" /><use href="#bma-forma-flecha" /><use href="#bma-forma-pata" />
++          </g>
++        </mask>
++      </defs>
++
++      <g class="${CLASES.acople} origin-center [transform-box:fill-box]" fill="none" stroke="url(#bma-metal)" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
++        <g id="bma-capa-estructura" class="${CLASES.estructura}">
++          <use href="#bma-forma-estructura" />
++        </g>
++        <g id="bma-capa-flecha" class="${CLASES.flecha}">
++          <use href="#bma-forma-flecha" stroke-width="7" />
++        </g>
++        <g id="bma-capa-pata" class="${CLASES.pata}">
++          <use href="#bma-forma-pata" stroke-width="7" />
++        </g>
++      </g>
++
++      <g mask="url(#bma-mascara-destello)" aria-hidden="true">
++        <rect id="bma-destello" x="0" y="0" width="26" height="120" fill="url(#bma-brillo)"
++          class="${CLASES.destello}" />
++      </g>
++    </svg>
++    <p class="text-center text-lg font-semibold tracking-tight ${CLASES.texto}" data-bma-texto>
++      <span class="${CLASES.acento}" data-bma-acento>A</span>stra Academy
++    </p>
++  </div>`;
++}
++
++// ───────────────────────── API pública ─────────────────────────
++
++export interface AnimacionLogin {
++  /** Se cumple cuando termina el destello (o de inmediato con `prefers-reduced-motion`). */
++  readonly terminada: Promise<void>;
++  /** Vuelve a montar y reproducir la animación desde el principio. */
++  repetir(): Promise<void>;
++  /** Quita el logotipo del contenedor. */
++  destruir(): void;
++}
++
++/**
++ * Monta el logotipo animado dentro de `contenedor` y devuelve una promesa de fin de animación.
++ * Uso en el login: `void montarAnimacionLogin(obtener('#login-logo', HTMLElement))`.
++ */
++export function montarAnimacionLogin(contenedor: HTMLElement): AnimacionLogin {
++  registrarKeyframes();
++
++  const reproducir = (): Promise<void> => {
++    montar(contenedor, logotipoHtml());
++    if (reducirMovimiento()) return Promise.resolve();
++    const destello = contenedor.querySelector('#bma-destello');
++    return new Promise<void>((resolver) => {
++      // Respaldo por tiempo: si el navegador no dispara `animationend` (pestaña oculta, animaciones deshabilitadas) no se bloquea nada.
++      const respaldo = window.setTimeout(resolver, DURACION_TOTAL_MS + 400);
++      destello?.addEventListener(
++        'animationend',
++        () => {
++          window.clearTimeout(respaldo);
++          resolver();
++        },
++        { once: true },
++      );
++    });
++  };
++
++  const accion: AnimacionLogin = {
++    terminada: reproducir(),
++    repetir: reproducir,
++    destruir: () => montar(contenedor, html``),
++  };
++  return accion;
++}
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 0cf49e2..653f0ea 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -361,10 +361,40 @@ export interface RespuestaPrueba {
+ 
+ // ───────────────────────── Estado de la interfaz ─────────────────────────
+ 
+-export type VistaAdmin = 'dashboard' | 'estudiantes' | 'auditoria' | 'contabilidad';
++export type VistaAdmin = 'dashboard' | 'estudiantes' | 'auditoria' | 'contabilidad' | 'configuracion';
+ 
+ export interface EstadoSidebar {
+   readonly colapsado: boolean;
+ }
+ 
+ export type FiltroEstudiantes = '' | EstadoDinamico;
++
++// ───────────────────────── Configuración de cobro (acceso consolidado) ─────────────────────────
++
++/** Fila de `GET /api/configuracion`. `sede_id` NULL = cuenta común a todas las sedes. */
++export interface CuentaCobro extends CuentaPago {
++  readonly activa: boolean;
++  readonly sede_id: number | null;
++}
++
++/** `GET /api/configuracion` */
++export interface ConfiguracionAcademia {
++  readonly matricula_usd: number;
++  readonly cuentas: readonly CuentaCobro[];
++}
++
++/** Fila de `GET /api/sedes`. */
++export interface SedeResumen {
++  readonly id: number;
++  readonly nombre: string;
++  readonly activa: boolean;
++}
++
++/** Cuerpo de `POST /api/configuracion/cuentas` y `PUT /api/configuracion/cuentas/:id` (el PUT exige el cuerpo completo). */
++export interface CuerpoCuenta {
++  readonly metodo: MetodoPago;
++  readonly titular: string;
++  readonly detalle: string;
++  readonly activa: boolean;
++  readonly sede_id: number | null;
++}
+diff --git a/scripts/seed.js b/scripts/seed.js
+new file mode 100644
+index 0000000..332110c
+--- /dev/null
++++ b/scripts/seed.js
+@@ -0,0 +1,404 @@
++'use strict';
++/**
++ * scripts/seed.js — Población de datos de PRUEBA multi-sede (PostgreSQL / Supabase).
++ *
++ *   node scripts/seed.js            # sembrar (idempotente: re-ejecutarlo no duplica nada)
++ *   node scripts/seed.js --reset    # borra SOLO las filas de prueba y vuelve a sembrar
++ *
++ * Usa el pool nativo del proyecto (config/db.js → `pg`, TLS de Supabase, variables DB_*) con marcadores POSICIONALES ($1, $2, …).
++ * Todo ocurre en UNA transacción (`conTransaccion`): ante cualquier error hay ROLLBACK y se imprime un error JSON estable.
++ *
++ * Qué certifica:
++ *   · 2 sedes, 2 secretarias (cada una atada a su sede) y 1 admin consolidado (rol 'admin', sede_id NULL = SuperAdmin).
++ *   · 5 estudiantes con sus representantes: 3 al día ('Activo') y 2 morosos (cuotas Pendiente con vencimiento pasado, como
++ *     calcula vw_estudiantes_estado) + referencias 'Por Validar' en la bandeja de auditoría.
++ *   · sede_id se OMITE a propósito en cuotas y pagos_referencias: lo debe heredar el trigger fn_heredar_sede_estudiante (006).
++ *   · Verificación final: herencia de sede, estado dinámico de la vista, aislamiento por sede con el MISMO predicado que usa la
++ *     aplicación (`($n::int IS NULL OR x.sede_id = $n::int)`) y RLS activo / sin privilegios para anon y authenticated.
++ *
++ * Seguridad: se niega a correr con NODE_ENV=production salvo SEED_ALLOW_PROD=1. Contraseña de las cuentas de prueba:
++ * SEED_PASSWORD (>= 12 caracteres) o, si no se define, una aleatoria que se muestra UNA vez al crear las cuentas.
++ * `--reset` jamás borra una sede que tenga datos ajenos al seed (estudiantes, usuarios, cuotas, egresos, pagos, cuentas, invitaciones).
++ */
++const crypto = require('node:crypto');
++const bcrypt = require('bcryptjs');
++const cfg = require('../config/env');
++const { ejecutar, conTransaccion, closePool } = require('../config/db');
++
++const DOMINIO = '@seed.bma.test';
++const SEDES = ['Sede Acarigua', 'Sede Barquisimeto'];
++const TASA_PRUEBA = 36.5; // Bs. por US$ (valor ficticio para las referencias de prueba)
++// Roles de la API REST de Supabase y lecturas de prueba (constantes literales: nada de SQL armado con datos).
++const ROLES_API = { anon: 'SET LOCAL ROLE anon', authenticated: 'SET LOCAL ROLE authenticated' };
++const LECTURAS_RLS = {
++  cuotas: 'SELECT COUNT(*)::int AS n FROM cuotas',
++  estudiantes: 'SELECT COUNT(*)::int AS n FROM estudiantes',
++  pagos_referencias: 'SELECT COUNT(*)::int AS n FROM pagos_referencias',
++};
++
++// Un día de offset negativo = vencida. Moroso ⇔ cuota Pendiente / En Revisión con vencimiento anterior a hoy (hora de Caracas).
++const ALUMNOS = [
++  {
++    sede: SEDES[0], esperado: 'Activo',
++    rep: { nombres: 'Carlos', apellidos: 'Rojas', cedula: 'V-90000001', email: `carlos.rojas${DOMINIO}`, telefono: '04145550001' },
++    est: { nombres: 'Valeria', apellidos: 'Rojas', nacimiento: '2017-03-14', grado: '3er Grado' },
++    cuotas: [
++      { tipo: 'MATRICULA', concepto: 'Matrícula 2026-2027 (prueba)', monto: 120, dias: -60, estado: 'Pagada' },
++      { tipo: 'MENSUALIDAD', concepto: 'Mensualidad Octubre 2026 (prueba)', monto: 80, dias: -5, estado: 'Pagada' },
++      { tipo: 'MENSUALIDAD', concepto: 'Mensualidad Noviembre 2026 (prueba)', monto: 80, dias: 25, estado: 'Pendiente' },
++    ],
++  },
++  {
++    sede: SEDES[0], esperado: 'Moroso',
++    rep: { nombres: 'Marisol', apellidos: 'Pérez', cedula: 'V-90000002', email: `marisol.perez${DOMINIO}`, telefono: '04245550002' },
++    est: { nombres: 'Mateo', apellidos: 'Pérez', nacimiento: '2015-08-02', grado: '5to Grado' },
++    cuotas: [
++      { tipo: 'MATRICULA', concepto: 'Matrícula 2026-2027 (prueba)', monto: 120, dias: -75, estado: 'Pagada' },
++      { tipo: 'MENSUALIDAD', concepto: 'Mensualidad Septiembre 2026 (prueba)', monto: 80, dias: -40, estado: 'Pendiente' },
++      { tipo: 'MENSUALIDAD', concepto: 'Mensualidad Octubre 2026 (prueba)', monto: 80, dias: -10, estado: 'En Revisión' },
++    ],
++    pago: { cuota: 2, metodo: 'ZELLE', referencia: 'SEED-ZL-000201', monto: 80 },
++  },
++  {
++    sede: SEDES[0], esperado: 'Moroso',
++    rep: { nombres: 'José', apellidos: 'Díaz', cedula: 'V-90000003', email: `jose.diaz${DOMINIO}`, telefono: '04125550003' },
++    est: { nombres: 'Sofía', apellidos: 'Díaz', nacimiento: '2019-11-21', grado: '1er Grado' },
++    cuotas: [
++      { tipo: 'MATRICULA', concepto: 'Matrícula 2026-2027 (prueba)', monto: 120, dias: -70, estado: 'Pagada' },
++      { tipo: 'MENSUALIDAD', concepto: 'Mensualidad Octubre 2026 (prueba)', monto: 80, dias: -15, estado: 'Pendiente' },
++    ],
++  },
++  {
++    sede: SEDES[1], esperado: 'Activo',
++    rep: { nombres: 'Andrea', apellidos: 'Gómez', cedula: 'V-90000004', email: `andrea.gomez${DOMINIO}`, telefono: '04165550004' },
++    est: { nombres: 'Daniel', apellidos: 'Gómez', nacimiento: '2016-05-30', grado: '4to Grado' },
++    cuotas: [
++      { tipo: 'MATRICULA', concepto: 'Matrícula 2026-2027 (prueba)', monto: 130, dias: -55, estado: 'Pagada' },
++      { tipo: 'MENSUALIDAD', concepto: 'Mensualidad Octubre 2026 (prueba)', monto: 85, dias: -3, estado: 'Pagada' },
++      { tipo: 'MENSUALIDAD', concepto: 'Mensualidad Noviembre 2026 (prueba)', monto: 85, dias: 27, estado: 'Pendiente' },
++    ],
++  },
++  {
++    sede: SEDES[1], esperado: 'Moroso',
++    rep: { nombres: 'Luis', apellidos: 'Herrera', cedula: 'V-90000005', email: `luis.herrera${DOMINIO}`, telefono: '04265550005' },
++    est: { nombres: 'Camila', apellidos: 'Herrera', nacimiento: '2018-01-09', grado: '2do Grado' },
++    cuotas: [
++      { tipo: 'MATRICULA', concepto: 'Matrícula 2026-2027 (prueba)', monto: 130, dias: -80, estado: 'Pagada' },
++      { tipo: 'MENSUALIDAD', concepto: 'Mensualidad Septiembre 2026 (prueba)', monto: 85, dias: -45, estado: 'Pendiente' },
++      { tipo: 'MENSUALIDAD', concepto: 'Mensualidad Octubre 2026 (prueba)', monto: 85, dias: -12, estado: 'En Revisión' },
++    ],
++    pago: { cuota: 2, metodo: 'BINANCE', referencia: 'SEED-BN-000503', monto: 85 },
++  },
++];
++
++const ADMINS = [
++  { nombre: 'Secretaria Acarigua (prueba)', email: `secretaria.acarigua${DOMINIO}`, rol: 'secretaria', sede: SEDES[0] },
++  { nombre: 'Secretaria Barquisimeto (prueba)', email: `secretaria.barquisimeto${DOMINIO}`, rol: 'secretaria', sede: SEDES[1] },
++  { nombre: 'SuperAdmin Consolidado (prueba)', email: `superadmin${DOMINIO}`, rol: 'admin', sede: null },
++];
++
++// detalle (VARCHAR 500) con el MISMO formato tipado que compone frontend/src/configuracion.ts.
++const CUENTAS = [
++  { sede: null, metodo: 'PAYPAL', titular: 'Brilliant Minds Academy (prueba)', detalle: `pagos${DOMINIO}` },
++  { sede: SEDES[0], metodo: 'ZELLE', titular: 'BMA Acarigua (prueba)', detalle: `acarigua${DOMINIO}` },
++  { sede: SEDES[1], metodo: 'PAGO_MOVIL', titular: 'BMA Barquisimeto (prueba)', detalle: 'Banco 0102 · Tel 04145559999 · Cédula/RIF J000000000' },
++];
++
++// ── Utilidades ────────────────────────────────────────────────────────────────────────────────
++
++/**
++ * Arreglo JS → literal de arreglo de PostgreSQL ('{"a","b"}'). Se envía como UN parámetro de texto y la consulta lo castea
++ * (`= ANY($1::text[])`, `$2::int[]`), de modo que no depende de cómo cada cliente serialice los arreglos.
++ */
++const arregloPg = (items) => `{${items.map((x) => `"${String(x).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(',')}}`;
++
++/** Error de cualquier origen (incluido `pg`) → objeto JSON estable. Nunca incluye parámetros ni credenciales. */
++function errorJson(err) {
++  return {
++    ok: false,
++    error: {
++      codigo: (err && err.code) || 'SEED_ERROR',
++      mensaje: (err && err.message) || String(err),
++      detalle: (err && err.detail) || null,
++      tabla: (err && err.table) || null,
++      restriccion: (err && err.constraint) || null,
++    },
++  };
++}
++
++function contrasenaDePrueba() {
++  const dada = process.env.SEED_PASSWORD;
++  if (dada) {
++    if (dada.length < 12) throw new Error('SEED_PASSWORD debe tener al menos 12 caracteres.');
++    return { valor: dada, generada: false };
++  }
++  return { valor: crypto.randomBytes(14).toString('base64url'), generada: true };
++}
++
++async function uno(texto, params, tx) {
++  const r = await ejecutar(texto, params, tx);
++  return r.rows[0] || null;
++}
++
++/** Busca la fila; si no existe, inserta. Devuelve `{ id, creado }`. */
++async function buscarOCrear(tx, textoBuscar, paramsBuscar, textoInsertar, paramsInsertar) {
++  const hallada = await uno(textoBuscar, paramsBuscar, tx);
++  if (hallada) return { id: hallada.id, creado: false };
++  const nueva = await uno(textoInsertar, paramsInsertar, tx);
++  if (nueva) return { id: nueva.id, creado: true };
++  // ON CONFLICT DO NOTHING no devolvió fila: otra sesión la creó entre la búsqueda y el INSERT → releer.
++  const otra = await uno(textoBuscar, paramsBuscar, tx);
++  if (!otra) throw new Error('seed: la fila no existe tras ON CONFLICT DO NOTHING.');
++  return { id: otra.id, creado: false };
++}
++
++// ── Reset (solo filas de prueba, en orden de dependencia) ─────────────────────────────────────
++
++async function reset(tx) {
++  const cedulasEst = arregloPg(ALUMNOS.map((a) => a.rep.cedula));
++  // SQL literal en cada sentencia (sin ${…}): el estudiante de prueba se identifica por la cédula de su representante.
++  await ejecutar(
++    `DELETE FROM pagos_referencias WHERE estudiante_id IN (
++       SELECT e.id FROM estudiantes AS e JOIN representantes AS r ON r.id = e.representante_id WHERE r.cedula = ANY($1::text[]))`,
++    [cedulasEst], tx);
++  await ejecutar(
++    `DELETE FROM notificaciones_whatsapp WHERE estudiante_id IN (
++       SELECT e.id FROM estudiantes AS e JOIN representantes AS r ON r.id = e.representante_id WHERE r.cedula = ANY($1::text[]))`,
++    [cedulasEst], tx);
++  await ejecutar(
++    `DELETE FROM cuotas WHERE estudiante_id IN (
++       SELECT e.id FROM estudiantes AS e JOIN representantes AS r ON r.id = e.representante_id WHERE r.cedula = ANY($1::text[]))`,
++    [cedulasEst], tx);
++  await ejecutar(
++    `DELETE FROM estudiantes WHERE id IN (
++       SELECT e.id FROM estudiantes AS e JOIN representantes AS r ON r.id = e.representante_id WHERE r.cedula = ANY($1::text[]))`,
++    [cedulasEst], tx);
++  await ejecutar('DELETE FROM representantes WHERE cedula = ANY($1::text[])', [cedulasEst], tx);
++  await ejecutar('DELETE FROM usuarios_admin WHERE email LIKE $1', [`%${DOMINIO}`], tx);
++  await ejecutar('DELETE FROM cuentas_pago WHERE detalle LIKE $1 OR titular LIKE $2', [`%${DOMINIO}`, '% (prueba)'], tx);
++  // Una sede solo se borra si NADA ajeno al seed depende de ella (no se destruyen datos reales con el mismo nombre).
++  await ejecutar(
++    `DELETE FROM sedes AS s
++      WHERE s.nombre = ANY($1::text[])
++        AND NOT EXISTS (SELECT 1 FROM estudiantes WHERE sede_id = s.id)
++        AND NOT EXISTS (SELECT 1 FROM usuarios_admin WHERE sede_id = s.id)
++        AND NOT EXISTS (SELECT 1 FROM cuotas WHERE sede_id = s.id)
++        AND NOT EXISTS (SELECT 1 FROM egresos WHERE sede_id = s.id)
++        AND NOT EXISTS (SELECT 1 FROM pagos_referencias WHERE sede_id = s.id)
++        AND NOT EXISTS (SELECT 1 FROM cuentas_pago WHERE sede_id = s.id)
++        AND NOT EXISTS (SELECT 1 FROM invitaciones_inscripcion WHERE sede_id = s.id)`,
++    [arregloPg(SEDES)], tx);
++}
++
++// ── Siembra ───────────────────────────────────────────────────────────────────────────────────
++
++async function sembrar(tx, clave) {
++  const resumen = { creados: {}, existentes: {} };
++  const contar = (tabla, creado) => {
++    const g = creado ? resumen.creados : resumen.existentes;
++    g[tabla] = (g[tabla] || 0) + 1;
++  };
++
++  // 1) Sedes (UNIQUE sede.nombre)
++  const sedeId = {};
++  for (const nombre of SEDES) {
++    const r = await buscarOCrear(tx,
++      'SELECT id FROM sedes WHERE nombre = $1', [nombre],
++      'INSERT INTO sedes (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING RETURNING id', [nombre]);
++    sedeId[nombre] = r.id;
++    contar('sedes', r.creado);
++  }
++
++  // 2) Usuarios del panel: 2 secretarias (sede fija) + 1 admin consolidado (sede_id NULL). UNIQUE email.
++  const hash = await bcrypt.hash(clave, 12);
++  for (const a of ADMINS) {
++    const r = await buscarOCrear(tx,
++      'SELECT id FROM usuarios_admin WHERE email = $1', [a.email],
++      `INSERT INTO usuarios_admin (nombre, email, password_hash, rol, sede_id)
++       VALUES ($1, $2, $3, $4, $5)
++       ON CONFLICT (email) DO NOTHING RETURNING id`,
++      [a.nombre, a.email, hash, a.rol, a.sede ? sedeId[a.sede] : null]);
++    contar('usuarios_admin', r.creado);
++  }
++
++  // 3) Matrícula de prueba: la migración 003 la deja en 0.00 (inscripciones bloqueadas). Se fija SOLO si el valor actual es <= 0;
++  //    una matrícula ya configurada por la academia no se toca. (CASE evita castear valores no numéricos.)
++  const p = await ejecutar(
++    `INSERT INTO parametros (clave, valor) VALUES ($1, $2)
++     ON CONFLICT (clave) DO UPDATE SET valor = EXCLUDED.valor, actualizado_en = NOW()
++      WHERE CASE WHEN parametros.valor ~ '^[0-9]+(\.[0-9]+)?$' THEN parametros.valor::numeric <= 0 ELSE FALSE END`,
++    ['MATRICULA_USD', '120.00'], tx);
++  contar('parametros', p.rowCount > 0);
++
++  // 4) Cuentas de cobro: común (sede_id NULL) + por sede. Sin UNIQUE en la tabla → verificación previa.
++  for (const c of CUENTAS) {
++    const sid = c.sede ? sedeId[c.sede] : null;
++    const r = await buscarOCrear(tx,
++      'SELECT id FROM cuentas_pago WHERE metodo = $1 AND titular = $2 AND sede_id IS NOT DISTINCT FROM $3::int', [c.metodo, c.titular, sid],
++      'INSERT INTO cuentas_pago (metodo, titular, detalle, activa, sede_id) VALUES ($1, $2, $3, TRUE, $4) RETURNING id',
++      [c.metodo, c.titular, c.detalle, sid]);
++    contar('cuentas_pago', r.creado);
++  }
++
++  // 5) Representantes → estudiantes → cuotas → referencias de pago
++  const estudiantes = [];
++  for (const a of ALUMNOS) {
++    const rep = await buscarOCrear(tx,
++      'SELECT id FROM representantes WHERE cedula = $1', [a.rep.cedula],
++      `INSERT INTO representantes (nombres, apellidos, cedula, email, telefono)
++       VALUES ($1, $2, $3, $4, $5)
++       ON CONFLICT (cedula) DO NOTHING RETURNING id`,
++      [a.rep.nombres, a.rep.apellidos, a.rep.cedula, a.rep.email, a.rep.telefono]);
++    contar('representantes', rep.creado);
++
++    // `estudiantes` no hereda sede (el trigger 006 es solo de cuotas/pagos): se asigna de forma explícita.
++    const est = await buscarOCrear(tx,
++      `SELECT id FROM estudiantes
++        WHERE representante_id = $1 AND nombres = $2 AND apellidos = $3 AND fecha_nacimiento = $4::date`,
++      [rep.id, a.est.nombres, a.est.apellidos, a.est.nacimiento],
++      `INSERT INTO estudiantes (representante_id, nombres, apellidos, fecha_nacimiento, grado_solicitado, estatus_academico, sede_id)
++       VALUES ($1, $2, $3, $4::date, $5, 'Activo', $6)
++       ON CONFLICT (representante_id, nombres, apellidos, fecha_nacimiento) DO NOTHING RETURNING id`,
++      [rep.id, a.est.nombres, a.est.apellidos, a.est.nacimiento, a.est.grado, sedeId[a.sede]]);
++    contar('estudiantes', est.creado);
++    estudiantes.push({ id: est.id, esperado: a.esperado, sede: a.sede });
++
++    // Cuotas SIN sede_id: la hereda el trigger fn_heredar_sede_estudiante.
++    const cuotaIds = [];
++    for (const q of a.cuotas) {
++      const cu = await buscarOCrear(tx,
++        'SELECT id FROM cuotas WHERE estudiante_id = $1 AND concepto = $2 AND estado <> $3', [est.id, q.concepto, 'Anulada'],
++        `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento, estado)
++         VALUES ($1, $2, $3, $4::numeric, ((NOW() AT TIME ZONE 'America/Caracas')::date + $5::int), $6)
++         RETURNING id`,
++        [est.id, q.tipo, q.concepto, q.monto, q.dias, q.estado]);
++      cuotaIds.push(cu.id);
++      contar('cuotas', cu.creado);
++    }
++
++    // Referencia en la bandeja de auditoría ('Por Validar'); la cuota asociada ya está 'En Revisión'. Sin sede_id (trigger).
++    if (a.pago) {
++      const pg = await buscarOCrear(tx,
++        'SELECT id FROM pagos_referencias WHERE metodo_pago = $1 AND referencia = $2 AND estado <> $3', [a.pago.metodo, a.pago.referencia, 'Rechazada'],
++        `INSERT INTO pagos_referencias (cuota_id, estudiante_id, referencia, metodo_pago, monto_usd, tasa_bcv, monto_bs, estado)
++         VALUES ($1, $2, $3, $4, $5::numeric, $6::numeric, ROUND($5::numeric * $6::numeric, 2), 'Por Validar')
++         RETURNING id`,
++        [cuotaIds[a.pago.cuota], est.id, a.pago.referencia, a.pago.metodo, a.pago.monto, TASA_PRUEBA]);
++      contar('pagos_referencias', pg.creado);
++    }
++  }
++  return { resumen, estudiantes, sedeId };
++}
++
++// ── Verificación (si algo falla → ROLLBACK de todo) ───────────────────────────────────────────
++
++async function verificar(tx, { estudiantes, sedeId }) {
++  const ids = estudiantes.map((e) => e.id);
++  const idsPg = arregloPg(ids);
++  const checks = [];
++  const registrar = (nombre, ok, detalle = null) => checks.push({ comprobacion: nombre, ok, detalle });
++
++  const nSede = async (texto, params) => Number((await uno(texto, params, tx)).n);
++
++  registrar('cuotas heredan sede_id del estudiante (trigger 006)',
++    (await nSede(
++      `SELECT COUNT(*)::int AS n FROM cuotas AS c JOIN estudiantes AS e ON e.id = c.estudiante_id
++        WHERE c.estudiante_id = ANY($1::int[]) AND COALESCE(c.sede_id, 0) <> COALESCE(e.sede_id, 0)`, [idsPg])) === 0);
++  registrar('pagos_referencias heredan sede_id del estudiante (trigger 006)',
++    (await nSede(
++      `SELECT COUNT(*)::int AS n FROM pagos_referencias AS p JOIN estudiantes AS e ON e.id = p.estudiante_id
++        WHERE p.estudiante_id = ANY($1::int[]) AND COALESCE(p.sede_id, 0) <> COALESCE(e.sede_id, 0)`, [idsPg])) === 0);
++
++  // Estado dinámico: Moroso ⇔ cuota vencida sin pagar; el resto 'Activo' (vw_estudiantes_estado).
++  const vista = await ejecutar('SELECT id, estado_dinamico FROM vw_estudiantes_estado WHERE id = ANY($1::int[])', [idsPg], tx);
++  const dinamico = new Map(vista.rows.map((r) => [r.id, r.estado_dinamico]));
++  const malos = estudiantes.filter((e) => dinamico.get(e.id) !== e.esperado).map((e) => ({ id: e.id, esperado: e.esperado, real: dinamico.get(e.id) || null }));
++  registrar('estado dinámico: 3 Activo + 2 Moroso', malos.length === 0, malos.length ? malos : null);
++
++  // Aislamiento: el MISMO predicado de la aplicación para cada alcance (entero = secretaria, NULL = consolidado).
++  const ver = (sede) => nSede(
++    `SELECT COUNT(DISTINCT c.estudiante_id)::int AS n FROM cuotas AS c
++      WHERE c.estudiante_id = ANY($2::int[]) AND ($1::int IS NULL OR c.sede_id = $1::int)`,
++    [sede, idsPg]);
++  const enA = estudiantes.filter((e) => e.sede === SEDES[0]).length;
++  const enB = estudiantes.filter((e) => e.sede === SEDES[1]).length;
++  registrar(`secretaria Acarigua ve solo sus ${enA} estudiantes`, (await ver(sedeId[SEDES[0]])) === enA);
++  registrar(`secretaria Barquisimeto ve solo sus ${enB} estudiantes`, (await ver(sedeId[SEDES[1]])) === enB);
++  registrar(`consolidado (sede_id NULL) ve los ${ids.length}`, (await ver(null)) === ids.length);
++
++  // Cuentas visibles por sede = comunes + propias (misma consulta que parametros.service.cuentasActivas).
++  const cuentas = async (sede) => nSede(
++    `SELECT COUNT(*)::int AS n FROM cuentas_pago WHERE activa = TRUE AND titular LIKE $2 AND (sede_id IS NULL OR sede_id = $1::int)`,
++    [sede, '% (prueba)']);
++  registrar('portal público: sede Acarigua = 1 común + 1 propia', (await cuentas(sedeId[SEDES[0]])) === 2);
++  registrar('portal público: sede Barquisimeto = 1 común + 1 propia', (await cuentas(sedeId[SEDES[1]])) === 2);
++  registrar('sin invitación (sede NULL) solo las comunes', (await cuentas(null)) === 1);
++
++  registrar('usuarios: secretarias con sede y admin consolidado sin sede',
++    (await nSede(
++      `SELECT COUNT(*)::int AS n FROM usuarios_admin
++        WHERE email LIKE $1 AND ((rol = 'secretaria' AND sede_id IS NULL) OR (rol = 'admin' AND sede_id IS NOT NULL))`, [`%${DOMINIO}`])) === 0);
++
++  // RLS (004/006), prueba FUNCIONAL: se asume el rol de la API REST de Supabase y se intenta leer. Debe fallar con 42501
++  // (REVOKE) o devolver 0 filas (RLS sin políticas). Cada intento va en un SAVEPOINT y se revierte (el SET LOCAL ROLE no persiste).
++  // Si el rol no existe (PostgreSQL común, no Supabase) la comprobación no aplica y se informa como tal.
++  const exposiciones = [];
++  let aplicable = false;
++  for (const [rol, setRol] of Object.entries(ROLES_API)) {
++    for (const [tabla, lectura] of Object.entries(LECTURAS_RLS)) {
++      await ejecutar('SAVEPOINT bma_rls', [], tx);
++      try {
++        await ejecutar(setRol, [], tx);
++        aplicable = true;
++        const n = Number((await uno(lectura, [], tx)).n);
++        if (n > 0) exposiciones.push(`${rol} lee ${n} fila(s) de ${tabla}`);
++      } catch (err) {
++        if (err && err.code === '22023') break; // el rol no existe en este servidor → no aplica
++        if (!err || err.code !== '42501') throw err; // cualquier error distinto de "permiso denegado" es un fallo real
++      } finally {
++        await ejecutar('ROLLBACK TO SAVEPOINT bma_rls', [], tx);
++      }
++    }
++  }
++  registrar(aplicable ? 'RLS: anon/authenticated no leen cuotas, estudiantes ni pagos_referencias' : 'RLS: roles anon/authenticated inexistentes (PostgreSQL común) — no aplica',
++    exposiciones.length === 0, exposiciones.length ? exposiciones : null);
++
++  return checks;
++}
++
++// ── Main ──────────────────────────────────────────────────────────────────────────────────────
++
++async function main() {
++  if (cfg.esProduccion && process.env.SEED_ALLOW_PROD !== '1') {
++    throw new Error('Seed bloqueado con NODE_ENV=production. Define SEED_ALLOW_PROD=1 solo si es intencional.');
++  }
++  const haceReset = process.argv.includes('--reset');
++  const clave = contrasenaDePrueba();
++
++  const salida = await conTransaccion(async (tx) => {
++    if (haceReset) await reset(tx);
++    const sembrado = await sembrar(tx, clave.valor);
++    const checks = await verificar(tx, sembrado);
++    const fallidas = checks.filter((c) => !c.ok);
++    if (fallidas.length) {
++      const err = new Error(`Verificación fallida: ${fallidas.map((c) => c.comprobacion).join(' | ')}`);
++      err.code = 'SEED_VERIFICACION';
++      err.detail = JSON.stringify(fallidas);
++      throw err; // → ROLLBACK
++    }
++    return { ...sembrado.resumen, checks };
++  });
++
++  const salidaOk = { ok: true, reset: haceReset, ...salida };
++  if (clave.generada && (salida.creados.usuarios_admin || 0) > 0) {
++    salidaOk.credenciales_prueba = { aviso: 'Se muestran una sola vez. Define SEED_PASSWORD para fijarlas.', usuarios: ADMINS.map((a) => a.email), contrasena: clave.valor };
++  }
++  console.log(JSON.stringify(salidaOk, null, 2));
++}
++
++main()
++  .catch((err) => {
++    console.error(JSON.stringify(errorJson(err), null, 2));
++    process.exitCode = 1;
++  })
++  .finally(() => closePool());

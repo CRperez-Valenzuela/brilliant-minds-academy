@@ -12,6 +12,8 @@ import { html, montar, raw, urlSegura, type HtmlSeguro } from './lib/html';
 import { icono, type NombreIcono } from './lib/icons';
 import { bs, diasDelPeriodo, fechaCorta, fechaHora, horaConSegundos, nombreMetodo, periodoActual, tasa as formatoTasa, usd } from './lib/format';
 import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiquetaEstado, notificar, obtener, todos } from './lib/ui';
+import { vistaConfiguracion } from './configuracion';
+import { montarAnimacionLogin } from './login-animation';
 import type {
   AlertaWhatsapp,
   BalanceContable,
@@ -54,6 +56,7 @@ const VISTAS: readonly DefVista[] = [
   { id: 'estudiantes', titulo: 'Estudiantes', icono: 'users', soloAdmin: false },
   { id: 'auditoria', titulo: 'Auditoría de referencias', icono: 'inbox', soloAdmin: false },
   { id: 'contabilidad', titulo: 'Contabilidad', icono: 'book', soloAdmin: true },
+  { id: 'configuracion', titulo: 'Configuración de cobro', icono: 'wallet', soloAdmin: true },
 ];
 
 const ICONO_MODULO: Readonly<Record<CodigoModuloPremium, NombreIcono>> = {
@@ -156,12 +159,10 @@ function mostrarLogin(mensaje?: string): void {
   montar(
     obtener('#app', HTMLElement),
     html`<main class="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 px-4 py-12">
-      <div class="flex items-center gap-4">
-        <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-900 text-white">${icono('school', 'h-6 w-6')}</span>
-        <div>
-          <h1 class="${CLS.titulo}">Brilliant Minds Academy</h1>
-          <p class="${CLS.subtitulo}">Panel administrativo</p>
-        </div>
+      <div id="login-logo" class="w-full"></div>
+      <div class="text-center">
+        <h1 class="${CLS.titulo}">Brilliant Minds Academy</h1>
+        <p class="${CLS.subtitulo}">Panel administrativo</p>
       </div>
       <form id="login" novalidate class="${CLS.tarjetaCristal} flex flex-col gap-4 p-6" aria-label="Iniciar sesión">
         <div id="login-aviso">${mensaje ? aviso('warn', mensaje) : null}</div>
@@ -177,6 +178,7 @@ function mostrarLogin(mensaje?: string): void {
       </form>
     </main>`,
   );
+  void montarAnimacionLogin(obtener('#login-logo', HTMLElement));
   const form = obtener('#login', HTMLFormElement);
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
@@ -340,6 +342,7 @@ async function navegar(id: string): Promise<void> {
     else if (id === 'estudiantes') await vistaEstudiantes(ctx);
     else if (id === 'auditoria') await vistaAuditoria(ctx);
     else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
+    else if (id === 'configuracion' && esAdmin()) await vistaConfiguracion({ zona: ctx.zona, vigente: ctx.vigente, usuario: estado.usuario });
     else await vistaDashboard(ctx);
   } catch (e: unknown) {
     manejarError(e, ctx);

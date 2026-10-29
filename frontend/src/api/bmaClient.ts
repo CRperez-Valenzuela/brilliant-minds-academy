@@ -234,6 +234,10 @@ export const bma = {
     return (await sobre<T>(ruta, { ...extra, metodo: 'POST', cuerpo })).data;
   },
 
+  async put<T>(ruta: string, cuerpo: object = {}, extra: Omit<OpcionesPeticion, 'cuerpo' | 'metodo'> = {}): Promise<T> {
+    return (await sobre<T>(ruta, { ...extra, metodo: 'PUT', cuerpo })).data;
+  },
+
   /** Listados paginados: `{ ok, data: T[], paginacion }`. */
   async pagina<T>(ruta: string, consulta?: ParametrosConsulta): Promise<Pagina<T>> {
     const s = await sobre<readonly T[]>(ruta, consulta ? { consulta } : {});

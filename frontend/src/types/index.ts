@@ -361,10 +361,40 @@ export interface RespuestaPrueba {
 
 // ───────────────────────── Estado de la interfaz ─────────────────────────
 
-export type VistaAdmin = 'dashboard' | 'estudiantes' | 'auditoria' | 'contabilidad';
+export type VistaAdmin = 'dashboard' | 'estudiantes' | 'auditoria' | 'contabilidad' | 'configuracion';
 
 export interface EstadoSidebar {
   readonly colapsado: boolean;
 }
 
 export type FiltroEstudiantes = '' | EstadoDinamico;
+
+// ───────────────────────── Configuración de cobro (acceso consolidado) ─────────────────────────
+
+/** Fila de `GET /api/configuracion`. `sede_id` NULL = cuenta común a todas las sedes. */
+export interface CuentaCobro extends CuentaPago {
+  readonly activa: boolean;
+  readonly sede_id: number | null;
+}
+
+/** `GET /api/configuracion` */
+export interface ConfiguracionAcademia {
+  readonly matricula_usd: number;
+  readonly cuentas: readonly CuentaCobro[];
+}
+
+/** Fila de `GET /api/sedes`. */
+export interface SedeResumen {
+  readonly id: number;
+  readonly nombre: string;
+  readonly activa: boolean;
+}
+
+/** Cuerpo de `POST /api/configuracion/cuentas` y `PUT /api/configuracion/cuentas/:id` (el PUT exige el cuerpo completo). */
+export interface CuerpoCuenta {
+  readonly metodo: MetodoPago;
+  readonly titular: string;
+  readonly detalle: string;
+  readonly activa: boolean;
+  readonly sede_id: number | null;
+}
