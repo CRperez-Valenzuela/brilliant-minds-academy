@@ -12,6 +12,9 @@ import { html, montar, raw, urlSegura, type HtmlSeguro } from './lib/html';
 import { icono, type NombreIcono } from './lib/icons';
 import { bs, diasDelPeriodo, fechaCorta, fechaHora, horaConSegundos, nombreMetodo, periodoActual, tasa as formatoTasa, usd } from './lib/format';
 import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiquetaEstado, notificar, obtener, todos } from './lib/ui';
+import { AVISO_PREMIUM, encabezadoVista as encabezado, enlazarPrueba, pantallaBloqueada, seccionBloqueada } from './lib/candado';
+import { vistaEstudianteDetalle } from './estudiantes-detalle';
+import { vistaFacturacionMasiva } from './facturacion-masiva';
 import { vistaConfiguracion } from './configuracion';
 import { montarAnimacionLogin } from './login-animation';
 import type {
@@ -38,7 +41,7 @@ import type {
 
 // ───────────────────────── Constantes ─────────────────────────
 
-export const AVISO_PREMIUM = 'Módulo Premium Deshabilitado';
+export { AVISO_PREMIUM };
 const CLAVE_SIDEBAR = 'bma.sidebar.colapsado';
 const REFRESCO_TABLERO_MS = 30_000;
 const LIMITE_PAGINA = 25;
@@ -65,6 +68,8 @@ const ICONO_MODULO: Readonly<Record<CodigoModuloPremium, NombreIcono>> = {
   BANCAMIGA: 'wallet',
   APP_MOVIL: 'phone',
   FACHADA_WEB: 'globe',
+  MULTI_SEDE_PREMIUM: 'school',
+  FACTURACION_MASIVA: 'receipt',
 };
 
 const FILTROS_ESTUDIANTES: readonly FiltroEstudiantes[] = ['', 'Activo', 'Moroso', 'Fuera de la Academia', 'Pendiente por Validación Administrativa'];
@@ -273,8 +278,9 @@ function alternarSidebar(): void {
 }
 
 function marcarNavegacion(id: string): void {
+  const activo = id.startsWith('estudiante:') ? 'estudiantes' : id; // la ficha de un estudiante cuelga de «Estudiantes»
   for (const b of todos('[data-nav]', HTMLElement)) {
-    if (b.dataset['nav'] === id) b.setAttribute('aria-current', 'page');
+    if (b.dataset['nav'] === activo) b.setAttribute('aria-current', 'page');
     else b.removeAttribute('aria-current');
   }
 }
@@ -339,6 +345,7 @@ async function navegar(id: string): Promise<void> {
   montar(zona, html`<div class="h-32 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando"></div>`);
   try {
     if (id.startsWith('premium:')) vistaPremium(ctx, id.slice('premium:'.length));
+    else if (id.startsWith('estudiante:')) await vistaDetalle(ctx, id.slice('estudiante:'.length));
     else if (id === 'estudiantes') await vistaEstudiantes(ctx);
     else if (id === 'auditoria') await vistaAuditoria(ctx);
     else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
@@ -368,13 +375,6 @@ function manejarError(e: unknown, ctx: Contexto): void {
       <button type="button" data-reintentar class="${boton(CLS.btnSecundario, 'mt-4')}">${icono('refresh', 'h-4 w-4')}<span>Reintentar</span></button></div>`,
   );
   buscar('[data-reintentar]', HTMLButtonElement, ctx.zona)?.addEventListener('click', () => void navegar(estado.vista));
-}
-
-function encabezado(titulo: string, subtitulo: string, acciones: HtmlSeguro | null = null): HtmlSeguro {
-  return html`<header class="mb-6 flex flex-wrap items-end justify-between gap-4">
-    <div><h1 class="${CLS.titulo}">${titulo}</h1><p class="${CLS.subtitulo}">${subtitulo}</p></div>
-    ${acciones}
-  </header>`;
 }
 
 function paginacionHtml(p: Paginacion): HtmlSeguro {
@@ -523,7 +523,7 @@ async function vistaDashboard(ctx: Contexto): Promise<void> {
 
 function filaEstudiante(s: EstudianteListado): HtmlSeguro {
   return html`<tr>
-    <td class="${CLS.td}"><span class="font-medium text-slate-900">${s.apellidos}, ${s.nombres}</span></td>
+    <td class="${CLS.td}"><button type="button" data-detalle="${s.id}" class="rounded-md text-left font-medium text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-slate-900" aria-label="Ver ficha de ${s.apellidos}, ${s.nombres}">${s.apellidos}, ${s.nombres}</button></td>
     <td class="${CLS.td}">${s.grado_solicitado}</td>
     <td class="${CLS.td}">${s.representante}</td>
     <td class="${CLS.td}">${etiquetaEstado(s.estado_dinamico)}</td>
@@ -565,6 +565,12 @@ async function vistaEstudiantes(ctx: Contexto): Promise<void> {
     actualizar({ paginaEstudiantes: Math.max(1, estado.paginaEstudiantes + delta) });
     void navegar('estudiantes');
   });
+  for (const b of todos('[data-detalle]', HTMLButtonElement, ctx.zona)) {
+    b.addEventListener('click', () => {
+      const id = Number(b.dataset['detalle']);
+      if (Number.isInteger(id) && id > 0) void navegar(`estudiante:${id}`);
+    });
+  }
   for (const b of todos('[data-alerta]', HTMLButtonElement, ctx.zona)) {
     b.addEventListener('click', () => {
       const tipo: TipoAlertaWhatsapp = b.dataset['alerta'] === 'morosidad' ? 'morosidad' : 'preventiva';
@@ -598,6 +604,22 @@ async function abrirAlerta(tipo: TipoAlertaWhatsapp, estudianteId: number, dispa
     if (e instanceof BmaSesionExpiradaError) cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.');
     else notificar('bad', mensajeDeError(e));
   }
+}
+
+/** Ficha del estudiante (Core Base, sin candado): `estudiante:<id>` en el estado de navegación. */
+async function vistaDetalle(ctx: Contexto, idTexto: string): Promise<void> {
+  const id = Number(idTexto);
+  if (!Number.isInteger(id) || id <= 0) {
+    montar(ctx.zona, html`<div class="mx-auto max-w-2xl pt-8">${aviso('bad', 'El identificador del estudiante no es válido.')}</div>`);
+    return;
+  }
+  await vistaEstudianteDetalle({
+    zona: ctx.zona,
+    vigente: ctx.vigente,
+    estudianteId: id,
+    alVolver: () => void navegar('estudiantes'),
+    alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
+  });
 }
 
 // ───────────────────────── Auditoría de referencias ─────────────────────────
@@ -788,58 +810,31 @@ async function vistaContabilidad(ctx: Contexto): Promise<void> {
 
 // ───────────────────────── Módulos Premium + Candado ─────────────────────────
 
-interface DatosCandado {
-  readonly nombre: string;
-  readonly descripcion: string;
-  readonly precio_usd: number;
-}
-
-function vistaFantasma(): HtmlSeguro {
-  const fila = html`<div class="flex items-center gap-4 border-b border-slate-100 py-4"><div class="h-8 w-8 rounded-full bg-slate-200"></div><div class="h-4 flex-1 rounded bg-slate-200"></div><div class="h-4 w-24 rounded bg-slate-200"></div></div>`;
-  return html`<div aria-hidden="true" class="pointer-events-none select-none p-6">
-    <div class="mb-4 h-6 w-1/3 rounded bg-slate-300"></div>${fila}${fila}${fila}${fila}${fila}
-  </div>`;
-}
-
-/** Capa absoluta de cristal (`backdrop-blur-md bg-white/80`) sobre la sección bloqueada. */
-function capaCandado(d: DatosCandado): HtmlSeguro {
-  return html`<div data-candado class="absolute inset-0 z-10 flex items-center justify-center bg-white/80 p-6 backdrop-blur-md">
-    <div role="region" aria-label="${AVISO_PREMIUM}" class="${CLS.tarjetaCristal} w-full max-w-md p-8 text-center">
-      <span class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 text-white">${icono('lock', 'h-6 w-6')}</span>
-      <h2 class="mt-4 text-lg font-bold text-slate-900">${AVISO_PREMIUM}</h2>
-      <p class="mt-1 text-sm font-semibold text-slate-800">${d.nombre}</p>
-      <p class="mt-2 text-sm text-slate-700">${d.descripcion}</p>
-      <p class="mt-4 text-2xl font-bold text-slate-900">${usd(d.precio_usd)}</p>
-      <p class="mt-1 text-xs text-slate-600">Pago único · solicítalo a Astra Digital Solutions</p>
-    </div>
-  </div>`;
-}
-
-function seccionBloqueada(d: DatosCandado): HtmlSeguro {
-  return html`${encabezado(d.nombre, d.descripcion)}
-    <div class="${CLS.tarjeta} relative min-h-96 overflow-hidden">${vistaFantasma()}${capaCandado(d)}</div>`;
-}
-
 function vistaPremium(ctx: Contexto, codigo: string): void {
   const m = estado.modulos.find((x) => x.codigo === codigo);
   if (!m) {
     montar(ctx.zona, aviso('bad', 'Módulo no encontrado.'));
     return;
   }
+  // Módulos con vista propia: gestionan su propio candado (pantalla de cristal + prueba gratuita) con lib/candado.ts.
+  if (m.codigo === 'FACTURACION_MASIVA') {
+    vistaFacturacionMasiva({
+      zona: ctx.zona,
+      vigente: ctx.vigente,
+      modulo: m,
+      puedeGenerar: esAdmin(),
+      puedeProbar: m.prueba_utilizada === false && esConsolidado(),
+      alcance: estado.usuario?.sede_id ?? null,
+      alActivarPrueba: () => activarPrueba(m),
+      alBloquear: (d) => void bloquearModulo(ctx, d),
+      alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
+    });
+    return;
+  }
   if (m.bloqueado) {
     // Prueba gratuita de 15 días: solo el acceso consolidado (admin sin sede) puede abrirla, una vez por módulo.
-    const ofrecerPrueba = m.prueba_utilizada === false && esConsolidado();
-    montar(
-      ctx.zona,
-      html`${seccionBloqueada(m)}${ofrecerPrueba
-        ? html`<div class="mt-6">${aviso('info', html`<p>Prueba este módulo sin costo durante 15 días. Al vencer se bloquea solo.</p>
-            <button type="button" id="activar-prueba" class="${boton(CLS.btnPrimario, 'mt-3')}">${icono('check', 'h-4 w-4')}<span>Activar prueba gratuita de 15 días</span></button>`, 'Prueba gratuita disponible')}</div>`
-        : null}`,
-    );
-    const activar = buscar('#activar-prueba', HTMLButtonElement);
-    activar?.addEventListener('click', () => {
-      void conBotonOcupado(activar, () => activarPrueba(m)).catch((e: unknown) => notificar('bad', mensajeDeError(e)));
-    });
+    montar(ctx.zona, pantallaBloqueada(m, m.prueba_utilizada === false && esConsolidado()));
+    enlazarPrueba(ctx.zona, () => activarPrueba(m));
     return;
   }
   const hasta = m.en_prueba === true && m.expira_prueba_en ? m.expira_prueba_en : null;
@@ -848,7 +843,9 @@ function vistaPremium(ctx: Contexto, codigo: string): void {
     html`${encabezado(m.nombre, m.descripcion)}
     <div class="${CLS.tarjeta} flex flex-col gap-4 p-6">
       ${hasta ? aviso('warn', `Prueba gratuita vigente hasta el ${fechaHora(hasta)}. Después de esa fecha el módulo se bloquea automáticamente.`, 'Estás en periodo de prueba') : null}
-      ${aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}
+      ${m.codigo === 'MULTI_SEDE_PREMIUM'
+        ? aviso('info', 'El Core Base incluye dos sedes (Acarigua y Barquisimeto). Con este módulo el servidor admite la tercera sede y las siguientes (alta en POST /api/sedes, acceso consolidado).', 'Expansión multi-sede habilitada')
+        : aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}
     </div>`,
   );
 }
@@ -874,6 +871,26 @@ async function activarPrueba(m: ModuloPremium): Promise<void> {
   for (const x of modulos) refrescarItemPremium(x);
   notificar('ok', 'Prueba gratuita de 15 días activada.');
   await navegar(`premium:${m.codigo}`);
+}
+
+/**
+ * El servidor respondió 403 MODULO_PREMIUM_DESHABILITADO en mitad de una sesión (p. ej. venció la prueba): se relee el catálogo para
+ * poner el candado en el menú y se muestra la pantalla de cristal (con la oferta de prueba si todavía aplica).
+ */
+async function bloquearModulo(ctx: Contexto, d: DetalleModuloPremium): Promise<void> {
+  try {
+    const modulos = await bma.get<readonly ModuloPremium[]>('/premium/modulos');
+    actualizar({ modulos });
+    for (const x of modulos) refrescarItemPremium(x);
+  } catch (e: unknown) {
+    if (e instanceof BmaSesionExpiradaError) {
+      cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.');
+      return;
+    }
+    if (ctx.vigente()) pintarCandadoDesdeServidor(ctx.zona, d); // sin catálogo: al menos el candado correcto en pantalla
+    return;
+  }
+  if (ctx.vigente()) await navegar(`premium:${d.modulo}`);
 }
 
 /** Si el servidor responde 403 MODULO_PREMIUM_DESHABILITADO para cualquier sección, se muestra el mismo candado. */

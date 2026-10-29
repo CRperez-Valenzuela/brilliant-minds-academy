@@ -330,7 +330,9 @@ export type CodigoModuloPremium =
   | 'WHATSAPP_AUTOMATICO'
   | 'BANCAMIGA'
   | 'APP_MOVIL'
-  | 'FACHADA_WEB';
+  | 'FACHADA_WEB'
+  | 'MULTI_SEDE_PREMIUM'
+  | 'FACTURACION_MASIVA';
 
 export interface ModuloPremium {
   readonly codigo: CodigoModuloPremium;
@@ -397,4 +399,107 @@ export interface CuerpoCuenta {
   readonly detalle: string;
   readonly activa: boolean;
   readonly sede_id: number | null;
+}
+
+// ───────────────────────── Ficha del estudiante (Core Base) ─────────────────────────
+
+export type EstatusAcademico = 'Pendiente por Validación Administrativa' | 'Activo' | 'Fuera de la Academia';
+export type TipoDocumentoEstudiante = 'FOTO_CARNET' | 'CEDULA_IDENTIDAD' | 'ACTA_NACIMIENTO';
+
+/** Fila de `cuotas` dentro de `GET /api/estudiantes/:id`. */
+export interface CuotaEstudiante {
+  readonly id: number;
+  readonly tipo: TipoCuota;
+  readonly concepto: string;
+  readonly monto_usd: number;
+  readonly fecha_vencimiento: string;
+  readonly estado: EstadoCuota;
+}
+
+/** Fila de `documentos` (metadatos de Google Drive; el binario vive en Drive). */
+export interface DocumentoEstudiante {
+  readonly id: number;
+  readonly tipo: TipoDocumentoEstudiante;
+  readonly nombre_archivo: string;
+  readonly mime_type: string;
+  readonly tamano_bytes: number;
+  readonly drive_url: string | null;
+  readonly subido_en: string;
+}
+
+/** Fila de `pagos` (referencias declaradas por el representante). */
+export interface PagoEstudiante {
+  readonly id: number;
+  readonly cuota_id: number;
+  readonly referencia: string;
+  readonly metodo_pago: MetodoPago;
+  readonly monto_usd: number;
+  readonly monto_bs: number;
+  readonly tasa_bcv: number;
+  readonly estado: EstadoPagoReferencia;
+  readonly declarado_en: string;
+}
+
+/** `GET /api/estudiantes/:id` — estudiante + vista de estado + representante + cuotas, documentos y pagos. */
+export interface DetalleEstudiante {
+  readonly id: number;
+  readonly representante_id: number;
+  readonly sede_id: number | null;
+  readonly nombres: string;
+  readonly apellidos: string;
+  readonly cedula_identidad: string | null;
+  readonly fecha_nacimiento: string;
+  readonly grado_solicitado: string;
+  readonly colegio_procedencia: string | null;
+  readonly ultimo_grado_aprobado: string | null;
+  readonly tipo_sangre: TipoSangre | null;
+  readonly alergias: string | null;
+  readonly condiciones_medicas: string | null;
+  readonly medicamentos: string | null;
+  readonly emergencia_nombre: string | null;
+  readonly emergencia_telefono: string | null;
+  readonly estatus_academico: EstatusAcademico;
+  readonly fecha_retiro: string | null;
+  readonly motivo_retiro: string | null;
+  readonly drive_folder_id: string | null;
+  readonly drive_folder_url: string | null;
+  readonly creado_en: string;
+  readonly actualizado_en: string;
+  readonly estado_dinamico: EstadoDinamico;
+  readonly estatus_pago: EstatusPago;
+  readonly deuda_vencida_usd: number;
+  readonly rep_nombres: string;
+  readonly rep_apellidos: string;
+  readonly rep_cedula: string;
+  readonly rep_email: string | null;
+  readonly rep_telefono: string | null;
+  readonly cuotas: readonly CuotaEstudiante[];
+  readonly documentos: readonly DocumentoEstudiante[];
+  readonly pagos: readonly PagoEstudiante[];
+}
+
+/** Cuerpo de `POST /api/estudiantes/:id/retirar` (el motivo es obligatorio en la interfaz; el servidor admite hasta 300 caracteres). */
+export interface CuerpoRetiro {
+  readonly motivo: string;
+  readonly fecha_retiro: string;
+}
+
+/** Respuesta de `POST /api/estudiantes/:id/retirar` y `/reactivar`. */
+export interface RespuestaCambioEstatus {
+  readonly id: number;
+  readonly estatus_academico: EstatusAcademico;
+}
+
+// ───────────────────────── Facturación masiva (módulo premium FACTURACION_MASIVA) ─────────────────────────
+
+/** Cuerpo de `POST /api/facturacion/cuotas/generar-mensualidades`. */
+export interface CuerpoGenerarMensualidades {
+  readonly concepto: string;
+  readonly monto_usd: number;
+  readonly fecha_vencimiento: string;
+}
+
+/** Respuesta de `POST /api/facturacion/cuotas/generar-mensualidades`: cuotas realmente creadas (las ya existentes se omiten). */
+export interface RespuestaGenerarMensualidades {
+  readonly creadas: number;
 }

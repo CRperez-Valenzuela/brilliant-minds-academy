@@ -128,12 +128,12 @@ test.after(async () => {
 });
 
 // ── Migraciones y scripts ───────────────────────────────────────────────────────────────────────
-t('migrate.js: aplica las 7 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
+t('migrate.js: aplica las 8 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
   const primera = hijo('scripts/migrate.js');
   for (const f of fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql'))) assert.match(primera, new RegExp(`Aplicada ${f}`));
   const segunda = hijo('scripts/migrate.js');
   assert.ok(!/Aplicada/.test(segunda), segunda);
-  assert.equal((segunda.match(/ya aplicada/g) || []).length, 7);
+  assert.equal((segunda.match(/ya aplicada/g) || []).length, 8);
   assert.match(segunda, /Migraciones al día/);
 });
 
@@ -144,7 +144,7 @@ t(`el esquema real contiene las 19 tablas + la vista, con RLS activo y la vista 
   const v = await uno(`SELECT array_to_string(reloptions, ',') AS opciones FROM pg_class WHERE relname = 'vw_estudiantes_estado'`);
   assert.equal(v.opciones, 'security_invoker=true');
   const reg = await filas('SELECT nombre FROM schema_migrations ORDER BY nombre');
-  assert.equal(reg.length, 7);
+  assert.equal(reg.length, 8);
 });
 
 t('crear-admin.js: upsert por correo (ON CONFLICT), normaliza a minúsculas, reactiva y no duplica', async () => {
@@ -618,10 +618,11 @@ t('exportación: cada hoja se lee por lotes con LIMIT/keyset sin perder ni dupli
 });
 
 // ── Candados premium ────────────────────────────────────────────────────────────────────────────
-t('premium: 5 módulos sembrados y deshabilitados; el guard bloquea con 403 y se abre al habilitar', async () => {
+t('premium: 7 módulos sembrados y deshabilitados; el guard bloquea con 403 y se abre al habilitar', async () => {
   const todos = await svc.guard.guard.repo.leerTodos();
   assert.deepEqual(todos.map((m) => [m.codigo, m.precio_usd, m.habilitado]), [
-    ['WHATSAPP_AUTOMATICO', 150, false], ['IA_ATENCION', 200, false], ['BANCAMIGA', 300, false], ['APP_MOVIL', 450, false], ['FACHADA_WEB', 550, false]]);
+    ['FACTURACION_MASIVA', 20, false], ['MULTI_SEDE_PREMIUM', 50, false], ['WHATSAPP_AUTOMATICO', 150, false], ['IA_ATENCION', 200, false],
+    ['BANCAMIGA', 300, false], ['APP_MOVIL', 450, false], ['FACHADA_WEB', 550, false]]);
   let resultado;
   const g = svc.guard.crearGuard({ ttlMs: 0 });
   await g.requireModulo('BANCAMIGA')({}, {}, (e) => { resultado = e; });
@@ -630,6 +631,94 @@ t('premium: 5 módulos sembrados y deshabilitados; el guard bloquea con 403 y se
   await g.requireModulo('BANCAMIGA')({}, {}, (e) => { resultado = e; });
   assert.equal(resultado, undefined);
   await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE WHERE codigo = 'BANCAMIGA'`);
+});
+
+// ── Límite de sedes del Core Base (migración 008) ──────────────────────────────────────────────
+// Se ejecuta ANTES del resto de pruebas multi-sede, cuando aún no hay sedes: crea y borra sus propias filas (prefijo T008-).
+const limpiarT008 = async () => {
+  await db.ejecutar(`DELETE FROM sedes WHERE nombre LIKE 'T008-%'`);
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, prueba_iniciada_en = NULL, expira_prueba_en = NULL, actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
+};
+
+t('008: los módulos MULTI_SEDE_PREMIUM (US$ 50) y FACTURACION_MASIVA (US$ 20) existen deshabilitados y la migración no pisa su estado', async () => {
+  const m = await filas(`SELECT codigo, nombre, precio_usd, habilitado FROM modulos_premium WHERE codigo IN ('MULTI_SEDE_PREMIUM', 'FACTURACION_MASIVA') ORDER BY codigo`);
+  assert.deepEqual(m.map((x) => [x.codigo, x.nombre, x.precio_usd, x.habilitado]), [
+    ['FACTURACION_MASIVA', 'Módulo de Facturación Masiva Automatizada', 20, false],
+    ['MULTI_SEDE_PREMIUM', 'Expansión Multi-Sede Avanzada (3+ Sedes)', 50, false]]);
+  // re-ejecutar 008 con el módulo ya contratado y un precio negociado: DO NOTHING no toca nada
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, precio_usd = 45 WHERE codigo = 'FACTURACION_MASIVA'`);
+  await db.ejecutarScript(fs.readFileSync(path.join(RAIZ, 'database', 'migrations', '008_nuevos_premium.sql'), 'utf8'));
+  const f = await uno(`SELECT habilitado, precio_usd FROM modulos_premium WHERE codigo = 'FACTURACION_MASIVA'`);
+  assert.deepEqual([f.habilitado, f.precio_usd], [true, 45]);
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, precio_usd = 20 WHERE codigo = 'FACTURACION_MASIVA'`);
+});
+
+t('008: la 3ª sede se bloquea con 403 MODULO_PREMIUM_DESHABILITADO (servicio y trigger) y se permite con el módulo habilitado o en prueba vigente', async () => {
+  assert.equal((await uno('SELECT COUNT(*)::int AS n FROM sedes')).n, 0, 'precondición: sin sedes todavía');
+  try {
+    await svc.sedes.crear({ nombre: 'T008-A' });
+    await svc.sedes.crear({ nombre: 'T008-B' });
+    // 3ª por el servicio → 403 con el precio del módulo
+    await assert.rejects(svc.sedes.crear({ nombre: 'T008-C' }), (e) => e.status === 403 && e.codigo === 'MODULO_PREMIUM_DESHABILITADO'
+      && e.detalles.modulo === 'MULTI_SEDE_PREMIUM' && e.detalles.precio_usd === 50 && e.detalles.limite_sedes_base === 2);
+    // 3ª por SQL directo (cualquier camino que no pase por el servicio): SQLSTATE propio, traducido a 403 por el manejador de errores
+    const directo = await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1)`, ['T008-C']).catch((e) => e);
+    assert.equal(directo.code, 'BM403');
+    const http = svc.normalizar(directo);
+    assert.deepEqual([http.status, http.codigo, http.detalles.modulo, http.detalles.precio_usd], [403, 'MODULO_PREMIUM_DESHABILITADO', 'MULTI_SEDE_PREMIUM', 50]);
+    // INSERT multi-fila: cada fila ve a las anteriores de su propia sentencia (nada se inserta si alguna excede el cupo)
+    const multi = await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1), ($2)`, ['T008-M1', 'T008-M2']).catch((e) => e);
+    assert.equal(multi.code, 'BM403');
+    assert.equal((await uno('SELECT COUNT(*)::int AS n FROM sedes')).n, 2);
+    // un nombre repetido sigue siendo 409 SEDE_DUPLICADA (no se disfraza de módulo deshabilitado), también con ON CONFLICT DO NOTHING a pelo
+    await assert.rejects(svc.sedes.crear({ nombre: 'T008-A' }), (e) => e.status === 409 && e.codigo === 'SEDE_DUPLICADA');
+    assert.equal((await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING`, ['T008-A'])).rowCount, 0);
+    // la tabla sigue admitiendo UPDATE (activar/desactivar) con el cupo lleno
+    assert.equal((await svc.sedes.cambiarActiva((await uno(`SELECT id FROM sedes WHERE nombre = 'T008-A'`)).id, false)).activa, false);
+
+    // módulo contratado → la 3ª y la 4ª sí
+    await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
+    await svc.sedes.crear({ nombre: 'T008-C' });
+    await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1)`, ['T008-D']);
+
+    // prueba vigente → permite; prueba vencida (aunque habilitado siga en TRUE) → bloquea con el reloj de la base
+    await db.ejecutar(`UPDATE modulos_premium SET expira_prueba_en = NOW() + INTERVAL '3 days' WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
+    await svc.sedes.crear({ nombre: 'T008-E' });
+    await db.ejecutar(`UPDATE modulos_premium SET expira_prueba_en = NOW() - INTERVAL '1 minute' WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
+    await assert.rejects(svc.sedes.crear({ nombre: 'T008-F' }), (e) => e.status === 403 && e.codigo === 'MODULO_PREMIUM_DESHABILITADO');
+    assert.equal((await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1)`, ['T008-F']).catch((e) => e)).code, 'BM403');
+  } finally {
+    await limpiarT008();
+  }
+});
+
+t('008: altas concurrentes de sedes — el trigger serializa y solo 2 caben en el Core Base', async () => {
+  try {
+    assert.equal((await uno('SELECT COUNT(*)::int AS n FROM sedes')).n, 0);
+    const r = await Promise.allSettled(['T008-X', 'T008-Y', 'T008-Z', 'T008-W'].map((nombre) => svc.sedes.crear({ nombre })));
+    assert.equal(r.filter((x) => x.status === 'fulfilled').length, 2);
+    const rechazos = r.filter((x) => x.status === 'rejected').map((x) => svc.normalizar(x.reason));
+    assert.equal(rechazos.length, 2);
+    assert.ok(rechazos.every((x) => x.status === 403 && x.codigo === 'MODULO_PREMIUM_DESHABILITADO'), JSON.stringify(rechazos));
+    assert.equal((await uno('SELECT COUNT(*)::int AS n FROM sedes')).n, 2);
+  } finally {
+    await limpiarT008();
+  }
+});
+
+t('008: FACTURACION_MASIVA protege la generación masiva — 403 sin módulo, pasa con módulo habilitado', async () => {
+  const g = svc.guard.crearGuard({ ttlMs: 0 });
+  let resultado;
+  await g.requireModulo('FACTURACION_MASIVA')({}, {}, (e) => { resultado = e; });
+  assert.deepEqual([resultado.status, resultado.codigo, resultado.detalles.precio_usd], [403, 'MODULO_PREMIUM_DESHABILITADO', 20]);
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'FACTURACION_MASIVA'`);
+  try {
+    resultado = 'sin-next';
+    await g.requireModulo('FACTURACION_MASIVA')({}, {}, (e) => { resultado = e; });
+    assert.equal(resultado, undefined);
+  } finally {
+    await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, actualizado_en = NOW() WHERE codigo = 'FACTURACION_MASIVA'`);
+  }
 });
 
 // ── Multi-sede ──────────────────────────────────────────────────────────────────────────────────
@@ -847,7 +936,7 @@ t('Supabase: con los privilegios por defecto de anon/authenticated, la migració
   await db.ejecutar('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated');
   await db.ejecutar('GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated');
   // 004 (Core Base) + 006/007 (sedes e invitaciones: su propio bloque RLS/REVOKE; además prueban que re-ejecutarlas es inocuo).
-  for (const m of ['004_seguridad_supabase.sql', '006_multisede.sql', '007_invitaciones_inscripcion.sql']) {
+  for (const m of ['004_seguridad_supabase.sql', '006_multisede.sql', '007_invitaciones_inscripcion.sql', '008_nuevos_premium.sql']) {
     await db.ejecutarScript(fs.readFileSync(path.join(RAIZ, 'database', 'migrations', m), 'utf8'));
   }
   for (const rol of ['anon', 'authenticated']) {
@@ -1031,7 +1120,10 @@ t('cron WhatsApp por sede: cada sede activa se despacha por separado (Preventiva
   const mB = await sembrar({ sedeId: sedeB, nombres: 'SdMorB', vence: sumarDias(hoy, -1) });
   const lejos = await sembrar({ sedeId: sedeA, nombres: 'SdLejos', vence: sumarDias(hoy, 20) });
   const libre = await sembrar({ nombres: 'SdSinSede', vence: sumarDias(hoy, 4) });
+  // Esta es una sede más allá de las 2 del Core Base: la migración 008 exige MULTI_SEDE_PREMIUM (se restablece justo después).
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
   const cerrada = (await svc.sedes.crear({ nombre: 'Sede Cerrada Cron' })).id;
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
   const enCerrada = await sembrar({ sedeId: cerrada, nombres: 'SdCerrada', vence: sumarDias(hoy, 4) });
   await svc.sedes.cambiarActiva(cerrada, false);
 

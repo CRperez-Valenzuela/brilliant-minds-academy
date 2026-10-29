@@ -1,0 +1,1642 @@
+diff --git a/CAMBIOS_BMA_PREMIUM_008.md b/CAMBIOS_BMA_PREMIUM_008.md
+new file mode 100644
+index 0000000..0d39d9c
+--- /dev/null
++++ b/CAMBIOS_BMA_PREMIUM_008.md
+@@ -0,0 +1,58 @@
++# CAMBIOS_BMA_PREMIUM_008 — Módulos MULTI_SEDE_PREMIUM y FACTURACION_MASIVA · Ficha del estudiante
++
++**Proyecto:** Brilliant Minds Academy · **Rama:** `development` · **Agente:** Ingeniero Fullstack Senior, Astra Digital Solutions
++**Infraestructura:** PostgreSQL / Supabase (parámetros posicionales `$1, $2…`, sin MSSQL)
++
++## Qué se entrega
++
++1. **Migración `008_nuevos_premium.sql`** (idempotente): inserta `MULTI_SEDE_PREMIUM` (US$ 50.00) y `FACTURACION_MASIVA` (US$ 20.00) con `ON CONFLICT (codigo) DO NOTHING` y crea el trigger `trg_sedes_limite_base`, que limita el Core Base a **2 sedes**. La 3ª solo entra con `MULTI_SEDE_PREMIUM` habilitado o en prueba vigente; si no, **403 `MODULO_PREMIUM_DESHABILITADO`**.
++2. **Ficha del estudiante** (`frontend/src/estudiantes-detalle.ts`): vista del **Core Base**, sin candado. Consume `GET /api/estudiantes/:id`.
++3. **Facturación masiva** (`frontend/src/facturacion-masiva.ts`): vista premium con candado de cristal (US$ 20.00 + prueba de 15 días) y formulario hacia `POST /api/facturacion/cuotas/generar-mensualidades`.
++
++## Archivos creados
++
++| Archivo | Contenido |
++|---|---|
++| `database/migrations/008_nuevos_premium.sql` | Módulos + función `fn_limitar_sedes_base()` (PL/pgSQL, `search_path` fijo, `REVOKE … FROM PUBLIC`, `pg_advisory_xact_lock` que serializa las altas) + trigger `BEFORE INSERT ON sedes`. SQLSTATE propio `BM403`, `DETAIL` en JSON. |
++| `frontend/src/estudiantes-detalle.ts` | Ficha: académico, médico, Drive, representante; tablas de cuotas y pagos (5 columnas cada una); modal «Retirar» (motivo obligatorio ≤ 300 + fecha no futura) y «Reactivar»; repintado en el mismo sitio tras cada acción. |
++| `frontend/src/facturacion-masiva.ts` | Candado + formulario (concepto, monto USD, `type="date"` con `min` = hoy) + aviso `.msg.okk` con `creadas` del servidor (`.msg.inf` si 0, `.msg.err` si falla). |
++| `frontend/src/lib/candado.ts` | Pantalla de cristal, fantasma, oferta de prueba y `encabezadoVista`, **extraídos de `admin.ts`** para compartirlos (antes eran privados). |
++| `tests/premium-008.test.js` | Catálogo ↔ migraciones, traducción de `BM403` (incl. `detail` ausente / no-JSON), estilo PostgreSQL puro, ruta protegida. |
++| `CAMBIOS_BMA_PREMIUM_008.md`, `bma-premium-008.patch` | Este resumen y el parche. |
++
++## Archivos modificados
++
++| Archivo | Cambio |
++|---|---|
++| `modules/premium/catalogo.js` | Dos módulos nuevos; constantes `LIMITE_SEDES_BASE = 2` y `MODULO_MULTI_SEDE`. |
++| `services/sedes.service.js` | `crear()`: 409 por nombre repetido **antes** que el límite; `exigirCupoDeSede()` con `guard.evaluar(…, { fresco: true })` y 403 con precio. El trigger queda como garantía final. |
++| `middlewares/errorHandler.js` | `BM403` → `403 MODULO_PREMIUM_DESHABILITADO` con `detalles` (JSON del trigger leído con `try/catch`). |
++| `routes/index.js` | `generar-mensualidades` ahora pasa por `guard.requireModulo('FACTURACION_MASIVA')`. |
++| `frontend/src/admin.ts` | Enruta `estudiante:<id>` y `premium:FACTURACION_MASIVA`; nombre del estudiante en el listado abre la ficha; usa `lib/candado.ts`; `bloquearModulo()` para el 403 a mitad de sesión. |
++| `frontend/src/types/index.ts`, `lib/icons.ts`, `styles/main.css` | Tipos de la ficha y de la facturación masiva; 2 códigos de módulo; iconos; clases `.msg` / `.okk` / `.inf` / `.err`. |
++| `tests/integracion.pg.test.js` | 7 módulos / 8 migraciones; 4 pruebas nuevas del trigger (incl. concurrencia y prueba vencida); la sede 3ª del test del cron habilita el módulo. |
++
++## Contratos
++
++- `POST /api/sedes` con 2 sedes existentes y módulo inactivo → `403 { codigo:'MODULO_PREMIUM_DESHABILITADO', detalles:{ modulo:'MULTI_SEDE_PREMIUM', nombre, precio_usd:50, limite_sedes_base:2 } }`. Igual por SQL directo (`SQLSTATE BM403`).
++- `POST /api/facturacion/cuotas/generar-mensualidades` sin módulo → `403 MODULO_PREMIUM_DESHABILITADO` (precio 20). Con módulo → `201 { creadas }`.
++- El retiro sigue siendo `POST /api/estudiantes/:id/retirar { motivo, fecha_retiro }`; la obligatoriedad del motivo la impone la interfaz (el servidor admite vacío).
++
++## Decisiones a tener presentes
++
++- **`N'…'` era MSSQL:** los códigos se insertan como literales PostgreSQL normales (`'MULTI_SEDE_PREMIUM'`).
++- **Se cuentan todas las sedes**, activas o no: la oferta base limita la existencia, no las abiertas.
++- **Vencer la prueba no borra sedes:** solo impide crear nuevas.
++- **Fecha de vencimiento en el formulario:** no se permite anterior a hoy (evita volver morosos a todos de golpe). Solo la UI lo impone.
++- **Generación masiva:** disponible para `admin` (consolidado = todas las sedes; admin de sede = la suya), igual que la ruta existente; no se añadió confirmación extra porque el servidor es idempotente por (estudiante, concepto).
++
++## Verificación realizada (y sus límites)
++
++| Verificación | Resultado |
++|---|---|
++| `tsc` 7.0.2 estricto (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noUnused*`) sobre `frontend/src/**` | 0 errores |
++| Uso de `any` / `@ts-*` en `frontend/src` | 0 |
++| `npm test` + integración contra **PostgreSQL 16 real** (trigger, concurrencia de 4 altas simultáneas → 2 caben, prueba vigente/vencida, INSERT multi-fila, `ON CONFLICT`, re-ejecución de 008) | 166/166 |
++| Chromium real con API simulada (ficha, retiro/reactivación, listeners no acumulados, candado US$ 20.00, prueba, `.msg.okk`, 403 a mitad de sesión, rol sin permiso) | 8/8 |
++
++**No se pudo comprobar:** `vite build` y Tailwind (sin acceso al registro de npm) → `public/` **no** contiene las vistas nuevas hasta ejecutar `npm run frontend:install && npm run frontend:build`; el aspecto visual (contraste, responsive) no se midió; la migración **no** se aplicó a la base de Supabase real (`npm run migrate`).
+diff --git a/database/migrations/008_nuevos_premium.sql b/database/migrations/008_nuevos_premium.sql
+new file mode 100644
+index 0000000..cbd55d2
+--- /dev/null
++++ b/database/migrations/008_nuevos_premium.sql
+@@ -0,0 +1,85 @@
++-- 008_nuevos_premium.sql — Módulos premium MULTI_SEDE_PREMIUM y FACTURACION_MASIVA + límite de sedes del Core Base.
++-- PostgreSQL 15+ · Supabase. Idempotente: se puede re-ejecutar sin efectos (scripts/migrate.js la corre dentro de una transacción).
++--
++-- 1) Catálogo: dos módulos de pago único. ON CONFLICT DO NOTHING: re-ejecutar jamás pisa un estado "habilitado", una prueba
++--    en curso ni un precio negociado (misma política que 003).
++-- 2) Regla comercial del Core Base: la oferta base incluye hasta DOS (2) sedes (Acarigua y Barquisimeto). La tercera sede solo
++--    se puede crear si MULTI_SEDE_PREMIUM está habilitado de forma permanente o con una prueba de 15 días vigente
++--    (habilitado = TRUE y expira_prueba_en NULL o futura: misma semántica que modules/premium/guard.js → estadoEfectivo).
++--    El trigger es la garantía definitiva (aplica a cualquier camino: API, scripts, SQL manual); services/sedes.service.js
++--    hace la misma comprobación antes para responder con detalle.
++--
++-- Contrato de error del trigger (lo traduce middlewares/errorHandler.js a HTTP 403 MODULO_PREMIUM_DESHABILITADO):
++--   SQLSTATE  = 'BM403'                         (clase propia de la aplicación; no choca con códigos de PostgreSQL)
++--   MESSAGE   = 'MODULO_PREMIUM_DESHABILITADO'
++--   DETAIL    = JSON {"modulo","nombre","precio_usd","limite_sedes_base"}
++--   HINT      = texto para el operador
++-- Reversión: DROP TRIGGER trg_sedes_limite_base ON sedes; DROP FUNCTION fn_limitar_sedes_base();
++
++-- ───────────────────────── 1) Módulos premium de la Fase 2 ─────────────────────────
++INSERT INTO modulos_premium (codigo, nombre, descripcion, precio_usd) VALUES
++  ('MULTI_SEDE_PREMIUM', 'Expansión Multi-Sede Avanzada (3+ Sedes)',
++   'Habilita la creación de una tercera sede y siguientes. El Core Base incluye dos sedes (Acarigua y Barquisimeto).',     50.00),
++  ('FACTURACION_MASIVA', 'Módulo de Facturación Masiva Automatizada',
++   'Genera de un solo paso la mensualidad de todos los estudiantes activos (concepto, monto y vencimiento).',              20.00)
++ON CONFLICT (codigo) DO NOTHING;
++
++-- ───────────────────────── 2) Límite de sedes del Core Base ─────────────────────────
++CREATE OR REPLACE FUNCTION fn_limitar_sedes_base() RETURNS trigger
++LANGUAGE plpgsql
++SET search_path = public, pg_temp   -- Supabase advisor: función sin search_path fijo es vulnerable a secuestro de esquema
++AS $$
++DECLARE
++  c_limite_base CONSTANT INTEGER := 2;
++  c_modulo      CONSTANT TEXT    := 'MULTI_SEDE_PREMIUM';
++  v_total       INTEGER;
++  v_nombre      TEXT;
++  v_precio      NUMERIC(10,2);
++BEGIN
++  -- Serializa las altas de sedes: dos inserciones simultáneas no pueden ver "1 sede" a la vez y colarse como la 2ª y la 3ª.
++  -- El candado de transacción se libera solo al terminar (seguro detrás del pooler de Supabase en modo transacción).
++  -- (726150001 lo usa scripts/migrate.js; este es otro número a propósito.)
++  PERFORM pg_advisory_xact_lock(726150008);
++
++  -- Un nombre repetido no crea una sede nueva: lo resuelve la restricción UNIQUE (23505 / ON CONFLICT DO NOTHING → 409 SEDE_DUPLICADA)
++  -- y no debe disfrazarse de "módulo deshabilitado".
++  IF EXISTS (SELECT 1 FROM sedes AS s WHERE s.nombre = NEW.nombre) THEN
++    RETURN NEW;
++  END IF;
++
++  -- Cuenta TODAS las sedes (activas e inactivas): la oferta base limita la existencia de sedes, no solo las abiertas.
++  -- Función VOLATILE: en un INSERT multi-fila cada fila ya ve las anteriores de la misma sentencia.
++  SELECT COUNT(*)::INTEGER INTO v_total FROM sedes;
++  IF v_total < c_limite_base THEN
++    RETURN NEW;
++  END IF;
++
++  -- Tercera sede o posterior: exige el módulo habilitado (contratado, o prueba vigente según el reloj de la base).
++  IF EXISTS (
++    SELECT 1 FROM modulos_premium AS m
++     WHERE m.codigo = c_modulo
++       AND m.habilitado = TRUE
++       AND (m.expira_prueba_en IS NULL OR m.expira_prueba_en > NOW())
++  ) THEN
++    RETURN NEW;
++  END IF;
++
++  SELECT m.nombre, m.precio_usd INTO v_nombre, v_precio FROM modulos_premium AS m WHERE m.codigo = c_modulo;
++
++  RAISE EXCEPTION 'MODULO_PREMIUM_DESHABILITADO'
++    USING ERRCODE = 'BM403',
++          DETAIL  = json_build_object(
++                      'modulo', c_modulo,
++                      'nombre', COALESCE(v_nombre, c_modulo),
++                      'precio_usd', COALESCE(v_precio, 50.00),
++                      'limite_sedes_base', c_limite_base)::TEXT,
++          HINT    = 'El Core Base admite 2 sedes. Activa MULTI_SEDE_PREMIUM (o su prueba de 15 días) para crear la tercera.';
++END
++$$;
++
++-- Solo la ejecuta el motor como trigger: se cierra a PUBLIC (anon/authenticated no deben poder invocarla por la API REST).
++REVOKE ALL ON FUNCTION fn_limitar_sedes_base() FROM PUBLIC;
++
++DROP TRIGGER IF EXISTS trg_sedes_limite_base ON sedes;
++CREATE TRIGGER trg_sedes_limite_base BEFORE INSERT ON sedes
++  FOR EACH ROW EXECUTE FUNCTION fn_limitar_sedes_base();
+diff --git a/frontend/src/admin.ts b/frontend/src/admin.ts
+index 39236d3..4f7377d 100644
+--- a/frontend/src/admin.ts
++++ b/frontend/src/admin.ts
+@@ -12,6 +12,9 @@ import { html, montar, raw, urlSegura, type HtmlSeguro } from './lib/html';
+ import { icono, type NombreIcono } from './lib/icons';
+ import { bs, diasDelPeriodo, fechaCorta, fechaHora, horaConSegundos, nombreMetodo, periodoActual, tasa as formatoTasa, usd } from './lib/format';
+ import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiquetaEstado, notificar, obtener, todos } from './lib/ui';
++import { AVISO_PREMIUM, encabezadoVista as encabezado, enlazarPrueba, pantallaBloqueada, seccionBloqueada } from './lib/candado';
++import { vistaEstudianteDetalle } from './estudiantes-detalle';
++import { vistaFacturacionMasiva } from './facturacion-masiva';
+ import { vistaConfiguracion } from './configuracion';
+ import { montarAnimacionLogin } from './login-animation';
+ import type {
+@@ -38,7 +41,7 @@ import type {
+ 
+ // ───────────────────────── Constantes ─────────────────────────
+ 
+-export const AVISO_PREMIUM = 'Módulo Premium Deshabilitado';
++export { AVISO_PREMIUM };
+ const CLAVE_SIDEBAR = 'bma.sidebar.colapsado';
+ const REFRESCO_TABLERO_MS = 30_000;
+ const LIMITE_PAGINA = 25;
+@@ -65,6 +68,8 @@ const ICONO_MODULO: Readonly<Record<CodigoModuloPremium, NombreIcono>> = {
+   BANCAMIGA: 'wallet',
+   APP_MOVIL: 'phone',
+   FACHADA_WEB: 'globe',
++  MULTI_SEDE_PREMIUM: 'school',
++  FACTURACION_MASIVA: 'receipt',
+ };
+ 
+ const FILTROS_ESTUDIANTES: readonly FiltroEstudiantes[] = ['', 'Activo', 'Moroso', 'Fuera de la Academia', 'Pendiente por Validación Administrativa'];
+@@ -273,8 +278,9 @@ function alternarSidebar(): void {
+ }
+ 
+ function marcarNavegacion(id: string): void {
++  const activo = id.startsWith('estudiante:') ? 'estudiantes' : id; // la ficha de un estudiante cuelga de «Estudiantes»
+   for (const b of todos('[data-nav]', HTMLElement)) {
+-    if (b.dataset['nav'] === id) b.setAttribute('aria-current', 'page');
++    if (b.dataset['nav'] === activo) b.setAttribute('aria-current', 'page');
+     else b.removeAttribute('aria-current');
+   }
+ }
+@@ -339,6 +345,7 @@ async function navegar(id: string): Promise<void> {
+   montar(zona, html`<div class="h-32 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando"></div>`);
+   try {
+     if (id.startsWith('premium:')) vistaPremium(ctx, id.slice('premium:'.length));
++    else if (id.startsWith('estudiante:')) await vistaDetalle(ctx, id.slice('estudiante:'.length));
+     else if (id === 'estudiantes') await vistaEstudiantes(ctx);
+     else if (id === 'auditoria') await vistaAuditoria(ctx);
+     else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
+@@ -370,13 +377,6 @@ function manejarError(e: unknown, ctx: Contexto): void {
+   buscar('[data-reintentar]', HTMLButtonElement, ctx.zona)?.addEventListener('click', () => void navegar(estado.vista));
+ }
+ 
+-function encabezado(titulo: string, subtitulo: string, acciones: HtmlSeguro | null = null): HtmlSeguro {
+-  return html`<header class="mb-6 flex flex-wrap items-end justify-between gap-4">
+-    <div><h1 class="${CLS.titulo}">${titulo}</h1><p class="${CLS.subtitulo}">${subtitulo}</p></div>
+-    ${acciones}
+-  </header>`;
+-}
+-
+ function paginacionHtml(p: Paginacion): HtmlSeguro {
+   const paginas = Math.max(1, Math.ceil(p.total / Math.max(1, p.limite)));
+   return html`<nav class="mt-4 flex flex-wrap items-center justify-between gap-4 text-sm" aria-label="Paginación">
+@@ -523,7 +523,7 @@ async function vistaDashboard(ctx: Contexto): Promise<void> {
+ 
+ function filaEstudiante(s: EstudianteListado): HtmlSeguro {
+   return html`<tr>
+-    <td class="${CLS.td}"><span class="font-medium text-slate-900">${s.apellidos}, ${s.nombres}</span></td>
++    <td class="${CLS.td}"><button type="button" data-detalle="${s.id}" class="rounded-md text-left font-medium text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-slate-900" aria-label="Ver ficha de ${s.apellidos}, ${s.nombres}">${s.apellidos}, ${s.nombres}</button></td>
+     <td class="${CLS.td}">${s.grado_solicitado}</td>
+     <td class="${CLS.td}">${s.representante}</td>
+     <td class="${CLS.td}">${etiquetaEstado(s.estado_dinamico)}</td>
+@@ -565,6 +565,12 @@ async function vistaEstudiantes(ctx: Contexto): Promise<void> {
+     actualizar({ paginaEstudiantes: Math.max(1, estado.paginaEstudiantes + delta) });
+     void navegar('estudiantes');
+   });
++  for (const b of todos('[data-detalle]', HTMLButtonElement, ctx.zona)) {
++    b.addEventListener('click', () => {
++      const id = Number(b.dataset['detalle']);
++      if (Number.isInteger(id) && id > 0) void navegar(`estudiante:${id}`);
++    });
++  }
+   for (const b of todos('[data-alerta]', HTMLButtonElement, ctx.zona)) {
+     b.addEventListener('click', () => {
+       const tipo: TipoAlertaWhatsapp = b.dataset['alerta'] === 'morosidad' ? 'morosidad' : 'preventiva';
+@@ -600,6 +606,22 @@ async function abrirAlerta(tipo: TipoAlertaWhatsapp, estudianteId: number, dispa
+   }
+ }
+ 
++/** Ficha del estudiante (Core Base, sin candado): `estudiante:<id>` en el estado de navegación. */
++async function vistaDetalle(ctx: Contexto, idTexto: string): Promise<void> {
++  const id = Number(idTexto);
++  if (!Number.isInteger(id) || id <= 0) {
++    montar(ctx.zona, html`<div class="mx-auto max-w-2xl pt-8">${aviso('bad', 'El identificador del estudiante no es válido.')}</div>`);
++    return;
++  }
++  await vistaEstudianteDetalle({
++    zona: ctx.zona,
++    vigente: ctx.vigente,
++    estudianteId: id,
++    alVolver: () => void navegar('estudiantes'),
++    alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
++  });
++}
++
+ // ───────────────────────── Auditoría de referencias ─────────────────────────
+ 
+ function filaAuditoria(p: ReferenciaAuditoria): HtmlSeguro {
+@@ -788,58 +810,31 @@ async function vistaContabilidad(ctx: Contexto): Promise<void> {
+ 
+ // ───────────────────────── Módulos Premium + Candado ─────────────────────────
+ 
+-interface DatosCandado {
+-  readonly nombre: string;
+-  readonly descripcion: string;
+-  readonly precio_usd: number;
+-}
+-
+-function vistaFantasma(): HtmlSeguro {
+-  const fila = html`<div class="flex items-center gap-4 border-b border-slate-100 py-4"><div class="h-8 w-8 rounded-full bg-slate-200"></div><div class="h-4 flex-1 rounded bg-slate-200"></div><div class="h-4 w-24 rounded bg-slate-200"></div></div>`;
+-  return html`<div aria-hidden="true" class="pointer-events-none select-none p-6">
+-    <div class="mb-4 h-6 w-1/3 rounded bg-slate-300"></div>${fila}${fila}${fila}${fila}${fila}
+-  </div>`;
+-}
+-
+-/** Capa absoluta de cristal (`backdrop-blur-md bg-white/80`) sobre la sección bloqueada. */
+-function capaCandado(d: DatosCandado): HtmlSeguro {
+-  return html`<div data-candado class="absolute inset-0 z-10 flex items-center justify-center bg-white/80 p-6 backdrop-blur-md">
+-    <div role="region" aria-label="${AVISO_PREMIUM}" class="${CLS.tarjetaCristal} w-full max-w-md p-8 text-center">
+-      <span class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 text-white">${icono('lock', 'h-6 w-6')}</span>
+-      <h2 class="mt-4 text-lg font-bold text-slate-900">${AVISO_PREMIUM}</h2>
+-      <p class="mt-1 text-sm font-semibold text-slate-800">${d.nombre}</p>
+-      <p class="mt-2 text-sm text-slate-700">${d.descripcion}</p>
+-      <p class="mt-4 text-2xl font-bold text-slate-900">${usd(d.precio_usd)}</p>
+-      <p class="mt-1 text-xs text-slate-600">Pago único · solicítalo a Astra Digital Solutions</p>
+-    </div>
+-  </div>`;
+-}
+-
+-function seccionBloqueada(d: DatosCandado): HtmlSeguro {
+-  return html`${encabezado(d.nombre, d.descripcion)}
+-    <div class="${CLS.tarjeta} relative min-h-96 overflow-hidden">${vistaFantasma()}${capaCandado(d)}</div>`;
+-}
+-
+ function vistaPremium(ctx: Contexto, codigo: string): void {
+   const m = estado.modulos.find((x) => x.codigo === codigo);
+   if (!m) {
+     montar(ctx.zona, aviso('bad', 'Módulo no encontrado.'));
+     return;
+   }
++  // Módulos con vista propia: gestionan su propio candado (pantalla de cristal + prueba gratuita) con lib/candado.ts.
++  if (m.codigo === 'FACTURACION_MASIVA') {
++    vistaFacturacionMasiva({
++      zona: ctx.zona,
++      vigente: ctx.vigente,
++      modulo: m,
++      puedeGenerar: esAdmin(),
++      puedeProbar: m.prueba_utilizada === false && esConsolidado(),
++      alcance: estado.usuario?.sede_id ?? null,
++      alActivarPrueba: () => activarPrueba(m),
++      alBloquear: (d) => void bloquearModulo(ctx, d),
++      alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
++    });
++    return;
++  }
+   if (m.bloqueado) {
+     // Prueba gratuita de 15 días: solo el acceso consolidado (admin sin sede) puede abrirla, una vez por módulo.
+-    const ofrecerPrueba = m.prueba_utilizada === false && esConsolidado();
+-    montar(
+-      ctx.zona,
+-      html`${seccionBloqueada(m)}${ofrecerPrueba
+-        ? html`<div class="mt-6">${aviso('info', html`<p>Prueba este módulo sin costo durante 15 días. Al vencer se bloquea solo.</p>
+-            <button type="button" id="activar-prueba" class="${boton(CLS.btnPrimario, 'mt-3')}">${icono('check', 'h-4 w-4')}<span>Activar prueba gratuita de 15 días</span></button>`, 'Prueba gratuita disponible')}</div>`
+-        : null}`,
+-    );
+-    const activar = buscar('#activar-prueba', HTMLButtonElement);
+-    activar?.addEventListener('click', () => {
+-      void conBotonOcupado(activar, () => activarPrueba(m)).catch((e: unknown) => notificar('bad', mensajeDeError(e)));
+-    });
++    montar(ctx.zona, pantallaBloqueada(m, m.prueba_utilizada === false && esConsolidado()));
++    enlazarPrueba(ctx.zona, () => activarPrueba(m));
+     return;
+   }
+   const hasta = m.en_prueba === true && m.expira_prueba_en ? m.expira_prueba_en : null;
+@@ -848,7 +843,9 @@ function vistaPremium(ctx: Contexto, codigo: string): void {
+     html`${encabezado(m.nombre, m.descripcion)}
+     <div class="${CLS.tarjeta} flex flex-col gap-4 p-6">
+       ${hasta ? aviso('warn', `Prueba gratuita vigente hasta el ${fechaHora(hasta)}. Después de esa fecha el módulo se bloquea automáticamente.`, 'Estás en periodo de prueba') : null}
+-      ${aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}
++      ${m.codigo === 'MULTI_SEDE_PREMIUM'
++        ? aviso('info', 'El Core Base incluye dos sedes (Acarigua y Barquisimeto). Con este módulo el servidor admite la tercera sede y las siguientes (alta en POST /api/sedes, acceso consolidado).', 'Expansión multi-sede habilitada')
++        : aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}
+     </div>`,
+   );
+ }
+@@ -876,6 +873,26 @@ async function activarPrueba(m: ModuloPremium): Promise<void> {
+   await navegar(`premium:${m.codigo}`);
+ }
+ 
++/**
++ * El servidor respondió 403 MODULO_PREMIUM_DESHABILITADO en mitad de una sesión (p. ej. venció la prueba): se relee el catálogo para
++ * poner el candado en el menú y se muestra la pantalla de cristal (con la oferta de prueba si todavía aplica).
++ */
++async function bloquearModulo(ctx: Contexto, d: DetalleModuloPremium): Promise<void> {
++  try {
++    const modulos = await bma.get<readonly ModuloPremium[]>('/premium/modulos');
++    actualizar({ modulos });
++    for (const x of modulos) refrescarItemPremium(x);
++  } catch (e: unknown) {
++    if (e instanceof BmaSesionExpiradaError) {
++      cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.');
++      return;
++    }
++    if (ctx.vigente()) pintarCandadoDesdeServidor(ctx.zona, d); // sin catálogo: al menos el candado correcto en pantalla
++    return;
++  }
++  if (ctx.vigente()) await navegar(`premium:${d.modulo}`);
++}
++
+ /** Si el servidor responde 403 MODULO_PREMIUM_DESHABILITADO para cualquier sección, se muestra el mismo candado. */
+ function pintarCandadoDesdeServidor(zona: HTMLElement, d: DetalleModuloPremium): void {
+   const m = estado.modulos.find((x) => x.codigo === d.modulo);
+diff --git a/frontend/src/estudiantes-detalle.ts b/frontend/src/estudiantes-detalle.ts
+new file mode 100644
+index 0000000..8270882
+--- /dev/null
++++ b/frontend/src/estudiantes-detalle.ts
+@@ -0,0 +1,425 @@
++/**
++ * Vista «Ficha del estudiante» — PARTE INTEGRAL DEL CORE BASE (US$ 750): sin candados premium.
++ *  - Consume el endpoint existente  GET  /api/estudiantes/:id   (estudiante + estado dinámico + representante + cuotas + documentos + pagos).
++ *  - Secciones: datos académicos, ficha médica, expediente digitalizado en Google Drive, representante.
++ *  - Dos tablas simétricas (mismas 5 columnas, mismo estilo): histórico de cuotas y bandeja de pagos declarados por el representante.
++ *  - «Retirar Estudiante»  → modal con motivo OBLIGATORIO (1–300 caracteres) y fecha de retiro → POST /api/estudiantes/:id/retirar
++ *    «Reactivar Estudiante» → confirmación → POST /api/estudiantes/:id/reactivar
++ *    Tras cada acción se vuelve a leer la ficha y se repinta en el mismo sitio (estado, tablas y botones cambian sin recargar la página).
++ *
++ * Todo texto dinámico pasa por la etiqueta `html` (escape XSS automático); los enlaces de Drive solo se aceptan si son https de Google.
++ */
++import { bma, BmaSesionExpiradaError, mensajeDeError } from './api/bmaClient';
++import { HtmlSeguro, html, montar, urlSegura } from './lib/html';
++import { icono } from './lib/icons';
++import { bs, esVencida, fechaCorta, fechaHora, hoyCaracas, nombreMetodo, usd } from './lib/format';
++import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiqueta, etiquetaEstado, notificar, obtener, type Modal } from './lib/ui';
++import type {
++  CuerpoRetiro,
++  CuotaEstudiante,
++  DetalleEstudiante,
++  DocumentoEstudiante,
++  PagoEstudiante,
++  RespuestaCambioEstatus,
++  TipoDocumentoEstudiante,
++} from './types/index';
++
++// ───────────────────────── Contexto y constantes ─────────────────────────
++
++export interface ContextoDetalleEstudiante {
++  readonly zona: HTMLElement;
++  /** `false` cuando el usuario ya navegó a otra sección: ninguna respuesta tardía debe pintar encima. */
++  readonly vigente: () => boolean;
++  readonly estudianteId: number;
++  readonly alVolver: () => void;
++  readonly alSesionExpirada: () => void;
++}
++
++const MAX_MOTIVO = 300;
++const PREFIJOS_DRIVE: readonly string[] = ['https://drive.google.com/', 'https://docs.google.com/'];
++const SIN_DATO = 'Sin registrar';
++
++const NOMBRE_DOCUMENTO: Readonly<Record<TipoDocumentoEstudiante, string>> = {
++  FOTO_CARNET: 'Foto carnet',
++  CEDULA_IDENTIDAD: 'Cédula de identidad',
++  ACTA_NACIMIENTO: 'Acta de nacimiento',
++};
++
++const NOMBRE_TIPO_CUOTA: Readonly<Record<CuotaEstudiante['tipo'], string>> = {
++  MATRICULA: 'Matrícula',
++  MENSUALIDAD: 'Mensualidad',
++  OTRO: 'Otro',
++};
++
++// ───────────────────────── Utilidades puras ─────────────────────────
++
++/** Años cumplidos a la fecha `hoy` (ambas 'AAAA-MM-DD'); `null` si alguna no tiene el formato esperado. */
++export function edadEnAnios(nacimiento: string, hoy: string): number | null {
++  const n = /^(\d{4})-(\d{2})-(\d{2})$/.exec(nacimiento);
++  const h = /^(\d{4})-(\d{2})-(\d{2})$/.exec(hoy);
++  if (!n || !h) return null;
++  const [, ny, nm, nd] = n.map(Number);
++  const [, hy, hm, hd] = h.map(Number);
++  if (ny === undefined || nm === undefined || nd === undefined || hy === undefined || hm === undefined || hd === undefined) return null;
++  const edad = hy - ny - (hm < nm || (hm === nm && hd < nd) ? 1 : 0);
++  return edad >= 0 ? edad : null;
++}
++
++export function tamanoLegible(bytes: number): string {
++  if (bytes < 1024) return `${bytes} B`;
++  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
++  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
++}
++
++/** Devuelve la URL solo si es un enlace https de Google (evita `javascript:` y destinos ajenos en el href). */
++export function enlaceDrive(url: string | null): string | null {
++  if (url === null || url === '') return null;
++  const segura = urlSegura(url, PREFIJOS_DRIVE);
++  return segura === '#' ? null : segura;
++}
++
++const valorOSinDato = (v: string | null): string => (v !== null && v.trim() !== '' ? v : SIN_DATO);
++
++// ───────────────────────── Bloques de la ficha ─────────────────────────
++
++function dato(titulo: string, valor: string | null | HtmlSeguro): HtmlSeguro {
++  const contenido = valor instanceof HtmlSeguro ? valor : valorOSinDato(valor);
++  const vacio = valor === null || (typeof valor === 'string' && valor.trim() === '');
++  return html`<div class="min-w-0"><dt class="text-xs font-semibold uppercase tracking-wide text-slate-600">${titulo}</dt>
++    <dd class="mt-1 break-words text-sm ${vacio ? 'text-slate-600' : 'font-medium text-slate-900'}">${contenido}</dd></div>`;
++}
++
++function tituloSeccion(id: string, texto: string, ic: Parameters<typeof icono>[0]): HtmlSeguro {
++  return html`<h2 id="${id}" class="mb-4 flex items-center gap-2 text-base font-bold text-slate-900">
++    <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-700">${icono(ic, 'h-4 w-4')}</span>${texto}</h2>`;
++}
++
++function seccionAcademica(d: DetalleEstudiante): HtmlSeguro {
++  const edad = edadEnAnios(d.fecha_nacimiento, hoyCaracas());
++  return html`<section class="${CLS.tarjeta} p-6 lg:col-span-2" aria-labelledby="t-academico">
++    ${tituloSeccion('t-academico', 'Información académica', 'school')}
++    <dl class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
++      ${dato('Grado', d.grado_solicitado)}
++      ${dato('Cédula de identidad', d.cedula_identidad)}
++      ${dato('Fecha de nacimiento', `${fechaCorta(d.fecha_nacimiento)}${edad !== null ? ` · ${edad} años` : ''}`)}
++      ${dato('Colegio de procedencia', d.colegio_procedencia)}
++      ${dato('Último grado aprobado', d.ultimo_grado_aprobado)}
++      ${dato('Inscrito', fechaHora(d.creado_en))}
++    </dl>
++  </section>`;
++}
++
++function seccionMedica(d: DetalleEstudiante): HtmlSeguro {
++  const alerta = (v: string | null): HtmlSeguro | string | null => (v !== null && v.trim() !== '' ? html`${etiqueta('Atención', 'warn')} <span class="ml-1">${v}</span>` : null);
++  return html`<section class="${CLS.tarjeta} p-6 lg:col-span-2" aria-labelledby="t-medico">
++    ${tituloSeccion('t-medico', 'Datos médicos', 'heart')}
++    <dl class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
++      ${dato('Tipo de sangre', d.tipo_sangre)}
++      ${dato('Alergias', alerta(d.alergias) ?? SIN_DATO)}
++      ${dato('Condiciones médicas', alerta(d.condiciones_medicas) ?? SIN_DATO)}
++      ${dato('Medicamentos', d.medicamentos)}
++      ${dato('Contacto de emergencia', d.emergencia_nombre)}
++      ${dato('Teléfono de emergencia', d.emergencia_telefono)}
++    </dl>
++  </section>`;
++}
++
++function filaDocumento(doc: DocumentoEstudiante): HtmlSeguro {
++  const enlace = enlaceDrive(doc.drive_url);
++  return html`<li class="flex items-center justify-between gap-3 border-b border-slate-100 py-2 last:border-0">
++    <span class="min-w-0"><span class="block truncate text-sm font-medium text-slate-900">${NOMBRE_DOCUMENTO[doc.tipo]}</span>
++      <span class="block truncate text-xs text-slate-600">${doc.nombre_archivo} · ${tamanoLegible(doc.tamano_bytes)}</span></span>
++    ${enlace !== null
++      ? html`<a href="${enlace}" target="_blank" rel="noopener noreferrer" class="${boton(CLS.btnSecundario, CLS.btnPeq)}" aria-label="Abrir ${NOMBRE_DOCUMENTO[doc.tipo]} en Google Drive">Abrir</a>`
++      : etiqueta('Sin enlace', 'neutral')}
++  </li>`;
++}
++
++function seccionDrive(d: DetalleEstudiante): HtmlSeguro {
++  const carpeta = enlaceDrive(d.drive_folder_url);
++  return html`<section class="${CLS.tarjeta} p-6" aria-labelledby="t-drive">
++    ${tituloSeccion('t-drive', 'Expediente en Google Drive', 'folder')}
++    ${carpeta !== null
++      ? html`<a href="${carpeta}" target="_blank" rel="noopener noreferrer" class="${boton(CLS.btnPrimario, 'w-full')}">${icono('folder', 'h-4 w-4')}<span>Abrir expediente digitalizado</span></a>`
++      : aviso('info', 'Este estudiante aún no tiene una carpeta de expediente en Google Drive.')}
++    ${d.drive_folder_id !== null ? html`<p class="${CLS.ayuda}">ID de carpeta: <span class="break-all font-mono">${d.drive_folder_id}</span></p>` : null}
++    ${d.documentos.length > 0
++      ? html`<ul class="mt-4" aria-label="Documentos digitalizados">${d.documentos.map(filaDocumento)}</ul>`
++      : html`<p class="mt-4 text-sm text-slate-600">Sin documentos digitalizados.</p>`}
++  </section>`;
++}
++
++function seccionRepresentante(d: DetalleEstudiante): HtmlSeguro {
++  return html`<section class="${CLS.tarjeta} p-6" aria-labelledby="t-representante">
++    ${tituloSeccion('t-representante', 'Representante', 'users')}
++    <dl class="grid gap-4">
++      ${dato('Nombre', `${d.rep_nombres} ${d.rep_apellidos}`)}
++      ${dato('Cédula', d.rep_cedula)}
++      ${dato('Correo', d.rep_email)}
++      ${dato('Teléfono', d.rep_telefono)}
++    </dl>
++  </section>`;
++}
++
++// ───────────────────────── Tablas simétricas (5 columnas cada una) ─────────────────────────
++
++function filaCuota(c: CuotaEstudiante): HtmlSeguro {
++  const abierta = c.estado === 'Pendiente' || c.estado === 'En Revisión';
++  return html`<tr>
++    <td class="${CLS.td}"><span class="font-medium text-slate-900">${c.concepto}</span></td>
++    <td class="${CLS.td}">${NOMBRE_TIPO_CUOTA[c.tipo]}</td>
++    <td class="${CLS.td} whitespace-nowrap">${fechaCorta(c.fecha_vencimiento)}${abierta && esVencida(c.fecha_vencimiento) ? html` ${etiqueta('Vencida', 'bad')}` : null}</td>
++    <td class="${CLS.td} whitespace-nowrap">${usd(c.monto_usd)}</td>
++    <td class="${CLS.td}">${etiquetaEstado(c.estado)}</td>
++  </tr>`;
++}
++
++function filaPago(p: PagoEstudiante, conceptoDe: ReadonlyMap<number, string>): HtmlSeguro {
++  const concepto = conceptoDe.get(p.cuota_id);
++  return html`<tr>
++    <td class="${CLS.td}"><span class="break-all font-medium text-slate-900">${p.referencia}</span>${concepto !== undefined ? html`<span class="block text-xs text-slate-600">${concepto}</span>` : null}</td>
++    <td class="${CLS.td}">${nombreMetodo(p.metodo_pago)}</td>
++    <td class="${CLS.td} whitespace-nowrap">${fechaHora(p.declarado_en)}</td>
++    <td class="${CLS.td} whitespace-nowrap">${usd(p.monto_usd)}<span class="block text-xs text-slate-600">${bs(p.monto_bs)}</span></td>
++    <td class="${CLS.td}">${etiquetaEstado(p.estado)}</td>
++  </tr>`;
++}
++
++function tablaCuotas(d: DetalleEstudiante): HtmlSeguro {
++  return html`<section class="${CLS.tarjeta} overflow-hidden" aria-labelledby="t-cuotas">
++    <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-6 py-4">
++      <h2 id="t-cuotas" class="text-base font-bold text-slate-900">Histórico de cuotas</h2>
++      <span class="text-xs text-slate-600">${d.cuotas.length} registro(s)</span>
++    </div>
++    <div class="overflow-x-auto">
++      <table class="${CLS.tabla}">
++        <caption class="sr-only">Histórico de cuotas del estudiante</caption>
++        <thead><tr><th scope="col" class="${CLS.th}">Concepto</th><th scope="col" class="${CLS.th}">Tipo</th><th scope="col" class="${CLS.th}">Vencimiento</th><th scope="col" class="${CLS.th}">Monto</th><th scope="col" class="${CLS.th}">Estado</th></tr></thead>
++        <tbody>${d.cuotas.length === 0 ? html`<tr><td colspan="5" class="${CLS.td}">Este estudiante no tiene cuotas.</td></tr>` : d.cuotas.map(filaCuota)}</tbody>
++      </table>
++    </div>
++  </section>`;
++}
++
++function tablaPagos(d: DetalleEstudiante): HtmlSeguro {
++  const conceptoDe = new Map<number, string>(d.cuotas.map((c) => [c.id, c.concepto]));
++  return html`<section class="${CLS.tarjeta} overflow-hidden" aria-labelledby="t-pagos">
++    <div class="flex items-center justify-between gap-3 border-b border-slate-200 px-6 py-4">
++      <h2 id="t-pagos" class="text-base font-bold text-slate-900">Pagos declarados por el representante</h2>
++      <span class="text-xs text-slate-600">${d.pagos.length} registro(s)</span>
++    </div>
++    <div class="overflow-x-auto">
++      <table class="${CLS.tabla}">
++        <caption class="sr-only">Pagos declarados por el representante</caption>
++        <thead><tr><th scope="col" class="${CLS.th}">Referencia</th><th scope="col" class="${CLS.th}">Método</th><th scope="col" class="${CLS.th}">Declarado</th><th scope="col" class="${CLS.th}">Monto</th><th scope="col" class="${CLS.th}">Estado</th></tr></thead>
++        <tbody>${d.pagos.length === 0 ? html`<tr><td colspan="5" class="${CLS.td}">El representante aún no ha declarado pagos.</td></tr>` : d.pagos.map((p) => filaPago(p, conceptoDe))}</tbody>
++      </table>
++    </div>
++  </section>`;
++}
++
++// ───────────────────────── Cabecera y acciones ─────────────────────────
++
++function cabecera(d: DetalleEstudiante): HtmlSeguro {
++  const retirado = d.estatus_academico === 'Fuera de la Academia';
++  return html`<header class="mb-6 flex flex-wrap items-start justify-between gap-4">
++    <div class="min-w-0">
++      <button type="button" data-accion="volver" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'mb-3')}">${icono('back', 'h-4 w-4')}<span>Volver al listado</span></button>
++      <h1 id="ficha-titulo" tabindex="-1" class="${CLS.titulo} break-words">${d.apellidos}, ${d.nombres}</h1>
++      <p class="${CLS.subtitulo} flex flex-wrap items-center gap-2">${etiquetaEstado(d.estado_dinamico)}<span>${d.grado_solicitado}</span>
++        ${d.deuda_vencida_usd > 0 ? html`<span class="font-semibold text-red-800">Deuda vencida: ${usd(d.deuda_vencida_usd)}</span>` : null}</p>
++    </div>
++    <div class="flex flex-wrap gap-2" role="group" aria-label="Acciones sobre el estudiante">
++      ${retirado
++        ? html`<button type="button" data-accion="reactivar" class="${boton(CLS.btnOk)}">${icono('refresh', 'h-4 w-4')}<span>Reactivar Estudiante</span></button>`
++        : html`<button type="button" data-accion="retirar" class="${boton(CLS.btnPeligro)}">${icono('logout', 'h-4 w-4')}<span>Retirar Estudiante</span></button>`}
++    </div>
++  </header>
++  ${retirado
++    ? html`<div class="mb-6">${aviso('warn', html`<p>Retirado el <strong>${d.fecha_retiro !== null ? fechaCorta(d.fecha_retiro) : 'fecha no registrada'}</strong>.</p>
++        <p class="mt-1">Motivo: ${valorOSinDato(d.motivo_retiro)}</p>
++        <p class="mt-1">Sus cuotas pendientes fueron anuladas al retirarlo; reactivarlo no las restaura.</p>`, 'Fuera de la Academia')}</div>`
++    : null}`;
++}
++
++function fichaHtml(d: DetalleEstudiante): HtmlSeguro {
++  return html`<div id="ficha-raiz">
++    ${cabecera(d)}
++    <div class="grid gap-6 lg:grid-cols-3">
++      ${seccionAcademica(d)}
++      ${seccionRepresentante(d)}
++      ${seccionMedica(d)}
++      ${seccionDrive(d)}
++    </div>
++    <div class="mt-6 grid gap-6 xl:grid-cols-2">
++      ${tablaCuotas(d)}
++      ${tablaPagos(d)}
++    </div>
++  </div>`;
++}
++
++// ───────────────────────── Modales de retiro / reactivación ─────────────────────────
++
++/** Motivo obligatorio (texto no vacío tras recortar, máx. 300) y fecha 'AAAA-MM-DD' no futura. Devuelve el mensaje de cada campo inválido. */
++export function validarRetiro(motivo: string, fecha: string, hoy: string): { readonly motivo?: string; readonly fecha?: string } {
++  const errores: { motivo?: string; fecha?: string } = {};
++  const m = motivo.trim();
++  if (m === '') errores.motivo = 'Debes escribir el motivo del retiro para continuar.';
++  else if (m.length > MAX_MOTIVO) errores.motivo = `El motivo admite hasta ${MAX_MOTIVO} caracteres.`;
++  if (!/^\d{4}-\d{2}-\d{2}$/.test(fecha)) errores.fecha = 'Elige la fecha del retiro.';
++  else if (fecha > hoy) errores.fecha = 'La fecha de retiro no puede ser futura.';
++  return errores;
++}
++
++function ponerError(campo: HTMLElement, salida: HTMLElement, mensaje: string | undefined): void {
++  if (mensaje === undefined) {
++    salida.hidden = true;
++    campo.removeAttribute('aria-invalid');
++    return;
++  }
++  salida.textContent = mensaje;
++  salida.hidden = false;
++  campo.setAttribute('aria-invalid', 'true');
++}
++
++function abrirModalRetiro(d: DetalleEstudiante, alRetirar: (m: Modal, cuerpo: CuerpoRetiro, enviar: HTMLButtonElement) => void): void {
++  const hoy = hoyCaracas();
++  const m = abrirModal({
++    titulo: 'Retirar estudiante',
++    cuerpo: html`<form id="form-retiro" novalidate class="flex flex-col gap-4">
++      <p class="text-sm text-slate-700"><strong>${d.apellidos}, ${d.nombres}</strong> pasará a «Fuera de la Academia» y sus cuotas pendientes se anularán.</p>
++      <div>
++        <label for="retiro-motivo" class="${CLS.etiqueta}">Motivo del retiro <span class="text-red-800" aria-hidden="true">*</span></label>
++        <textarea id="retiro-motivo" name="motivo" rows="4" maxlength="${MAX_MOTIVO}" required aria-describedby="retiro-ayuda retiro-motivo-error" class="${CLS.input}"></textarea>
++        <p id="retiro-ayuda" class="${CLS.ayuda}">Obligatorio. Queda en el historial del estudiante. <span id="retiro-contador">0/${MAX_MOTIVO}</span></p>
++        <p id="retiro-motivo-error" class="${CLS.errorCampo}" role="alert" hidden></p>
++      </div>
++      <div>
++        <label for="retiro-fecha" class="${CLS.etiqueta}">Fecha del retiro <span class="text-red-800" aria-hidden="true">*</span></label>
++        <input id="retiro-fecha" name="fecha_retiro" type="date" required value="${hoy}" max="${hoy}" aria-describedby="retiro-fecha-error" class="${CLS.input} sm:max-w-xs">
++        <p id="retiro-fecha-error" class="${CLS.errorCampo}" role="alert" hidden></p>
++      </div>
++      <div id="retiro-aviso"></div>
++      <div class="flex justify-end gap-2">
++        <button type="button" data-cancelar class="${boton(CLS.btnSecundario)}">Cancelar</button>
++        <button type="submit" class="${boton(CLS.btnPeligro)}">${icono('logout', 'h-4 w-4')}<span>Retirar estudiante</span></button>
++      </div>
++    </form>`,
++  });
++  const form = obtener('#form-retiro', HTMLFormElement, m.dialogo);
++  const motivo = obtener('#retiro-motivo', HTMLTextAreaElement, m.dialogo);
++  const fecha = obtener('#retiro-fecha', HTMLInputElement, m.dialogo);
++  const errorMotivo = obtener('#retiro-motivo-error', HTMLElement, m.dialogo);
++  const errorFecha = obtener('#retiro-fecha-error', HTMLElement, m.dialogo);
++  const contador = obtener('#retiro-contador', HTMLElement, m.dialogo);
++  motivo.addEventListener('input', () => {
++    contador.textContent = `${motivo.value.length}/${MAX_MOTIVO}`;
++    if (motivo.value.trim() !== '') ponerError(motivo, errorMotivo, undefined);
++  });
++  fecha.addEventListener('input', () => ponerError(fecha, errorFecha, validarRetiro(motivo.value, fecha.value, hoy).fecha));
++  obtener('[data-cancelar]', HTMLButtonElement, m.dialogo).addEventListener('click', m.cerrar);
++  form.addEventListener('submit', (ev) => {
++    ev.preventDefault();
++    const errores = validarRetiro(motivo.value, fecha.value, hoy);
++    ponerError(motivo, errorMotivo, errores.motivo);
++    ponerError(fecha, errorFecha, errores.fecha);
++    if (errores.motivo !== undefined) motivo.focus();
++    else if (errores.fecha !== undefined) fecha.focus();
++    if (errores.motivo !== undefined || errores.fecha !== undefined) return;
++    alRetirar(m, { motivo: motivo.value.trim(), fecha_retiro: fecha.value }, obtener('button[type="submit"]', HTMLButtonElement, form));
++  });
++  motivo.focus();
++}
++
++function abrirModalReactivar(d: DetalleEstudiante, alConfirmar: (m: Modal, confirmar: HTMLButtonElement) => void): void {
++  const m = abrirModal({
++    titulo: 'Reactivar estudiante',
++    cuerpo: html`<div class="flex flex-col gap-4">
++      <p class="text-sm text-slate-700"><strong>${d.apellidos}, ${d.nombres}</strong> volverá a «Activo». Las cuotas que se anularon al retirarlo no se restauran: genera las que correspondan desde Facturación.</p>
++      <div id="reactivar-aviso"></div>
++      <div class="flex justify-end gap-2">
++        <button type="button" data-cancelar class="${boton(CLS.btnSecundario)}">Cancelar</button>
++        <button type="button" data-confirmar class="${boton(CLS.btnOk)}">${icono('check', 'h-4 w-4')}<span>Reactivar estudiante</span></button>
++      </div>
++    </div>`,
++  });
++  obtener('[data-cancelar]', HTMLButtonElement, m.dialogo).addEventListener('click', m.cerrar);
++  const confirmar = obtener('[data-confirmar]', HTMLButtonElement, m.dialogo);
++  confirmar.addEventListener('click', () => alConfirmar(m, confirmar));
++  confirmar.focus();
++}
++
++// ───────────────────────── Vista ─────────────────────────
++
++/**
++ * Pinta la ficha. Un fallo de la primera carga (404 fuera de sede, red, 401) se propaga: lo muestra el manejador de errores del panel,
++ * que ofrece «Reintentar». Los fallos de una acción (retirar / reactivar) se muestran dentro de su modal.
++ */
++export async function vistaEstudianteDetalle(ctx: ContextoDetalleEstudiante): Promise<void> {
++  const leer = (): Promise<DetalleEstudiante> => bma.get<DetalleEstudiante>(`/estudiantes/${ctx.estudianteId}`);
++  let datos = await leer();
++  if (!ctx.vigente()) return;
++
++  // Contenedor propio de ESTA ficha: el manejador de clics vive en él (no en `ctx.zona`, que es el <main> compartido del panel y
++  // acumularía manejadores de fichas anteriores, con el riesgo de retirar a otro estudiante). Al navegar, el panel lo descarta entero.
++  montar(ctx.zona, html`<div id="ficha-contenedor"></div>`);
++  const contenedor = obtener('#ficha-contenedor', HTMLElement, ctx.zona);
++
++  const pintar = (): void => {
++    montar(contenedor, fichaHtml(datos));
++    buscar('#ficha-titulo', HTMLElement, contenedor)?.focus({ preventScroll: true });
++  };
++
++  /** Vuelve a leer la ficha y repinta en el sitio (estado, banner de retiro, tablas y botón correcto). */
++  const refrescar = async (): Promise<void> => {
++    try {
++      datos = await leer();
++    } catch (e: unknown) {
++      if (e instanceof BmaSesionExpiradaError) ctx.alSesionExpirada();
++      else notificar('bad', `La acción se realizó, pero no se pudo actualizar la ficha: ${mensajeDeError(e)}`);
++      return;
++    }
++    if (ctx.vigente()) pintar();
++  };
++
++  const alFallar = (e: unknown, m: Modal, idAviso: string): void => {
++    if (e instanceof BmaSesionExpiradaError) {
++      m.cerrar();
++      ctx.alSesionExpirada();
++      return;
++    }
++    montar(obtener(idAviso, HTMLElement, m.dialogo), aviso('bad', mensajeDeError(e)));
++  };
++
++  const retirar = (m: Modal, cuerpo: CuerpoRetiro, enviar: HTMLButtonElement): void => {
++    void conBotonOcupado(enviar, () => bma.post<RespuestaCambioEstatus>(`/estudiantes/${ctx.estudianteId}/retirar`, cuerpo))
++      .then(async () => {
++        m.cerrar();
++        notificar('ok', `${datos.nombres} ${datos.apellidos} fue retirado de la academia.`);
++        await refrescar();
++      })
++      .catch((e: unknown) => alFallar(e, m, '#retiro-aviso'));
++  };
++
++  const reactivar = (m: Modal, confirmar: HTMLButtonElement): void => {
++    void conBotonOcupado(confirmar, () => bma.post<RespuestaCambioEstatus>(`/estudiantes/${ctx.estudianteId}/reactivar`))
++      .then(async () => {
++        m.cerrar();
++        notificar('ok', `${datos.nombres} ${datos.apellidos} fue reactivado.`);
++        await refrescar();
++      })
++      .catch((e: unknown) => alFallar(e, m, '#reactivar-aviso'));
++  };
++
++  // Un solo manejador delegado: sigue funcionando aunque `pintar()` reemplace el contenido del contenedor.
++  contenedor.addEventListener('click', (ev) => {
++    const origen = ev.target instanceof Element ? ev.target.closest('[data-accion]') : null;
++    if (!(origen instanceof HTMLButtonElement)) return;
++    const accion = origen.dataset['accion'];
++    if (accion === 'volver') ctx.alVolver();
++    else if (accion === 'retirar') abrirModalRetiro(datos, retirar);
++    else if (accion === 'reactivar') abrirModalReactivar(datos, reactivar);
++  });
++
++  pintar();
++}
+diff --git a/frontend/src/facturacion-masiva.ts b/frontend/src/facturacion-masiva.ts
+new file mode 100644
+index 0000000..141d6c3
+--- /dev/null
++++ b/frontend/src/facturacion-masiva.ts
+@@ -0,0 +1,219 @@
++/**
++ * Vista «Facturación masiva» — MÓDULO PREMIUM `FACTURACION_MASIVA` (US$ 20 · pago único).
++ *  - Candado: si el módulo está bloqueado se muestra la pantalla de cristal (lib/candado.ts) con el precio y, para el acceso consolidado,
++ *    el botón «Activar prueba gratuita de 15 días». El servidor impone el mismo candado en la ruta (guard.requireModulo('FACTURACION_MASIVA')):
++ *    un 403 MODULO_PREMIUM_DESHABILITADO durante el envío (p. ej. venció la prueba) devuelve al usuario a esa pantalla.
++ *  - Formulario del administrador → POST /api/facturacion/cuotas/generar-mensualidades { concepto, monto_usd, fecha_vencimiento }.
++ *    El servidor crea una mensualidad por cada estudiante «Activo» de su alcance (consolidado = todas las sedes; admin de sede = la suya)
++ *    y es IDEMPOTENTE por (estudiante, concepto): repetir el mismo concepto no duplica nada. Responde { creadas }.
++ *  - Resultado: aviso `.msg.okk` con la cantidad EXACTA de cuotas creadas que devolvió el servidor.
++ *
++ * Todo texto dinámico pasa por la etiqueta `html` (escape XSS automático).
++ */
++import { bma, BmaApiError, BmaSesionExpiradaError, mensajeDeError } from './api/bmaClient';
++import { html, montar, type HtmlSeguro } from './lib/html';
++import { icono } from './lib/icons';
++import { fechaCorta, fechaHora, hoyCaracas, usd } from './lib/format';
++import { CLS, aviso, boton, buscar, conBotonOcupado, obtener, todos } from './lib/ui';
++import { encabezadoVista, enlazarPrueba, pantallaBloqueada } from './lib/candado';
++import { parsearMonto } from './configuracion';
++import type {
++  CuerpoGenerarMensualidades,
++  DetalleModuloPremium,
++  ModuloPremium,
++  RespuestaGenerarMensualidades,
++} from './types/index';
++
++export interface ContextoFacturacionMasiva {
++  readonly zona: HTMLElement;
++  readonly vigente: () => boolean;
++  readonly modulo: ModuloPremium;
++  /** Solo el rol `admin` genera cuotas en bloque (la ruta del servidor es `soloAdmin`). */
++  readonly puedeGenerar: boolean;
++  /** Prueba gratuita disponible y usuario con acceso consolidado: muestra el botón de activación en la pantalla de cristal. */
++  readonly puedeProbar: boolean;
++  /** `null` = acceso consolidado (todas las sedes); un número = administrador de esa sede. */
++  readonly alcance: number | null;
++  readonly alActivarPrueba: () => Promise<void>;
++  /** El servidor respondió 403 MODULO_PREMIUM_DESHABILITADO: el panel relee el catálogo y vuelve a pintar el candado. */
++  readonly alBloquear: (detalle: DetalleModuloPremium) => void;
++  readonly alSesionExpirada: () => void;
++}
++
++const MAX_CONCEPTO = 150;
++
++// ───────────────────────── Validación (pura, sin DOM) ─────────────────────────
++
++export interface EntradaMensualidades {
++  readonly concepto: string;
++  readonly monto: string;
++  readonly vencimiento: string;
++}
++
++export interface ResultadoMensualidades {
++  readonly errores: Readonly<Record<string, string>>;
++  readonly cuerpo: CuerpoGenerarMensualidades | null;
++}
++
++/** Misma regla que el servidor: concepto 1–150, monto > 0 con ≤ 2 decimales, fecha 'AAAA-MM-DD' válida. Además, el vencimiento no puede ser pasado. */
++export function validarMensualidades(e: EntradaMensualidades, hoy: string): ResultadoMensualidades {
++  const errores: Record<string, string> = {};
++  const concepto = e.concepto.trim();
++  if (concepto === '') errores['concepto'] = 'Escribe el concepto, por ejemplo «Mensualidad Noviembre 2026».';
++  else if (concepto.length > MAX_CONCEPTO) errores['concepto'] = `El concepto admite hasta ${MAX_CONCEPTO} caracteres.`;
++
++  const monto = parsearMonto(e.monto);
++  if (monto === null) errores['monto_usd'] = 'Escribe un monto en USD mayor que 0, con máximo 2 decimales (por ejemplo 85.00).';
++
++  if (!esFechaReal(e.vencimiento)) errores['fecha_vencimiento'] = 'Elige la fecha de vencimiento.';
++  else if (e.vencimiento < hoy) errores['fecha_vencimiento'] = 'El vencimiento no puede ser anterior a hoy: todos los alumnos quedarían morosos de inmediato.';
++
++  if (Object.keys(errores).length > 0 || monto === null) return { errores, cuerpo: null };
++  return { errores, cuerpo: { concepto, monto_usd: monto, fecha_vencimiento: e.vencimiento } };
++}
++
++/** 'AAAA-MM-DD' que existe en el calendario (rechaza 2026-02-31). */
++export function esFechaReal(texto: string): boolean {
++  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(texto);
++  if (!m) return false;
++  const [anio, mes, dia] = [Number(m[1]), Number(m[2]), Number(m[3])];
++  const d = new Date(Date.UTC(anio, mes - 1, dia));
++  return d.getUTCFullYear() === anio && d.getUTCMonth() === mes - 1 && d.getUTCDate() === dia;
++}
++
++/** Texto del aviso de éxito con la cantidad exacta que informó el servidor. */
++export function resumenGeneracion(creadas: number, concepto: string): { readonly tono: 'okk' | 'inf'; readonly texto: string } {
++  if (creadas <= 0) {
++    return { tono: 'inf', texto: `No se creó ninguna cuota nueva: todos los estudiantes activos ya tenían «${concepto}».` };
++  }
++  return { tono: 'okk', texto: `Se crearon ${creadas} ${creadas === 1 ? 'cuota' : 'cuotas'} de «${concepto}».` };
++}
++
++// ───────────────────────── Interfaz ─────────────────────────
++
++function alcanceTexto(alcance: number | null): string {
++  return alcance === null ? 'todas las sedes' : 'tu sede';
++}
++
++function formularioHtml(ctx: ContextoFacturacionMasiva, hoy: string): HtmlSeguro {
++  const hasta = ctx.modulo.en_prueba === true && ctx.modulo.expira_prueba_en ? ctx.modulo.expira_prueba_en : null;
++  return html`${encabezadoVista(ctx.modulo.nombre, 'Genera la mensualidad de todos los estudiantes activos en un solo paso.')}
++    ${hasta ? html`<div class="mb-6">${aviso('warn', `Prueba gratuita vigente hasta el ${fechaHora(hasta)}. Después de esa fecha el módulo se bloquea automáticamente.`, 'Estás en periodo de prueba')}</div>` : null}
++    ${ctx.puedeGenerar
++      ? html`<section class="${CLS.tarjetaCristal} max-w-2xl p-6" aria-labelledby="t-masiva">
++          <h2 id="t-masiva" class="mb-1 flex items-center gap-2 text-base font-bold text-slate-900">${icono('receipt', 'h-5 w-5')}Nueva facturación mensual</h2>
++          <p class="${CLS.ayuda} mb-4">Se aplica a los estudiantes «Activo» de ${alcanceTexto(ctx.alcance)}. Repetir el mismo concepto no duplica cuotas.</p>
++          <form id="form-masiva" novalidate class="flex flex-col gap-4" aria-label="Generar mensualidades">
++            <div>
++              <label for="f-concepto" class="${CLS.etiqueta}">Concepto <span class="text-red-800" aria-hidden="true">*</span></label>
++              <input id="f-concepto" name="concepto" type="text" maxlength="${MAX_CONCEPTO}" required autocomplete="off" placeholder="Mensualidad Noviembre 2026" aria-describedby="e-concepto" class="${CLS.input}">
++              <p id="e-concepto" data-error="concepto" class="${CLS.errorCampo}" role="alert" hidden></p>
++            </div>
++            <div class="grid gap-4 sm:grid-cols-2">
++              <div>
++                <label for="f-monto" class="${CLS.etiqueta}">Monto por estudiante (USD) <span class="text-red-800" aria-hidden="true">*</span></label>
++                <input id="f-monto" name="monto_usd" type="text" inputmode="decimal" required autocomplete="off" placeholder="85.00" aria-describedby="e-monto" class="${CLS.input}">
++                <p id="e-monto" data-error="monto_usd" class="${CLS.errorCampo}" role="alert" hidden></p>
++              </div>
++              <div>
++                <label for="f-vence" class="${CLS.etiqueta}">Fecha de vencimiento <span class="text-red-800" aria-hidden="true">*</span></label>
++                <input id="f-vence" name="fecha_vencimiento" type="date" required min="${hoy}" aria-describedby="e-vence" class="${CLS.input}">
++                <p id="e-vence" data-error="fecha_vencimiento" class="${CLS.errorCampo}" role="alert" hidden></p>
++              </div>
++            </div>
++            <p id="masiva-vista-previa" class="${CLS.ayuda}" aria-live="polite"></p>
++            <div id="masiva-resultado" aria-live="polite"></div>
++            <div class="flex justify-end">
++              <button type="submit" class="${boton(CLS.btnPrimario)}">${icono('receipt', 'h-4 w-4')}<span>Generar</span></button>
++            </div>
++          </form>
++        </section>`
++      : html`<div class="max-w-2xl">${aviso('info', 'La generación masiva de mensualidades es una función del administrador. Pídele a esa persona que la ejecute.', 'Sección restringida')}</div>`}`;
++}
++
++function pintarErrores(form: HTMLFormElement, errores: Readonly<Record<string, string>>): void {
++  for (const el of todos('[data-error]', HTMLElement, form)) {
++    const mensaje = errores[el.dataset['error'] ?? ''] ?? '';
++    el.textContent = mensaje;
++    el.hidden = mensaje === '';
++  }
++  for (const control of todos('[name]', HTMLElement, form)) {
++    if ((errores[control.getAttribute('name') ?? ''] ?? '') !== '') control.setAttribute('aria-invalid', 'true');
++    else control.removeAttribute('aria-invalid');
++  }
++  buscar('[aria-invalid="true"]', HTMLElement, form)?.focus();
++}
++
++/** Aviso `.msg` (estilos en styles/main.css). `okk` = éxito, `inf` = sin cambios, `err` = fallo. El texto se asigna con textContent. */
++function mostrarMensaje(salida: HTMLElement, tono: 'okk' | 'inf' | 'err', texto: string): void {
++  montar(salida, html`<p class="msg ${tono}" role="${tono === 'err' ? 'alert' : 'status'}" tabindex="-1"></p>`);
++  const p = obtener('.msg', HTMLElement, salida);
++  p.textContent = texto;
++  p.focus();
++}
++
++function enlazarFormulario(ctx: ContextoFacturacionMasiva, hoy: string): void {
++  const form = obtener('#form-masiva', HTMLFormElement, ctx.zona);
++  const salida = obtener('#masiva-resultado', HTMLElement, form);
++  const vistaPrevia = obtener('#masiva-vista-previa', HTMLElement, form);
++  const campo = (nombre: string): string => {
++    const control = form.elements.namedItem(nombre);
++    return control instanceof HTMLInputElement ? control.value : '';
++  };
++  const leer = (): EntradaMensualidades => ({ concepto: campo('concepto'), monto: campo('monto_usd'), vencimiento: campo('fecha_vencimiento') });
++
++  // Vista previa en vivo de lo que se enviará (solo informativa; nunca sustituye la validación del servidor).
++  const actualizarVistaPrevia = (): void => {
++    const r = validarMensualidades(leer(), hoy);
++    vistaPrevia.textContent = r.cuerpo
++      ? `Se creará «${r.cuerpo.concepto}» por ${usd(r.cuerpo.monto_usd)} con vencimiento el ${fechaCorta(r.cuerpo.fecha_vencimiento)} para cada estudiante activo de ${alcanceTexto(ctx.alcance)}.`
++      : '';
++  };
++  form.addEventListener('input', actualizarVistaPrevia);
++
++  form.addEventListener('submit', (ev) => {
++    ev.preventDefault();
++    const r = validarMensualidades(leer(), hoy);
++    pintarErrores(form, r.errores);
++    montar(salida, html``);
++    if (r.cuerpo === null) return;
++    const cuerpo = r.cuerpo;
++    const enviar = obtener('button[type="submit"]', HTMLButtonElement, form);
++    void conBotonOcupado(enviar, () => bma.post<RespuestaGenerarMensualidades>('/facturacion/cuotas/generar-mensualidades', cuerpo))
++      .then((resp) => {
++        if (!ctx.vigente()) return;
++        const resumen = resumenGeneracion(resp.creadas, cuerpo.concepto);
++        mostrarMensaje(salida, resumen.tono, resumen.texto);
++      })
++      .catch((e: unknown) => {
++        if (e instanceof BmaSesionExpiradaError) {
++          ctx.alSesionExpirada();
++          return;
++        }
++        if (e instanceof BmaApiError) {
++          const premium = e.moduloPremium();
++          if (premium) {
++            ctx.alBloquear(premium);
++            return;
++          }
++          const campos = e.camposInvalidos();
++          if (campos.length > 0) {
++            pintarErrores(form, Object.fromEntries(campos.map((c) => [c.campo, c.mensaje])));
++          }
++        }
++        if (ctx.vigente()) mostrarMensaje(salida, 'err', mensajeDeError(e));
++      });
++  });
++}
++
++/** Punto de entrada de la sección. No lanza por el candado: lo resuelve pintando la pantalla de cristal. */
++export function vistaFacturacionMasiva(ctx: ContextoFacturacionMasiva): void {
++  if (ctx.modulo.bloqueado) {
++    montar(ctx.zona, pantallaBloqueada({ nombre: ctx.modulo.nombre, descripcion: ctx.modulo.descripcion, precio_usd: ctx.modulo.precio_usd }, ctx.puedeProbar));
++    enlazarPrueba(ctx.zona, ctx.alActivarPrueba);
++    return;
++  }
++  const hoy = hoyCaracas();
++  montar(ctx.zona, formularioHtml(ctx, hoy));
++  if (ctx.puedeGenerar) enlazarFormulario(ctx, hoy);
++}
+diff --git a/frontend/src/lib/candado.ts b/frontend/src/lib/candado.ts
+new file mode 100644
+index 0000000..3d15111
+--- /dev/null
++++ b/frontend/src/lib/candado.ts
+@@ -0,0 +1,69 @@
++/**
++ * Candado Premium compartido: pantalla de cristal (glassmorphism) sobre una sección fantasma + oferta de la prueba gratuita de 15 días.
++ * Lo usan el panel (admin.ts) para todos los módulos de la Fase 2 y las vistas premium con lógica propia (facturacion-masiva.ts).
++ *  - La capa usa `bg-white/80` + `backdrop-blur-md` (excepción deliberada del sistema de diseño, ver lib/ui.ts); el texto va en una tarjeta `bg-white/95`.
++ *  - El servidor es la fuente de verdad: este candado es solo la cara visible del 403 MODULO_PREMIUM_DESHABILITADO.
++ */
++import { mensajeDeError } from '../api/bmaClient';
++import { html, type HtmlSeguro } from './html';
++import { icono } from './icons';
++import { usd } from './format';
++import { CLS, aviso, boton, buscar, conBotonOcupado, notificar } from './ui';
++
++export const AVISO_PREMIUM = 'Módulo Premium Deshabilitado';
++
++export interface DatosCandado {
++  readonly nombre: string;
++  readonly descripcion: string;
++  readonly precio_usd: number;
++}
++
++/** Encabezado estándar de una sección del panel: título, subtítulo y acciones opcionales a la derecha. */
++export function encabezadoVista(titulo: string, subtitulo: string, acciones: HtmlSeguro | null = null): HtmlSeguro {
++  return html`<header class="mb-6 flex flex-wrap items-end justify-between gap-4">
++    <div><h1 class="${CLS.titulo}">${titulo}</h1><p class="${CLS.subtitulo}">${subtitulo}</p></div>
++    ${acciones}
++  </header>`;
++}
++
++export function vistaFantasma(): HtmlSeguro {
++  const fila = html`<div class="flex items-center gap-4 border-b border-slate-100 py-4"><div class="h-8 w-8 rounded-full bg-slate-200"></div><div class="h-4 flex-1 rounded bg-slate-200"></div><div class="h-4 w-24 rounded bg-slate-200"></div></div>`;
++  return html`<div aria-hidden="true" class="pointer-events-none select-none p-6">
++    <div class="mb-4 h-6 w-1/3 rounded bg-slate-300"></div>${fila}${fila}${fila}${fila}${fila}
++  </div>`;
++}
++
++/** Capa absoluta de cristal (`backdrop-blur-md bg-white/80`) sobre la sección bloqueada. */
++export function capaCandado(d: DatosCandado): HtmlSeguro {
++  return html`<div data-candado class="absolute inset-0 z-10 flex items-center justify-center bg-white/80 p-6 backdrop-blur-md">
++    <div role="region" aria-label="${AVISO_PREMIUM}" class="${CLS.tarjetaCristal} w-full max-w-md p-8 text-center">
++      <span class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 text-white">${icono('lock', 'h-6 w-6')}</span>
++      <h2 class="mt-4 text-lg font-bold text-slate-900">${AVISO_PREMIUM}</h2>
++      <p class="mt-1 text-sm font-semibold text-slate-800">${d.nombre}</p>
++      <p class="mt-2 text-sm text-slate-700">${d.descripcion}</p>
++      <p class="mt-4 text-2xl font-bold text-slate-900">${usd(d.precio_usd)}</p>
++      <p class="mt-1 text-xs text-slate-600">Pago único · solicítalo a Astra Digital Solutions</p>
++    </div>
++  </div>`;
++}
++
++export function seccionBloqueada(d: DatosCandado): HtmlSeguro {
++  return html`${encabezadoVista(d.nombre, d.descripcion)}
++    <div class="${CLS.tarjeta} relative min-h-96 overflow-hidden">${vistaFantasma()}${capaCandado(d)}</div>`;
++}
++
++/** Sección bloqueada + (si procede) el aviso con el botón «Activar prueba gratuita de 15 días». Enlázalo con `enlazarPrueba`. */
++export function pantallaBloqueada(d: DatosCandado, ofrecerPrueba: boolean): HtmlSeguro {
++  return html`${seccionBloqueada(d)}${ofrecerPrueba
++    ? html`<div class="mt-6">${aviso('info', html`<p>Prueba este módulo sin costo durante 15 días. Al vencer se bloquea solo.</p>
++        <button type="button" id="activar-prueba" class="${boton(CLS.btnPrimario, 'mt-3')}">${icono('check', 'h-4 w-4')}<span>Activar prueba gratuita de 15 días</span></button>`, 'Prueba gratuita disponible')}</div>`
++    : null}`;
++}
++
++/** Conecta el botón de la prueba (si existe en `raiz`); un fallo se avisa con un toast y deja el botón disponible. */
++export function enlazarPrueba(raiz: ParentNode, alActivar: () => Promise<void>): void {
++  const activar = buscar('#activar-prueba', HTMLButtonElement, raiz);
++  activar?.addEventListener('click', () => {
++    void conBotonOcupado(activar, alActivar).catch((e: unknown) => notificar('bad', mensajeDeError(e)));
++  });
++}
+diff --git a/frontend/src/lib/icons.ts b/frontend/src/lib/icons.ts
+index 4bd9ae9..8149081 100644
+--- a/frontend/src/lib/icons.ts
++++ b/frontend/src/lib/icons.ts
+@@ -23,6 +23,10 @@ const TRAZOS = {
+   globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 3 15 0 18M12 3c-3 3-3 15 0 18"/>',
+   bot: '<rect x="4" y="8" width="16" height="11" rx="2"/><path d="M12 8V4M9 13h.01M15 13h.01"/>',
+   copy: '<rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V6a2 2 0 012-2h9"/>',
++  back: '<path d="M10 6l-6 6 6 6M4 12h16"/>',
++  folder: '<path d="M3 6a2 2 0 012-2h4l2 3h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2z"/>',
++  heart: '<path d="M12 20s-8-5-8-11a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 9c0 6-8 11-8 11z"/>',
++  receipt: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"/>',
+   wallet: '<path d="M3 7h16a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2zM3 7V6a2 2 0 012-2h11M17 14h.01"/>',
+ } as const;
+ 
+diff --git a/frontend/src/styles/main.css b/frontend/src/styles/main.css
+index ec624dd..fc4671c 100644
+--- a/frontend/src/styles/main.css
++++ b/frontend/src/styles/main.css
+@@ -25,3 +25,19 @@
+     }
+   }
+ }
++
++/* Avisos en línea de formularios (p. ej. facturación masiva): `.msg` + `.okk` (éxito) | `.inf` (sin cambios) | `.err` (fallo). */
++@layer components {
++  .msg {
++    @apply rounded-lg border p-4 text-sm font-medium;
++  }
++  .msg.okk {
++    @apply border-emerald-700/30 bg-emerald-50 text-emerald-900;
++  }
++  .msg.inf {
++    @apply border-sky-700/30 bg-sky-50 text-sky-900;
++  }
++  .msg.err {
++    @apply border-red-700/30 bg-red-50 text-red-900;
++  }
++}
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 653f0ea..3bc19d3 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -330,7 +330,9 @@ export type CodigoModuloPremium =
+   | 'WHATSAPP_AUTOMATICO'
+   | 'BANCAMIGA'
+   | 'APP_MOVIL'
+-  | 'FACHADA_WEB';
++  | 'FACHADA_WEB'
++  | 'MULTI_SEDE_PREMIUM'
++  | 'FACTURACION_MASIVA';
+ 
+ export interface ModuloPremium {
+   readonly codigo: CodigoModuloPremium;
+@@ -398,3 +400,106 @@ export interface CuerpoCuenta {
+   readonly activa: boolean;
+   readonly sede_id: number | null;
+ }
++
++// ───────────────────────── Ficha del estudiante (Core Base) ─────────────────────────
++
++export type EstatusAcademico = 'Pendiente por Validación Administrativa' | 'Activo' | 'Fuera de la Academia';
++export type TipoDocumentoEstudiante = 'FOTO_CARNET' | 'CEDULA_IDENTIDAD' | 'ACTA_NACIMIENTO';
++
++/** Fila de `cuotas` dentro de `GET /api/estudiantes/:id`. */
++export interface CuotaEstudiante {
++  readonly id: number;
++  readonly tipo: TipoCuota;
++  readonly concepto: string;
++  readonly monto_usd: number;
++  readonly fecha_vencimiento: string;
++  readonly estado: EstadoCuota;
++}
++
++/** Fila de `documentos` (metadatos de Google Drive; el binario vive en Drive). */
++export interface DocumentoEstudiante {
++  readonly id: number;
++  readonly tipo: TipoDocumentoEstudiante;
++  readonly nombre_archivo: string;
++  readonly mime_type: string;
++  readonly tamano_bytes: number;
++  readonly drive_url: string | null;
++  readonly subido_en: string;
++}
++
++/** Fila de `pagos` (referencias declaradas por el representante). */
++export interface PagoEstudiante {
++  readonly id: number;
++  readonly cuota_id: number;
++  readonly referencia: string;
++  readonly metodo_pago: MetodoPago;
++  readonly monto_usd: number;
++  readonly monto_bs: number;
++  readonly tasa_bcv: number;
++  readonly estado: EstadoPagoReferencia;
++  readonly declarado_en: string;
++}
++
++/** `GET /api/estudiantes/:id` — estudiante + vista de estado + representante + cuotas, documentos y pagos. */
++export interface DetalleEstudiante {
++  readonly id: number;
++  readonly representante_id: number;
++  readonly sede_id: number | null;
++  readonly nombres: string;
++  readonly apellidos: string;
++  readonly cedula_identidad: string | null;
++  readonly fecha_nacimiento: string;
++  readonly grado_solicitado: string;
++  readonly colegio_procedencia: string | null;
++  readonly ultimo_grado_aprobado: string | null;
++  readonly tipo_sangre: TipoSangre | null;
++  readonly alergias: string | null;
++  readonly condiciones_medicas: string | null;
++  readonly medicamentos: string | null;
++  readonly emergencia_nombre: string | null;
++  readonly emergencia_telefono: string | null;
++  readonly estatus_academico: EstatusAcademico;
++  readonly fecha_retiro: string | null;
++  readonly motivo_retiro: string | null;
++  readonly drive_folder_id: string | null;
++  readonly drive_folder_url: string | null;
++  readonly creado_en: string;
++  readonly actualizado_en: string;
++  readonly estado_dinamico: EstadoDinamico;
++  readonly estatus_pago: EstatusPago;
++  readonly deuda_vencida_usd: number;
++  readonly rep_nombres: string;
++  readonly rep_apellidos: string;
++  readonly rep_cedula: string;
++  readonly rep_email: string | null;
++  readonly rep_telefono: string | null;
++  readonly cuotas: readonly CuotaEstudiante[];
++  readonly documentos: readonly DocumentoEstudiante[];
++  readonly pagos: readonly PagoEstudiante[];
++}
++
++/** Cuerpo de `POST /api/estudiantes/:id/retirar` (el motivo es obligatorio en la interfaz; el servidor admite hasta 300 caracteres). */
++export interface CuerpoRetiro {
++  readonly motivo: string;
++  readonly fecha_retiro: string;
++}
++
++/** Respuesta de `POST /api/estudiantes/:id/retirar` y `/reactivar`. */
++export interface RespuestaCambioEstatus {
++  readonly id: number;
++  readonly estatus_academico: EstatusAcademico;
++}
++
++// ───────────────────────── Facturación masiva (módulo premium FACTURACION_MASIVA) ─────────────────────────
++
++/** Cuerpo de `POST /api/facturacion/cuotas/generar-mensualidades`. */
++export interface CuerpoGenerarMensualidades {
++  readonly concepto: string;
++  readonly monto_usd: number;
++  readonly fecha_vencimiento: string;
++}
++
++/** Respuesta de `POST /api/facturacion/cuotas/generar-mensualidades`: cuotas realmente creadas (las ya existentes se omiten). */
++export interface RespuestaGenerarMensualidades {
++  readonly creadas: number;
++}
+diff --git a/middlewares/errorHandler.js b/middlewares/errorHandler.js
+index 47ee2e5..7db9a7f 100644
+--- a/middlewares/errorHandler.js
++++ b/middlewares/errorHandler.js
+@@ -1,5 +1,6 @@
+ 'use strict';
+ const { AppError } = require('../errors/AppError');
++const { TOOLTIP_BLOQUEADO, MODULO_MULTI_SEDE, LIMITE_SEDES_BASE } = require('../modules/premium/catalogo');
+ 
+ /** Mensajes amigables por nombre de índice/constraint único violado (PostgreSQL SQLSTATE 23505; el nombre llega en `err.constraint`). */
+ const UNICOS = {
+@@ -23,10 +24,26 @@ const esErrorPg = (err) => Boolean(err) && typeof err.code === 'string' && /^[0-
+ const NO_DISPONIBLE = { status: 503, codigo: 'BASE_DATOS_NO_DISPONIBLE', mensaje: 'La base de datos no está disponible. Intenta más tarde.', headers: { 'Retry-After': '10' } };
+ const REINTENTAR = { status: 503, codigo: 'REINTENTAR', mensaje: 'Conflicto temporal en la base de datos. Intenta de nuevo.', headers: { 'Retry-After': '2' } };
+ 
++/**
++ * SQLSTATE propio 'BM403' (trigger trg_sedes_limite_base, migración 008): la oferta base admite 2 sedes y MULTI_SEDE_PREMIUM no está activo.
++ * `detail` trae un JSON {modulo,nombre,precio_usd,limite_sedes_base}; si no se puede leer se responde igual con los datos del catálogo.
++ */
++function moduloPremiumDesdeTrigger(err) {
++  let detalles = { modulo: MODULO_MULTI_SEDE, limite_sedes_base: LIMITE_SEDES_BASE };
++  try {
++    const crudo = JSON.parse(String(err.detail ?? ''));
++    if (crudo !== null && typeof crudo === 'object' && !Array.isArray(crudo)) detalles = { ...detalles, ...crudo };
++  } catch {
++    /* detail ausente o no es JSON: se conservan los valores por defecto */
++  }
++  return { status: 403, codigo: 'MODULO_PREMIUM_DESHABILITADO', mensaje: TOOLTIP_BLOQUEADO, detalles };
++}
++
+ /** Traduce un error de `pg` (SQLSTATE) o de red a la respuesta JSON. Devuelve null si no es un error de base de datos. */
+ function normalizarBaseDatos(err) {
+   if (esErrorPg(err)) {
+     const c = err.code;
++    if (c === 'BM403') return moduloPremiumDesdeTrigger(err);
+     if (c === '23505') {
+       const [codigo, mensaje] = UNICOS[err.constraint] || ['REGISTRO_DUPLICADO', 'Ya existe un registro con esos datos.'];
+       return { status: 409, codigo, mensaje };
+diff --git a/modules/premium/catalogo.js b/modules/premium/catalogo.js
+index a538f72..548a9b2 100644
+--- a/modules/premium/catalogo.js
++++ b/modules/premium/catalogo.js
+@@ -13,8 +13,16 @@ const CATALOGO = Object.freeze([
+   { codigo: 'BANCAMIGA', nombre: 'Integración Bancaria (API Bancamiga)', precioUsd: 300, vista: 'bancamiga', rutas: ['/api/premium/bancamiga'] },
+   { codigo: 'APP_MOVIL', nombre: 'Aplicación Móvil Administrativa', precioUsd: 450, vista: 'app-movil', rutas: ['/api/movil/v1'] },
+   { codigo: 'FACHADA_WEB', nombre: 'Fachada Web con Scroll-Tour Inmersivo', precioUsd: 550, vista: 'fachada-web', rutas: ['/ir/admisiones'] },
++  // Migración 008. MULTI_SEDE_PREMIUM no tiene ruta propia: lo aplica el trigger trg_sedes_limite_base sobre POST /api/sedes
++  // (el Core Base incluye 2 sedes; la 3ª exige el módulo habilitado o en prueba vigente).
++  { codigo: 'MULTI_SEDE_PREMIUM', nombre: 'Expansión Multi-Sede Avanzada (3+ Sedes)', precioUsd: 50, vista: 'multi-sede', rutas: ['/api/sedes'] },
++  { codigo: 'FACTURACION_MASIVA', nombre: 'Módulo de Facturación Masiva Automatizada', precioUsd: 20, vista: 'facturacion-masiva', rutas: ['/api/facturacion/cuotas/generar-mensualidades'] },
+ ]);
+ 
++/** Oferta base (Core Base, US$ 750): hasta dos sedes (Acarigua y Barquisimeto). Desde la tercera se exige MULTI_SEDE_PREMIUM. */
++const LIMITE_SEDES_BASE = 2;
++const MODULO_MULTI_SEDE = 'MULTI_SEDE_PREMIUM';
++
+ const porCodigo = (codigo) => CATALOGO.find((m) => m.codigo === codigo);
+ 
+-module.exports = { CATALOGO, TOOLTIP_BLOQUEADO, porCodigo };
++module.exports = { CATALOGO, TOOLTIP_BLOQUEADO, LIMITE_SEDES_BASE, MODULO_MULTI_SEDE, porCodigo };
+diff --git a/routes/index.js b/routes/index.js
+index 736ff41..c140d53 100644
+--- a/routes/index.js
++++ b/routes/index.js
+@@ -17,6 +17,7 @@ const cfg = require('../controllers/configuracion.controller');
+ const sedes = require('../controllers/sedes.controller');
+ const exportaciones = require('../controllers/exportaciones.controller');
+ const premium = require('../modules/premium/premium.routes');
++const { guard } = require('../modules/premium/guard');
+ 
+ const soloAdmin = requireRol('admin');
+ // Datos SIN sede (personal, horas, nómina) o ajustes globales: solo admin con acceso consolidado (sede_id NULL).
+@@ -60,7 +61,8 @@ api.post('/estudiantes/:id/reactivar', crm.reactivar);
+ api.get('/facturacion/tablero', facturacion.tablero);
+ api.get('/facturacion/cuotas', facturacion.listarCuotas);
+ api.post('/facturacion/cuotas', facturacion.crearCuota);
+-api.post('/facturacion/cuotas/generar-mensualidades', soloAdmin, facturacion.generarMensualidades);
++// Módulo premium FACTURACION_MASIVA (US$ 20): sin el módulo habilitado (o en prueba vigente) responde 403 MODULO_PREMIUM_DESHABILITADO.
++api.post('/facturacion/cuotas/generar-mensualidades', soloAdmin, guard.requireModulo('FACTURACION_MASIVA'), facturacion.generarMensualidades);
+ api.get('/facturacion/auditoria', facturacion.auditoria);
+ api.post('/facturacion/auditoria/:id/aprobar', facturacion.aprobar);
+ api.post('/facturacion/auditoria/:id/rechazar', facturacion.rechazar);
+diff --git a/services/sedes.service.js b/services/sedes.service.js
+index 5192e69..7ee13dd 100644
+--- a/services/sedes.service.js
++++ b/services/sedes.service.js
+@@ -1,6 +1,8 @@
+ 'use strict';
+ const { ejecutar } = require('../config/db');
+-const { e } = require('../errors/AppError');
++const { AppError, e } = require('../errors/AppError');
++const { guard } = require('../modules/premium/guard');
++const { TOOLTIP_BLOQUEADO, LIMITE_SEDES_BASE, MODULO_MULTI_SEDE } = require('../modules/premium/catalogo');
+ 
+ /** Sedes visibles: el acceso consolidado (sedeId NULL) ve todas; un usuario de sede solo la suya. */
+ async function listar(sedeId = null) {
+@@ -10,8 +12,28 @@ async function listar(sedeId = null) {
+   return r.rows;
+ }
+ 
++/**
++ * Regla del Core Base: hasta LIMITE_SEDES_BASE (2) sedes. Desde la tercera, MULTI_SEDE_PREMIUM debe estar habilitado o en prueba vigente
++ * (si no → 403 MODULO_PREMIUM_DESHABILITADO). Esta comprobación responde con detalle; el trigger trg_sedes_limite_base (migración 008)
++ * es la garantía definitiva frente a carreras y a cualquier camino que no pase por este servicio.
++ */
++async function exigirCupoDeSede() {
++  const total = (await ejecutar('SELECT COUNT(*)::int AS n FROM sedes')).rows[0].n;
++  if (total < LIMITE_SEDES_BASE) return;
++  const modulo = await guard.evaluar(MODULO_MULTI_SEDE, { fresco: true }); // sin caché: una prueba vencida o un cambio comercial rige al instante
++  if (modulo.habilitado) return;
++  throw new AppError(403, 'MODULO_PREMIUM_DESHABILITADO', TOOLTIP_BLOQUEADO, {
++    modulo: MODULO_MULTI_SEDE, nombre: modulo.nombre, precio_usd: modulo.precioUsd, limite_sedes_base: LIMITE_SEDES_BASE,
++  });
++}
++
+ async function crear({ nombre }) {
+-  // Upsert por la restricción UNIQUE del nombre: crear dos veces la misma sede es un 409 legible, no un error técnico.
++  // Un nombre repetido es un 409 legible (y se resuelve antes que el límite de sedes: no es una sede nueva).
++  const existe = await ejecutar('SELECT 1 AS x FROM sedes WHERE nombre = $1', [nombre]);
++  if (existe.rowCount) throw e.conflicto('SEDE_DUPLICADA', 'Ya existe una sede con ese nombre.');
++  await exigirCupoDeSede();
++  // Upsert por la restricción UNIQUE del nombre (carrera entre dos altas iguales). Si dos altas distintas compiten por el último cupo,
++  // el trigger serializa y rechaza a la segunda (SQLSTATE BM403, traducido por middlewares/errorHandler a 403 MODULO_PREMIUM_DESHABILITADO).
+   const r = await ejecutar(
+     'INSERT INTO sedes (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING RETURNING id',
+     [nombre]);
+@@ -26,4 +48,4 @@ async function cambiarActiva(id, activa) {
+   return { id, activa: Boolean(activa) };
+ }
+ 
+-module.exports = { listar, crear, cambiarActiva };
++module.exports = { listar, crear, cambiarActiva, exigirCupoDeSede };
+diff --git a/tests/integracion.pg.test.js b/tests/integracion.pg.test.js
+index d3aa03f..84cd932 100644
+--- a/tests/integracion.pg.test.js
++++ b/tests/integracion.pg.test.js
+@@ -128,12 +128,12 @@ test.after(async () => {
+ });
+ 
+ // ── Migraciones y scripts ───────────────────────────────────────────────────────────────────────
+-t('migrate.js: aplica las 7 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
++t('migrate.js: aplica las 8 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
+   const primera = hijo('scripts/migrate.js');
+   for (const f of fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql'))) assert.match(primera, new RegExp(`Aplicada ${f}`));
+   const segunda = hijo('scripts/migrate.js');
+   assert.ok(!/Aplicada/.test(segunda), segunda);
+-  assert.equal((segunda.match(/ya aplicada/g) || []).length, 7);
++  assert.equal((segunda.match(/ya aplicada/g) || []).length, 8);
+   assert.match(segunda, /Migraciones al día/);
+ });
+ 
+@@ -144,7 +144,7 @@ t(`el esquema real contiene las 19 tablas + la vista, con RLS activo y la vista
+   const v = await uno(`SELECT array_to_string(reloptions, ',') AS opciones FROM pg_class WHERE relname = 'vw_estudiantes_estado'`);
+   assert.equal(v.opciones, 'security_invoker=true');
+   const reg = await filas('SELECT nombre FROM schema_migrations ORDER BY nombre');
+-  assert.equal(reg.length, 7);
++  assert.equal(reg.length, 8);
+ });
+ 
+ t('crear-admin.js: upsert por correo (ON CONFLICT), normaliza a minúsculas, reactiva y no duplica', async () => {
+@@ -618,10 +618,11 @@ t('exportación: cada hoja se lee por lotes con LIMIT/keyset sin perder ni dupli
+ });
+ 
+ // ── Candados premium ────────────────────────────────────────────────────────────────────────────
+-t('premium: 5 módulos sembrados y deshabilitados; el guard bloquea con 403 y se abre al habilitar', async () => {
++t('premium: 7 módulos sembrados y deshabilitados; el guard bloquea con 403 y se abre al habilitar', async () => {
+   const todos = await svc.guard.guard.repo.leerTodos();
+   assert.deepEqual(todos.map((m) => [m.codigo, m.precio_usd, m.habilitado]), [
+-    ['WHATSAPP_AUTOMATICO', 150, false], ['IA_ATENCION', 200, false], ['BANCAMIGA', 300, false], ['APP_MOVIL', 450, false], ['FACHADA_WEB', 550, false]]);
++    ['FACTURACION_MASIVA', 20, false], ['MULTI_SEDE_PREMIUM', 50, false], ['WHATSAPP_AUTOMATICO', 150, false], ['IA_ATENCION', 200, false],
++    ['BANCAMIGA', 300, false], ['APP_MOVIL', 450, false], ['FACHADA_WEB', 550, false]]);
+   let resultado;
+   const g = svc.guard.crearGuard({ ttlMs: 0 });
+   await g.requireModulo('BANCAMIGA')({}, {}, (e) => { resultado = e; });
+@@ -632,6 +633,94 @@ t('premium: 5 módulos sembrados y deshabilitados; el guard bloquea con 403 y se
+   await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE WHERE codigo = 'BANCAMIGA'`);
+ });
+ 
++// ── Límite de sedes del Core Base (migración 008) ──────────────────────────────────────────────
++// Se ejecuta ANTES del resto de pruebas multi-sede, cuando aún no hay sedes: crea y borra sus propias filas (prefijo T008-).
++const limpiarT008 = async () => {
++  await db.ejecutar(`DELETE FROM sedes WHERE nombre LIKE 'T008-%'`);
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, prueba_iniciada_en = NULL, expira_prueba_en = NULL, actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
++};
++
++t('008: los módulos MULTI_SEDE_PREMIUM (US$ 50) y FACTURACION_MASIVA (US$ 20) existen deshabilitados y la migración no pisa su estado', async () => {
++  const m = await filas(`SELECT codigo, nombre, precio_usd, habilitado FROM modulos_premium WHERE codigo IN ('MULTI_SEDE_PREMIUM', 'FACTURACION_MASIVA') ORDER BY codigo`);
++  assert.deepEqual(m.map((x) => [x.codigo, x.nombre, x.precio_usd, x.habilitado]), [
++    ['FACTURACION_MASIVA', 'Módulo de Facturación Masiva Automatizada', 20, false],
++    ['MULTI_SEDE_PREMIUM', 'Expansión Multi-Sede Avanzada (3+ Sedes)', 50, false]]);
++  // re-ejecutar 008 con el módulo ya contratado y un precio negociado: DO NOTHING no toca nada
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, precio_usd = 45 WHERE codigo = 'FACTURACION_MASIVA'`);
++  await db.ejecutarScript(fs.readFileSync(path.join(RAIZ, 'database', 'migrations', '008_nuevos_premium.sql'), 'utf8'));
++  const f = await uno(`SELECT habilitado, precio_usd FROM modulos_premium WHERE codigo = 'FACTURACION_MASIVA'`);
++  assert.deepEqual([f.habilitado, f.precio_usd], [true, 45]);
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, precio_usd = 20 WHERE codigo = 'FACTURACION_MASIVA'`);
++});
++
++t('008: la 3ª sede se bloquea con 403 MODULO_PREMIUM_DESHABILITADO (servicio y trigger) y se permite con el módulo habilitado o en prueba vigente', async () => {
++  assert.equal((await uno('SELECT COUNT(*)::int AS n FROM sedes')).n, 0, 'precondición: sin sedes todavía');
++  try {
++    await svc.sedes.crear({ nombre: 'T008-A' });
++    await svc.sedes.crear({ nombre: 'T008-B' });
++    // 3ª por el servicio → 403 con el precio del módulo
++    await assert.rejects(svc.sedes.crear({ nombre: 'T008-C' }), (e) => e.status === 403 && e.codigo === 'MODULO_PREMIUM_DESHABILITADO'
++      && e.detalles.modulo === 'MULTI_SEDE_PREMIUM' && e.detalles.precio_usd === 50 && e.detalles.limite_sedes_base === 2);
++    // 3ª por SQL directo (cualquier camino que no pase por el servicio): SQLSTATE propio, traducido a 403 por el manejador de errores
++    const directo = await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1)`, ['T008-C']).catch((e) => e);
++    assert.equal(directo.code, 'BM403');
++    const http = svc.normalizar(directo);
++    assert.deepEqual([http.status, http.codigo, http.detalles.modulo, http.detalles.precio_usd], [403, 'MODULO_PREMIUM_DESHABILITADO', 'MULTI_SEDE_PREMIUM', 50]);
++    // INSERT multi-fila: cada fila ve a las anteriores de su propia sentencia (nada se inserta si alguna excede el cupo)
++    const multi = await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1), ($2)`, ['T008-M1', 'T008-M2']).catch((e) => e);
++    assert.equal(multi.code, 'BM403');
++    assert.equal((await uno('SELECT COUNT(*)::int AS n FROM sedes')).n, 2);
++    // un nombre repetido sigue siendo 409 SEDE_DUPLICADA (no se disfraza de módulo deshabilitado), también con ON CONFLICT DO NOTHING a pelo
++    await assert.rejects(svc.sedes.crear({ nombre: 'T008-A' }), (e) => e.status === 409 && e.codigo === 'SEDE_DUPLICADA');
++    assert.equal((await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING`, ['T008-A'])).rowCount, 0);
++    // la tabla sigue admitiendo UPDATE (activar/desactivar) con el cupo lleno
++    assert.equal((await svc.sedes.cambiarActiva((await uno(`SELECT id FROM sedes WHERE nombre = 'T008-A'`)).id, false)).activa, false);
++
++    // módulo contratado → la 3ª y la 4ª sí
++    await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
++    await svc.sedes.crear({ nombre: 'T008-C' });
++    await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1)`, ['T008-D']);
++
++    // prueba vigente → permite; prueba vencida (aunque habilitado siga en TRUE) → bloquea con el reloj de la base
++    await db.ejecutar(`UPDATE modulos_premium SET expira_prueba_en = NOW() + INTERVAL '3 days' WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
++    await svc.sedes.crear({ nombre: 'T008-E' });
++    await db.ejecutar(`UPDATE modulos_premium SET expira_prueba_en = NOW() - INTERVAL '1 minute' WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
++    await assert.rejects(svc.sedes.crear({ nombre: 'T008-F' }), (e) => e.status === 403 && e.codigo === 'MODULO_PREMIUM_DESHABILITADO');
++    assert.equal((await db.ejecutar(`INSERT INTO sedes (nombre) VALUES ($1)`, ['T008-F']).catch((e) => e)).code, 'BM403');
++  } finally {
++    await limpiarT008();
++  }
++});
++
++t('008: altas concurrentes de sedes — el trigger serializa y solo 2 caben en el Core Base', async () => {
++  try {
++    assert.equal((await uno('SELECT COUNT(*)::int AS n FROM sedes')).n, 0);
++    const r = await Promise.allSettled(['T008-X', 'T008-Y', 'T008-Z', 'T008-W'].map((nombre) => svc.sedes.crear({ nombre })));
++    assert.equal(r.filter((x) => x.status === 'fulfilled').length, 2);
++    const rechazos = r.filter((x) => x.status === 'rejected').map((x) => svc.normalizar(x.reason));
++    assert.equal(rechazos.length, 2);
++    assert.ok(rechazos.every((x) => x.status === 403 && x.codigo === 'MODULO_PREMIUM_DESHABILITADO'), JSON.stringify(rechazos));
++    assert.equal((await uno('SELECT COUNT(*)::int AS n FROM sedes')).n, 2);
++  } finally {
++    await limpiarT008();
++  }
++});
++
++t('008: FACTURACION_MASIVA protege la generación masiva — 403 sin módulo, pasa con módulo habilitado', async () => {
++  const g = svc.guard.crearGuard({ ttlMs: 0 });
++  let resultado;
++  await g.requireModulo('FACTURACION_MASIVA')({}, {}, (e) => { resultado = e; });
++  assert.deepEqual([resultado.status, resultado.codigo, resultado.detalles.precio_usd], [403, 'MODULO_PREMIUM_DESHABILITADO', 20]);
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'FACTURACION_MASIVA'`);
++  try {
++    resultado = 'sin-next';
++    await g.requireModulo('FACTURACION_MASIVA')({}, {}, (e) => { resultado = e; });
++    assert.equal(resultado, undefined);
++  } finally {
++    await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, actualizado_en = NOW() WHERE codigo = 'FACTURACION_MASIVA'`);
++  }
++});
++
+ // ── Multi-sede ──────────────────────────────────────────────────────────────────────────────────
+ let sedeA; let sedeB;
+ const usuarioAdminId = async () => (await uno('SELECT id FROM usuarios_admin ORDER BY id LIMIT 1')).id;
+@@ -847,7 +936,7 @@ t('Supabase: con los privilegios por defecto de anon/authenticated, la migració
+   await db.ejecutar('GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated');
+   await db.ejecutar('GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated');
+   // 004 (Core Base) + 006/007 (sedes e invitaciones: su propio bloque RLS/REVOKE; además prueban que re-ejecutarlas es inocuo).
+-  for (const m of ['004_seguridad_supabase.sql', '006_multisede.sql', '007_invitaciones_inscripcion.sql']) {
++  for (const m of ['004_seguridad_supabase.sql', '006_multisede.sql', '007_invitaciones_inscripcion.sql', '008_nuevos_premium.sql']) {
+     await db.ejecutarScript(fs.readFileSync(path.join(RAIZ, 'database', 'migrations', m), 'utf8'));
+   }
+   for (const rol of ['anon', 'authenticated']) {
+@@ -1031,7 +1120,10 @@ t('cron WhatsApp por sede: cada sede activa se despacha por separado (Preventiva
+   const mB = await sembrar({ sedeId: sedeB, nombres: 'SdMorB', vence: sumarDias(hoy, -1) });
+   const lejos = await sembrar({ sedeId: sedeA, nombres: 'SdLejos', vence: sumarDias(hoy, 20) });
+   const libre = await sembrar({ nombres: 'SdSinSede', vence: sumarDias(hoy, 4) });
++  // Esta es una sede más allá de las 2 del Core Base: la migración 008 exige MULTI_SEDE_PREMIUM (se restablece justo después).
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
+   const cerrada = (await svc.sedes.crear({ nombre: 'Sede Cerrada Cron' })).id;
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
+   const enCerrada = await sembrar({ sedeId: cerrada, nombres: 'SdCerrada', vence: sumarDias(hoy, 4) });
+   await svc.sedes.cambiarActiva(cerrada, false);
+ 
+diff --git a/tests/premium-008.test.js b/tests/premium-008.test.js
+new file mode 100644
+index 0000000..7bcd0f1
+--- /dev/null
++++ b/tests/premium-008.test.js
+@@ -0,0 +1,76 @@
++'use strict';
++// Migración 008: catálogo de módulos, traducción del SQLSTATE BM403 del trigger de sedes y estilo PostgreSQL puro (sin residuos MSSQL).
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const { CATALOGO, porCodigo, LIMITE_SEDES_BASE, MODULO_MULTI_SEDE } = require('../modules/premium/catalogo');
++const { normalizar } = require('../middlewares/errorHandler');
++
++const RAIZ = path.resolve(__dirname, '..');
++const sql008 = fs.readFileSync(path.join(RAIZ, 'database', 'migrations', '008_nuevos_premium.sql'), 'utf8');
++const sinComentarios = (t) => t.replace(/--[^\n]*/g, '');
++
++test('catálogo: MULTI_SEDE_PREMIUM (US$ 50) y FACTURACION_MASIVA (US$ 20) con los códigos exactos de la migración 008', () => {
++  assert.equal(porCodigo('MULTI_SEDE_PREMIUM').precioUsd, 50);
++  assert.equal(porCodigo('MULTI_SEDE_PREMIUM').nombre, 'Expansión Multi-Sede Avanzada (3+ Sedes)');
++  assert.equal(porCodigo('FACTURACION_MASIVA').precioUsd, 20);
++  assert.equal(porCodigo('FACTURACION_MASIVA').nombre, 'Módulo de Facturación Masiva Automatizada');
++  assert.equal(new Set(CATALOGO.map((m) => m.codigo)).size, CATALOGO.length, 'sin códigos repetidos');
++  assert.equal(LIMITE_SEDES_BASE, 2);
++  assert.equal(MODULO_MULTI_SEDE, 'MULTI_SEDE_PREMIUM');
++  for (const m of CATALOGO) assert.ok(m.codigo.length <= 30, `${m.codigo} cabe en VARCHAR(30)`);
++});
++
++test('008: cada módulo del catálogo tiene su código en alguna migración (003 o 008) con el mismo precio', () => {
++  const todas = fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((f) => f.endsWith('.sql'))
++    .map((f) => fs.readFileSync(path.join(RAIZ, 'database', 'migrations', f), 'utf8')).join('\n');
++  for (const m of CATALOGO) {
++    const fila = new RegExp(`\\('${m.codigo}',[\\s\\S]*?([0-9]+\\.[0-9]{2})\\)`).exec(todas);
++    assert.ok(fila, `${m.codigo} sin INSERT en las migraciones`);
++    assert.equal(Number(fila[1]), m.precioUsd, `${m.codigo}: precio del catálogo = precio sembrado`);
++  }
++});
++
++test('errorHandler: SQLSTATE BM403 → 403 MODULO_PREMIUM_DESHABILITADO con el detalle JSON del trigger', () => {
++  const err = Object.assign(new Error('MODULO_PREMIUM_DESHABILITADO'), {
++    name: 'error', severity: 'ERROR', code: 'BM403',
++    detail: JSON.stringify({ modulo: 'MULTI_SEDE_PREMIUM', nombre: 'Expansión Multi-Sede Avanzada (3+ Sedes)', precio_usd: 50, limite_sedes_base: 2 }),
++  });
++  const r = normalizar(err);
++  assert.deepEqual([r.status, r.codigo, r.mensaje], [403, 'MODULO_PREMIUM_DESHABILITADO', 'Módulo Premium Deshabilitado']);
++  assert.deepEqual(r.detalles, { modulo: 'MULTI_SEDE_PREMIUM', nombre: 'Expansión Multi-Sede Avanzada (3+ Sedes)', precio_usd: 50, limite_sedes_base: 2 });
++});
++
++test('errorHandler: BM403 con detail ausente, no-JSON o de otro tipo JSON no revienta y conserva los datos por defecto', () => {
++  for (const detail of [undefined, '', 'no es json {', '[1,2]', 'null', '42']) {
++    const r = normalizar(Object.assign(new Error('x'), { name: 'error', severity: 'ERROR', code: 'BM403', detail }));
++    assert.equal(r.status, 403);
++    assert.equal(r.codigo, 'MODULO_PREMIUM_DESHABILITADO');
++    assert.deepEqual(r.detalles, { modulo: 'MULTI_SEDE_PREMIUM', limite_sedes_base: 2 }, `detail=${JSON.stringify(detail)}`);
++  }
++});
++
++test('008: PostgreSQL puro — sin residuos de MSSQL (N\'…\', dbo., GETDATE, IDENTITY, TOP, @@), idempotente y con search_path fijo', () => {
++  const t = sinComentarios(sql008);
++  assert.ok(!/\bN'/.test(t), "sin prefijo N'…' de MSSQL");
++  assert.ok(!/\bdbo\.|GETDATE|\bIDENTITY\b|\bTOP\s*\(?\d|@@|\bNVARCHAR\b|\bSCOPE_IDENTITY\b|\bIF\s+NOT\s+EXISTS\s*\(\s*SELECT\s+\*\s+FROM\s+sys\./i.test(t));
++  assert.match(t, /ON CONFLICT \(codigo\) DO NOTHING/);
++  assert.match(t, /CREATE OR REPLACE FUNCTION fn_limitar_sedes_base\(\)/);
++  assert.match(t, /SET search_path = public, pg_temp/);
++  assert.match(t, /REVOKE ALL ON FUNCTION fn_limitar_sedes_base\(\) FROM PUBLIC/);
++  assert.match(t, /DROP TRIGGER IF EXISTS trg_sedes_limite_base ON sedes;\s*CREATE TRIGGER trg_sedes_limite_base BEFORE INSERT ON sedes/);
++  assert.match(t, /pg_advisory_xact_lock\(/, 'serializa las altas de sedes');
++  assert.match(t, /ERRCODE = 'BM403'/);
++});
++
++test('sedes.service: comprueba el cupo con el módulo fresco y usa marcadores posicionales', () => {
++  const t = sinComentarios(fs.readFileSync(path.join(RAIZ, 'services', 'sedes.service.js'), 'utf8'));
++  assert.match(t, /guard\.evaluar\(MODULO_MULTI_SEDE, \{ fresco: true \}\)/);
++  assert.match(t, /SELECT 1 AS x FROM sedes WHERE nombre = \$1/);
++});
++
++test('routes: la generación masiva de mensualidades exige FACTURACION_MASIVA', () => {
++  const rutas = sinComentarios(fs.readFileSync(path.join(RAIZ, 'routes', 'index.js'), 'utf8'));
++  assert.match(rutas, /api\.post\('\/facturacion\/cuotas\/generar-mensualidades', soloAdmin, guard\.requireModulo\('FACTURACION_MASIVA'\), facturacion\.generarMensualidades\)/);
++});

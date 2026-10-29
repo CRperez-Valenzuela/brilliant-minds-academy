@@ -1,5 +1,6 @@
 'use strict';
 const { AppError } = require('../errors/AppError');
+const { TOOLTIP_BLOQUEADO, MODULO_MULTI_SEDE, LIMITE_SEDES_BASE } = require('../modules/premium/catalogo');
 
 /** Mensajes amigables por nombre de índice/constraint único violado (PostgreSQL SQLSTATE 23505; el nombre llega en `err.constraint`). */
 const UNICOS = {
@@ -23,10 +24,26 @@ const esErrorPg = (err) => Boolean(err) && typeof err.code === 'string' && /^[0-
 const NO_DISPONIBLE = { status: 503, codigo: 'BASE_DATOS_NO_DISPONIBLE', mensaje: 'La base de datos no está disponible. Intenta más tarde.', headers: { 'Retry-After': '10' } };
 const REINTENTAR = { status: 503, codigo: 'REINTENTAR', mensaje: 'Conflicto temporal en la base de datos. Intenta de nuevo.', headers: { 'Retry-After': '2' } };
 
+/**
+ * SQLSTATE propio 'BM403' (trigger trg_sedes_limite_base, migración 008): la oferta base admite 2 sedes y MULTI_SEDE_PREMIUM no está activo.
+ * `detail` trae un JSON {modulo,nombre,precio_usd,limite_sedes_base}; si no se puede leer se responde igual con los datos del catálogo.
+ */
+function moduloPremiumDesdeTrigger(err) {
+  let detalles = { modulo: MODULO_MULTI_SEDE, limite_sedes_base: LIMITE_SEDES_BASE };
+  try {
+    const crudo = JSON.parse(String(err.detail ?? ''));
+    if (crudo !== null && typeof crudo === 'object' && !Array.isArray(crudo)) detalles = { ...detalles, ...crudo };
+  } catch {
+    /* detail ausente o no es JSON: se conservan los valores por defecto */
+  }
+  return { status: 403, codigo: 'MODULO_PREMIUM_DESHABILITADO', mensaje: TOOLTIP_BLOQUEADO, detalles };
+}
+
 /** Traduce un error de `pg` (SQLSTATE) o de red a la respuesta JSON. Devuelve null si no es un error de base de datos. */
 function normalizarBaseDatos(err) {
   if (esErrorPg(err)) {
     const c = err.code;
+    if (c === 'BM403') return moduloPremiumDesdeTrigger(err);
     if (c === '23505') {
       const [codigo, mensaje] = UNICOS[err.constraint] || ['REGISTRO_DUPLICADO', 'Ya existe un registro con esos datos.'];
       return { status: 409, codigo, mensaje };

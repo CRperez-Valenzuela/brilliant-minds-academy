@@ -17,6 +17,7 @@ const cfg = require('../controllers/configuracion.controller');
 const sedes = require('../controllers/sedes.controller');
 const exportaciones = require('../controllers/exportaciones.controller');
 const premium = require('../modules/premium/premium.routes');
+const { guard } = require('../modules/premium/guard');
 
 const soloAdmin = requireRol('admin');
 // Datos SIN sede (personal, horas, nómina) o ajustes globales: solo admin con acceso consolidado (sede_id NULL).
@@ -60,7 +61,8 @@ api.post('/estudiantes/:id/reactivar', crm.reactivar);
 api.get('/facturacion/tablero', facturacion.tablero);
 api.get('/facturacion/cuotas', facturacion.listarCuotas);
 api.post('/facturacion/cuotas', facturacion.crearCuota);
-api.post('/facturacion/cuotas/generar-mensualidades', soloAdmin, facturacion.generarMensualidades);
+// Módulo premium FACTURACION_MASIVA (US$ 20): sin el módulo habilitado (o en prueba vigente) responde 403 MODULO_PREMIUM_DESHABILITADO.
+api.post('/facturacion/cuotas/generar-mensualidades', soloAdmin, guard.requireModulo('FACTURACION_MASIVA'), facturacion.generarMensualidades);
 api.get('/facturacion/auditoria', facturacion.auditoria);
 api.post('/facturacion/auditoria/:id/aprobar', facturacion.aprobar);
 api.post('/facturacion/auditoria/:id/rechazar', facturacion.rechazar);
