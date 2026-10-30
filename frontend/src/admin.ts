@@ -16,6 +16,8 @@ import { AVISO_PREMIUM, encabezadoVista as encabezado, enlazarPrueba, pantallaBl
 import { vistaEstudianteDetalle } from './estudiantes-detalle';
 import { vistaFacturacionMasiva } from './facturacion-masiva';
 import { vistaConfiguracion } from './configuracion';
+import { vistaSedesGestion } from './sedes-gestion';
+import { vistaInvitaciones } from './invitaciones-modulo';
 import { montarAnimacionLogin } from './login-animation';
 import type {
   AlertaWhatsapp,
@@ -58,6 +60,10 @@ const VISTAS: readonly DefVista[] = [
   { id: 'dashboard', titulo: 'Dashboard', icono: 'home', soloAdmin: false },
   { id: 'estudiantes', titulo: 'Estudiantes', icono: 'users', soloAdmin: false },
   { id: 'auditoria', titulo: 'Auditoría de referencias', icono: 'inbox', soloAdmin: false },
+  // Visibles para todos los roles: «Sedes» muestra «Sección Restringida» a quien no tiene acceso consolidado (sin peticiones);
+  // «Invitaciones» la usa también la secretaria, limitada a su sede.
+  { id: 'sedes', titulo: 'Sedes', icono: 'building', soloAdmin: false },
+  { id: 'invitaciones', titulo: 'Invitaciones', icono: 'link', soloAdmin: false },
   { id: 'contabilidad', titulo: 'Contabilidad', icono: 'book', soloAdmin: true },
   { id: 'configuracion', titulo: 'Configuración de cobro', icono: 'wallet', soloAdmin: true },
 ];
@@ -348,7 +354,23 @@ async function navegar(id: string): Promise<void> {
     else if (id.startsWith('estudiante:')) await vistaDetalle(ctx, id.slice('estudiante:'.length));
     else if (id === 'estudiantes') await vistaEstudiantes(ctx);
     else if (id === 'auditoria') await vistaAuditoria(ctx);
-    else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
+    else if (id === 'sedes') {
+      await vistaSedesGestion({
+        zona: ctx.zona,
+        vigente: ctx.vigente,
+        usuario: estado.usuario,
+        // 403 MODULO_PREMIUM_DESHABILITADO (3.ª sede sin el módulo): relee el catálogo y pinta la pantalla de cristal con el precio.
+        alBloquear: (d) => void bloquearModulo(ctx, d),
+        alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
+      });
+    } else if (id === 'invitaciones') {
+      await vistaInvitaciones({
+        zona: ctx.zona,
+        vigente: ctx.vigente,
+        usuario: estado.usuario,
+        alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
+      });
+    } else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
     else if (id === 'configuracion' && esAdmin()) await vistaConfiguracion({ zona: ctx.zona, vigente: ctx.vigente, usuario: estado.usuario });
     else await vistaDashboard(ctx);
   } catch (e: unknown) {
@@ -844,10 +866,14 @@ function vistaPremium(ctx: Contexto, codigo: string): void {
     <div class="${CLS.tarjeta} flex flex-col gap-4 p-6">
       ${hasta ? aviso('warn', `Prueba gratuita vigente hasta el ${fechaHora(hasta)}. Después de esa fecha el módulo se bloquea automáticamente.`, 'Estás en periodo de prueba') : null}
       ${m.codigo === 'MULTI_SEDE_PREMIUM'
-        ? aviso('info', 'El Core Base incluye dos sedes (Acarigua y Barquisimeto). Con este módulo el servidor admite la tercera sede y las siguientes (alta en POST /api/sedes, acceso consolidado).', 'Expansión multi-sede habilitada')
+        ? html`${aviso('info', 'El Core Base incluye dos sedes (Acarigua y Barquisimeto). Con este módulo puedes registrar la tercera sede y las siguientes desde la sección Sedes.', 'Expansión multi-sede habilitada')}
+          ${esConsolidado()
+            ? html`<div><button type="button" id="ir-sedes" class="${boton(CLS.btnPrimario, 'min-h-10')}">${icono('building', 'h-4 w-4')}<span>Ir a Sedes</span></button></div>`
+            : null}`
         : aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}
     </div>`,
   );
+  buscar('#ir-sedes', HTMLButtonElement, ctx.zona)?.addEventListener('click', () => void navegar('sedes'));
 }
 
 /** Admin sin sede asignada (SuperAdmin): único perfil que contrata/prueba módulos de la academia. */

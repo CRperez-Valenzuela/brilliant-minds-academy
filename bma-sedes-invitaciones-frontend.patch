@@ -1,0 +1,1011 @@
+From 6fa813e25281542f1ba0ecb5de12fe276b871b84 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Fri, 30 Oct 2026 00:13:48 -0400
+Subject: [PATCH] feat(frontend): gestor de sedes y generador de invitaciones
+ con nivel blindado
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Vistas «Sedes» e «Invitaciones» del AdminDashboard (TypeScript estricto, sin any):
+- sedes-gestion.ts: guarda alcanceDe() fail-closed, cuadrícula de sedes, alta y
+  candado premium ante 403 MODULO_PREMIUM_DESHABILITADO (trigger BM403).
+- invitaciones-modulo.ts: formulario con sede filtrada por alcance, tarjeta de
+  éxito con «Copiar enlace», lista paginada con estados y revocación.
+- lib/alcance.ts y lib/formulario.ts compartidos; tipos, iconos y rutas en admin.ts.
+Backend sin cambios (PostgreSQL/Supabase, parámetros posicionales).
+---
+ CAMBIOS_BMA_SEDES_INVITACIONES_FRONTEND.md |  68 +++
+ frontend/src/admin.ts                      |  30 +-
+ frontend/src/invitaciones-modulo.ts        | 483 +++++++++++++++++++++
+ frontend/src/lib/alcance.ts                |  22 +
+ frontend/src/lib/formulario.ts             |  44 ++
+ frontend/src/lib/icons.ts                  |   2 +
+ frontend/src/sedes-gestion.ts              | 175 ++++++++
+ frontend/src/types/index.ts                |  58 ++-
+ 8 files changed, 879 insertions(+), 3 deletions(-)
+ create mode 100644 CAMBIOS_BMA_SEDES_INVITACIONES_FRONTEND.md
+ create mode 100644 frontend/src/invitaciones-modulo.ts
+ create mode 100644 frontend/src/lib/alcance.ts
+ create mode 100644 frontend/src/lib/formulario.ts
+ create mode 100644 frontend/src/sedes-gestion.ts
+
+diff --git a/CAMBIOS_BMA_SEDES_INVITACIONES_FRONTEND.md b/CAMBIOS_BMA_SEDES_INVITACIONES_FRONTEND.md
+new file mode 100644
+index 0000000..39a37c1
+--- /dev/null
++++ b/CAMBIOS_BMA_SEDES_INVITACIONES_FRONTEND.md
+@@ -0,0 +1,68 @@
++# CAMBIOS_BMA_SEDES_INVITACIONES_FRONTEND — Gestor de Sedes y Generador de Invitaciones con nivel blindado (Vite + TypeScript + Tailwind)
++
++**Proyecto:** Brilliant Minds Academy · **Base:** `origin/development` @ `dc69b72` · **Agente:** Ingeniero Frontend Senior, Astra Digital Solutions
++**Motor de datos:** PostgreSQL 15+ / Supabase. **El backend NO se tocó**: esta entrega solo consume `/api/sedes` e `/api/invitaciones`, que ya usan parámetros posicionales `$1…$n` y errores JSON estables. Sin residuos de MSSQL.
++
++## Verificación realizada (y sus límites)
++
++| Verificación | Resultado |
++|---|---|
++| `tsc` 7.0.2 sobre `frontend/src/**` con TODAS las reglas estrictas de `tsconfig.json` (`strict`, `noUncheckedIndexedAccess`, `exactOptionalPropertyTypes`, `noUnused*`, `verbatimModuleSyntax`…) | 0 errores (línea base previa a los cambios: 0 errores) |
++| Uso de `any` en los archivos nuevos y modificados | 0 |
++| Comportamiento en **Chromium real** (bundle con esbuild + API simulada, 40 casos) | **40/40** |
++| Residuos MSSQL (`dbo.`, `GETDATE`, `ISNULL(`, `@p1`, `TOP (`…) en frontend y en `services/sedes`, `services/invitaciones`, `controllers/sedes`, `utils/alcance`, `errorHandler`, migraciones 006–008 | 0 |
++| Escala de espaciado (solo 1·2·3·4·6·8·12) y `fetch` crudo (todo pasa por `bmaClient`) | 0 infracciones |
++
++Los 40 casos de navegador cubren: bloqueo «Sección Restringida» **sin ninguna petición** (secretaria con sede, secretaria sin sede, admin atado a sede); cuadrícula de sedes y estado «Operativa»; nombre vacío sin POST; nombre recortado; 409 `SEDE_DUPLICADA` junto al campo; **403 `MODULO_PREMIUM_DESHABILITADO`** (con detalle del servidor y sin él → US$ 50); recarga tras alta; XSS en nombres (no se ejecuta); selector solo con sedes activas; validación de días (`0`, `61`, `abc`, `7.5`, `-3`, vacío); «Otro…»; POST `{nivel_asignado, dias, sede_id}`; tarjeta de éxito con el `enlace`; **«Copiar enlace» escribe en el portapapeles**; recarga de la lista; filtro `?estado=`; cancelar revocación no envía nada; revocar → `POST /:id/revocar`; 409 `INVITACION_NO_REVOCABLE`; secretaria **sin `sede_id` en el POST**; 401 propagado al panel.
++
++**Lo que NO se pudo comprobar aquí**
++- `npm ci` falló en este entorno (el CLI de npm se cerró con error), por lo que **`vite build` y la compilación de Tailwind no se ejecutaron**. El tipado se verificó con un `tsc` global y un tsconfig temporal (`types: []`, sin `vite.config.ts`) que hereda las mismas reglas estrictas; el tsconfig temporal ya fue eliminado.
++- **Aspecto visual, contraste y objetivos táctiles de 40 px no se midieron** (no hay CSS compilado). Se aplicó `min-h-10` (Tailwind ≥ 3.4, el proyecto usa ^3.4.14) a botones, selects e inputs; conviene revisarlo con los ojos tras el build.
++- El cableado de `admin.ts` (menú, `navegar`, botón «Ir a Sedes») se **tipó pero no se ejecutó en navegador** (importa el CSS de Vite). Las dos vistas sí se ejecutaron aisladas.
++- **`public/` NO se regeneró** (salida de Vite con hashes). Ejecuta `npm run frontend:install && npm run frontend:build`.
++- Los tests del backend no se ejecutaron (sin dependencias instaladas); no hay cambios de backend.
++
++## Decisiones y desviaciones respecto al enunciado
++
++| Enunciado | Qué se hizo y por qué |
++|---|---|
++| Helper `alcanceDe()` «ya existente» | Existía solo en el backend (`utils/alcance.js`). Se creó su espejo **fail-closed** en `lib/alcance.ts` (`consolidado` / `sede` / `denegado`). Es la cara visible de la regla; el servidor sigue siendo la fuente de verdad. |
++| Bloqueo solo para `rol = secretaria` | La regla real del servidor es **«solo consolidado»** (`requireConsolidado` en `POST /api/sedes`). Por eso también un admin atado a una sede ve «Sección Restringida». |
++| Precio US$ 50.00 «de `lib/candado.ts`» | `lib/candado.ts` **no guarda precios**: recibe un `DatosCandado`. El precio vigente lo manda el servidor (detalle del 403 y catálogo `/api/premium/modulos`). `sedes-gestion.ts` solo tiene una constante de respaldo (50) por si el detalle del trigger llega ilegible. |
++| Error `BM403` | `BM403` es el SQLSTATE del trigger `trg_sedes_limite_base`; `errorHandler` lo traduce a `403 MODULO_PREMIUM_DESHABILITADO`. El cliente detecta ese código (y, por defensa, `BM403`). El candado se pinta reutilizando `bloquearModulo` de `admin.ts`: relee el catálogo, marca el candado en el menú y muestra la pantalla de cristal con la prueba gratuita si aún aplica. |
++| «Token SHA-256 único» | El servidor entrega un token aleatorio de 48 hex (192 bits) y guarda **solo su SHA-256**. La UI muestra el `enlace`; se avisa que se ve una sola vez. |
++| Estados «Pendiente / Usada / Vencida» | Se añadió **«Revocada»** (el servidor la devuelve) y un filtro por estado. |
++| Selector de nivel | No existe lista de grados en el código (el grado es texto libre). `NIVELES` en `invitaciones-modulo.ts` es una **lista base a ajustar** + opción «Otro…». |
++| Revocar «de forma atómica» | La atomicidad la da el servidor (`UPDATE … WHERE estado = 'Pendiente'`). El cliente bloquea el botón mientras viaja la petición, pide confirmación y, ante `409 INVITACION_NO_REVOCABLE`, avisa y refresca la lista. |
++| Menú | «Sedes» e «Invitaciones» son visibles para ambos roles (la secretaria necesita Invitaciones; Sedes le muestra el bloqueo). |
++| Texto del módulo multi-sede habilitado | Hablaba de «POST /api/sedes» a usuarios finales; se reemplazó por un aviso claro y un botón **«Ir a Sedes»** (solo consolidado). |
++
++## Archivos creados
++
++| Archivo | Para qué |
++|---|---|
++| `frontend/src/sedes-gestion.ts` | Vista «Sedes»: guarda de alcance, cuadrícula de tarjetas, alta con validación, detección del candado premium (`detallePremiumDe`). |
++| `frontend/src/invitaciones-modulo.ts` | Vista «Invitaciones»: formulario (sede filtrada por alcance, nivel, días), tarjeta de éxito con «Copiar enlace», lista cronológica paginada con filtro y revocación con confirmación. |
++| `frontend/src/lib/alcance.ts` | `alcanceDe(usuario)` fail-closed, espejo del backend. |
++| `frontend/src/lib/formulario.ts` | `pintarErrores`, `mostrarMensaje`, `erroresDeCampos`, `valorDe` (compartidos por ambas vistas; mensajes con `textContent`). |
++| `CAMBIOS_BMA_SEDES_INVITACIONES_FRONTEND.md` | Este resumen. |
++| `bma-sedes-invitaciones-frontend.patch` | Parche `git format-patch` con todo lo anterior. |
++
++## Archivos modificados
++
++| Archivo | Cambio |
++|---|---|
++| `frontend/src/admin.ts` | Importa las dos vistas; añade «Sedes» e «Invitaciones» a `VISTAS`; ramas en `navegar()`; botón «Ir a Sedes» y texto claro en el módulo multi-sede habilitado. |
++| `frontend/src/types/index.ts` | `SedeResumen` (+ `creado_en?`), `InvitacionInscripcion`, `EstadoInvitacion`, `CuerpoCrearSede`, `RespuestaCrearSede`, `CuerpoCrearInvitacion`, `RespuestaCrearInvitacion`, `RespuestaRevocarInvitacion`; `VistaAdmin` suma `'sedes' \| 'invitaciones'`. |
++| `frontend/src/lib/icons.ts` | Iconos `link` y `building` (SVG puro, mismo trazo). |
++
++## Contratos consumidos (sin cambios en el servidor)
++
++- `GET /api/sedes` → `SedeResumen[]` (un usuario de sede recibe solo la suya) · `POST /api/sedes { nombre }` → `201 { id, nombre }` · errores `409 SEDE_DUPLICADA`, `403 MODULO_PREMIUM_DESHABILITADO`.
++- `POST /api/invitaciones { nivel_asignado, dias, sede_id? }` → `201 { id, sede_id, nivel_asignado, expira_en, token, enlace }` · `GET /api/invitaciones?estado&pagina&limite` → lista paginada · `POST /api/invitaciones/:id/revocar` → `{ id, estado: 'Revocada' }` · errores `403 SEDE_NO_ASIGNADA`, `422 SEDE_INACTIVA`, `409 INVITACION_NO_REVOCABLE`.
++
++## Pendiente / siguientes pasos
++
++1. `npm run frontend:install && npm run frontend:build` y revisar a ojo contraste, 40 px y responsive.
++2. Ajustar `NIVELES` a los niveles reales de la academia.
++3. Fuera de alcance (los endpoints ya existen): botones de activar/desactivar sede y «compartir por WhatsApp» desde la tarjeta de éxito.
+diff --git a/frontend/src/admin.ts b/frontend/src/admin.ts
+index 4f7377d..cb80b49 100644
+--- a/frontend/src/admin.ts
++++ b/frontend/src/admin.ts
+@@ -16,6 +16,8 @@ import { AVISO_PREMIUM, encabezadoVista as encabezado, enlazarPrueba, pantallaBl
+ import { vistaEstudianteDetalle } from './estudiantes-detalle';
+ import { vistaFacturacionMasiva } from './facturacion-masiva';
+ import { vistaConfiguracion } from './configuracion';
++import { vistaSedesGestion } from './sedes-gestion';
++import { vistaInvitaciones } from './invitaciones-modulo';
+ import { montarAnimacionLogin } from './login-animation';
+ import type {
+   AlertaWhatsapp,
+@@ -58,6 +60,10 @@ const VISTAS: readonly DefVista[] = [
+   { id: 'dashboard', titulo: 'Dashboard', icono: 'home', soloAdmin: false },
+   { id: 'estudiantes', titulo: 'Estudiantes', icono: 'users', soloAdmin: false },
+   { id: 'auditoria', titulo: 'Auditoría de referencias', icono: 'inbox', soloAdmin: false },
++  // Visibles para todos los roles: «Sedes» muestra «Sección Restringida» a quien no tiene acceso consolidado (sin peticiones);
++  // «Invitaciones» la usa también la secretaria, limitada a su sede.
++  { id: 'sedes', titulo: 'Sedes', icono: 'building', soloAdmin: false },
++  { id: 'invitaciones', titulo: 'Invitaciones', icono: 'link', soloAdmin: false },
+   { id: 'contabilidad', titulo: 'Contabilidad', icono: 'book', soloAdmin: true },
+   { id: 'configuracion', titulo: 'Configuración de cobro', icono: 'wallet', soloAdmin: true },
+ ];
+@@ -348,7 +354,23 @@ async function navegar(id: string): Promise<void> {
+     else if (id.startsWith('estudiante:')) await vistaDetalle(ctx, id.slice('estudiante:'.length));
+     else if (id === 'estudiantes') await vistaEstudiantes(ctx);
+     else if (id === 'auditoria') await vistaAuditoria(ctx);
+-    else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
++    else if (id === 'sedes') {
++      await vistaSedesGestion({
++        zona: ctx.zona,
++        vigente: ctx.vigente,
++        usuario: estado.usuario,
++        // 403 MODULO_PREMIUM_DESHABILITADO (3.ª sede sin el módulo): relee el catálogo y pinta la pantalla de cristal con el precio.
++        alBloquear: (d) => void bloquearModulo(ctx, d),
++        alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
++      });
++    } else if (id === 'invitaciones') {
++      await vistaInvitaciones({
++        zona: ctx.zona,
++        vigente: ctx.vigente,
++        usuario: estado.usuario,
++        alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
++      });
++    } else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
+     else if (id === 'configuracion' && esAdmin()) await vistaConfiguracion({ zona: ctx.zona, vigente: ctx.vigente, usuario: estado.usuario });
+     else await vistaDashboard(ctx);
+   } catch (e: unknown) {
+@@ -844,10 +866,14 @@ function vistaPremium(ctx: Contexto, codigo: string): void {
+     <div class="${CLS.tarjeta} flex flex-col gap-4 p-6">
+       ${hasta ? aviso('warn', `Prueba gratuita vigente hasta el ${fechaHora(hasta)}. Después de esa fecha el módulo se bloquea automáticamente.`, 'Estás en periodo de prueba') : null}
+       ${m.codigo === 'MULTI_SEDE_PREMIUM'
+-        ? aviso('info', 'El Core Base incluye dos sedes (Acarigua y Barquisimeto). Con este módulo el servidor admite la tercera sede y las siguientes (alta en POST /api/sedes, acceso consolidado).', 'Expansión multi-sede habilitada')
++        ? html`${aviso('info', 'El Core Base incluye dos sedes (Acarigua y Barquisimeto). Con este módulo puedes registrar la tercera sede y las siguientes desde la sección Sedes.', 'Expansión multi-sede habilitada')}
++          ${esConsolidado()
++            ? html`<div><button type="button" id="ir-sedes" class="${boton(CLS.btnPrimario, 'min-h-10')}">${icono('building', 'h-4 w-4')}<span>Ir a Sedes</span></button></div>`
++            : null}`
+         : aviso('info', 'El módulo está habilitado para esta academia. Su lógica se publicará en la Fase 2 (ruta reservada en el servidor).', 'Módulo habilitado')}
+     </div>`,
+   );
++  buscar('#ir-sedes', HTMLButtonElement, ctx.zona)?.addEventListener('click', () => void navegar('sedes'));
+ }
+ 
+ /** Admin sin sede asignada (SuperAdmin): único perfil que contrata/prueba módulos de la academia. */
+diff --git a/frontend/src/invitaciones-modulo.ts b/frontend/src/invitaciones-modulo.ts
+new file mode 100644
+index 0000000..c152a90
+--- /dev/null
++++ b/frontend/src/invitaciones-modulo.ts
+@@ -0,0 +1,483 @@
++/**
++ * Vista «Invitaciones» — enlaces únicos de inscripción con NIVEL y SEDE blindados.
++ *  - Formulario → POST /api/invitaciones { nivel_asignado, dias, sede_id? }. La sede se filtra por alcance (lib/alcance.ts):
++ *      · consolidado (admin sin sede) → selector con las sedes activas; `sede_id` es obligatorio;
++ *      · usuario de sede (secretaria)  → sede fija (solo lectura) y NO se envía `sede_id`: el servidor usa la de su sesión.
++ *    Sin sede asignada la vista muestra «Sección Restringida» y no dispara peticiones (el servidor respondería 403 SEDE_NO_ASIGNADA).
++ *  - Respuesta 201 { id, sede_id, nivel_asignado, expira_en, token, enlace }: el `token` (48 hex) solo existe en esa respuesta, en la base
++ *    queda su SHA-256. Se muestra una tarjeta de éxito con el `enlace` y «Copiar enlace» (navigator.clipboard) para pegarlo en WhatsApp.
++ *  - GET /api/invitaciones (paginado, filtro por estado) → lista cronológica con estado efectivo: Pendiente · Usada · Vencida · Revocada.
++ *  - «Revocar» → POST /api/invitaciones/:id/revocar. El servidor lo resuelve con un UPDATE condicionado a estado = 'Pendiente' (atómico):
++ *    si otra persona la revocó o el representante la usó en ese instante responde 409 INVITACION_NO_REVOCABLE y la lista se refresca.
++ *
++ * El servidor es la fuente de verdad: ignora cualquier grado enviado por el formulario público y usa `nivel_asignado`.
++ * Todo texto dinámico pasa por la etiqueta `html` (escape XSS automático); los errores se escriben con `textContent`.
++ */
++import { bma, BmaApiError, BmaSesionExpiradaError, mensajeDeError } from './api/bmaClient';
++import { html, montar, raw, type HtmlSeguro } from './lib/html';
++import { icono } from './lib/icons';
++import { fechaHora } from './lib/format';
++import { alcanceDe, type AlcanceUsuario } from './lib/alcance';
++import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, type Tono } from './lib/ui';
++import { encabezadoVista } from './lib/candado';
++import { erroresDeCampos, mostrarMensaje, pintarErrores, valorDe } from './lib/formulario';
++import type {
++  CuerpoCrearInvitacion,
++  EstadoInvitacion,
++  InvitacionInscripcion,
++  Paginacion,
++  RespuestaCrearInvitacion,
++  RespuestaRevocarInvitacion,
++  SedeResumen,
++  Usuario,
++} from './types/index';
++
++export interface ContextoInvitaciones {
++  readonly zona: HTMLElement;
++  readonly vigente: () => boolean;
++  readonly usuario: Usuario | null;
++  readonly alSesionExpirada: () => void;
++}
++
++// ───────────────────────── Constantes ─────────────────────────
++
++export const DIAS_DEFECTO = 7;
++export const DIAS_MIN = 1;
++/** Tope del servidor (`dias` ≤ 60 en controllers/sedes.controller.js). */
++export const DIAS_MAX = 60;
++const MAX_NIVEL = 60;
++const LIMITE_PAGINA = 10;
++const OPCION_OTRO = '__otro__';
++
++/**
++ * Niveles ofrecidos en el selector. Es una lista base: ajústala a los niveles reales de la academia; «Otro…» permite escribir uno distinto.
++ * El valor elegido viaja como `nivel_asignado` y se convierte en el «Grado a cursar» bloqueado de la planilla pública.
++ */
++export const NIVELES: readonly string[] = [
++  'Maternal',
++  'Preescolar 1.er nivel',
++  'Preescolar 2.º nivel',
++  'Preescolar 3.er nivel',
++  '1.er grado',
++  '2.º grado',
++  '3.er grado',
++  '4.º grado',
++  '5.º grado',
++  '6.º grado',
++  '1.er año',
++  '2.º año',
++  '3.er año',
++  '4.º año',
++  '5.º año',
++];
++
++const FILTROS: readonly ('' | EstadoInvitacion)[] = ['', 'Pendiente', 'Usada', 'Vencida', 'Revocada'];
++
++const TONO_ESTADO: Readonly<Record<EstadoInvitacion, Tono>> = {
++  Pendiente: 'info',
++  Usada: 'ok',
++  Vencida: 'warn',
++  Revocada: 'bad',
++};
++
++// ───────────────────────── Validación (pura, sin DOM) ─────────────────────────
++
++export interface EntradaInvitacion {
++  readonly sede: string;
++  readonly nivel: string;
++  readonly nivelOtro: string;
++  readonly dias: string;
++}
++
++export interface ResultadoInvitacion {
++  readonly errores: Readonly<Record<string, string>>;
++  readonly cuerpo: CuerpoCrearInvitacion | null;
++}
++
++/** Misma regla que el servidor: nivel 1–60, días entero 1–60, `sede_id` obligatorio solo para el acceso consolidado. */
++export function validarInvitacion(e: EntradaInvitacion, alcance: AlcanceUsuario): ResultadoInvitacion {
++  const errores: Record<string, string> = {};
++
++  let sedeId: number | null = null;
++  if (alcance.tipo === 'consolidado') {
++    const n = Number(e.sede);
++    if (e.sede === '' || !Number.isInteger(n) || n <= 0) errores['sede_id'] = 'Elige la sede a la que pertenecerá el estudiante.';
++    else sedeId = n;
++  }
++
++  let nivel = '';
++  if (e.nivel === OPCION_OTRO) {
++    nivel = e.nivelOtro.trim().replace(/\s+/g, ' ');
++    if (nivel === '') errores['nivel_otro'] = 'Escribe el nivel o grado.';
++    else if (nivel.length > MAX_NIVEL) errores['nivel_otro'] = `El nivel admite hasta ${MAX_NIVEL} caracteres.`;
++  } else if (NIVELES.includes(e.nivel)) {
++    nivel = e.nivel;
++  } else {
++    errores['nivel_asignado'] = 'Elige el nivel o grado asignado.';
++  }
++
++  const diasTexto = e.dias.trim();
++  const dias = /^\d{1,3}$/.test(diasTexto) ? Number(diasTexto) : Number.NaN;
++  if (!Number.isInteger(dias) || dias < DIAS_MIN || dias > DIAS_MAX) {
++    errores['dias'] = `Escribe un número entero de días entre ${DIAS_MIN} y ${DIAS_MAX}.`;
++  }
++
++  if (Object.keys(errores).length > 0) return { errores, cuerpo: null };
++  return { errores, cuerpo: sedeId === null ? { nivel_asignado: nivel, dias } : { nivel_asignado: nivel, dias, sede_id: sedeId } };
++}
++
++// ───────────────────────── Portapapeles ─────────────────────────
++
++/**
++ * Copia con `navigator.clipboard` (requiere contexto seguro: HTTPS o localhost). Devuelve `false` si el navegador lo impide;
++ * en ese caso deja el texto seleccionado en `entrada` para que la persona pulse Ctrl+C.
++ */
++export async function copiarEnlace(texto: string, entrada: HTMLInputElement): Promise<boolean> {
++  try {
++    if (window.isSecureContext && typeof navigator.clipboard?.writeText === 'function') {
++      await navigator.clipboard.writeText(texto);
++      return true;
++    }
++  } catch {
++    /* permiso denegado o documento sin foco: se usa la selección manual */
++  }
++  entrada.focus();
++  entrada.select();
++  entrada.setSelectionRange(0, texto.length);
++  return false;
++}
++
++// ───────────────────────── Interfaz ─────────────────────────
++
++const CLASE_SOLO_LECTURA = 'flex min-h-10 items-center gap-2 rounded-lg border border-slate-200 bg-slate-50 px-3 text-sm font-medium text-slate-800';
++
++function restringidaHtml(): HtmlSeguro {
++  return html`${encabezadoVista('Invitaciones', 'Enlaces únicos de inscripción para los representantes')}
++    <div class="max-w-2xl">${aviso('warn', 'Tu usuario no tiene una sede asignada, así que no puede emitir invitaciones. Pide a un administrador que revise tu cuenta.', 'Sección Restringida')}</div>`;
++}
++
++function campoSedeHtml(alcance: AlcanceUsuario, sedes: readonly SedeResumen[]): HtmlSeguro {
++  if (alcance.tipo === 'consolidado') {
++    const activas = sedes.filter((s) => s.activa);
++    const unica = activas.length === 1 ? activas[0] : undefined;
++    return html`<div>
++      <label for="f-inv-sede" class="${CLS.etiqueta}">Sede destino <span class="text-red-800" aria-hidden="true">*</span></label>
++      <select id="f-inv-sede" name="sede_id" required aria-describedby="e-inv-sede" class="${CLS.input} min-h-10">
++        <option value="">Elige una sede…</option>
++        ${activas.map((s) => html`<option value="${s.id}" ${s.id === unica?.id ? raw('selected') : null}>${s.nombre}</option>`)}
++      </select>
++      <p id="e-inv-sede" data-error="sede_id" role="alert" hidden class="${CLS.errorCampo}"></p>
++    </div>`;
++  }
++  const propia = sedes.find((s) => alcance.tipo === 'sede' && s.id === alcance.sedeId);
++  return html`<div>
++    <span class="${CLS.etiqueta}">Sede destino</span>
++    <p class="${CLASE_SOLO_LECTURA}">${icono('building', 'h-4 w-4')}<span class="min-w-0 break-words">${propia?.nombre ?? 'Tu sede'}</span></p>
++    <p class="${CLS.ayuda}">Las invitaciones se emiten siempre para tu sede.</p>
++  </div>`;
++}
++
++function formularioHtml(alcance: AlcanceUsuario, sedes: readonly SedeResumen[]): HtmlSeguro {
++  return html`<section class="${CLS.tarjetaCristal} p-6" aria-labelledby="t-nueva-inv">
++    <h2 id="t-nueva-inv" class="mb-1 flex items-center gap-2 text-base font-bold text-slate-900">${icono('link', 'h-5 w-5')}Nueva invitación</h2>
++    <p class="${CLS.ayuda} mb-4">El enlace es de un solo uso y fija la sede y el nivel: el representante no puede cambiarlos en la planilla.</p>
++    <form id="form-inv" novalidate class="grid gap-4 sm:grid-cols-2" aria-label="Emitir invitación">
++      ${campoSedeHtml(alcance, sedes)}
++      <div>
++        <label for="f-inv-nivel" class="${CLS.etiqueta}">Nivel / grado asignado <span class="text-red-800" aria-hidden="true">*</span></label>
++        <select id="f-inv-nivel" name="nivel_asignado" required aria-describedby="e-inv-nivel" class="${CLS.input} min-h-10">
++          <option value="">Elige un nivel…</option>
++          ${NIVELES.map((n) => html`<option value="${n}">${n}</option>`)}
++          <option value="${OPCION_OTRO}">Otro…</option>
++        </select>
++        <p id="e-inv-nivel" data-error="nivel_asignado" role="alert" hidden class="${CLS.errorCampo}"></p>
++        <div id="inv-nivel-otro" class="mt-2" hidden>
++          <label for="f-inv-otro" class="${CLS.etiqueta}">Escribe el nivel</label>
++          <input id="f-inv-otro" name="nivel_otro" type="text" maxlength="${MAX_NIVEL}" autocomplete="off" aria-describedby="e-inv-otro" class="${CLS.input} min-h-10">
++          <p id="e-inv-otro" data-error="nivel_otro" role="alert" hidden class="${CLS.errorCampo}"></p>
++        </div>
++      </div>
++      <div>
++        <label for="f-inv-dias" class="${CLS.etiqueta}">Días de vigencia <span class="text-red-800" aria-hidden="true">*</span></label>
++        <input id="f-inv-dias" name="dias" type="text" inputmode="numeric" required autocomplete="off" value="${DIAS_DEFECTO}" aria-describedby="e-inv-dias" class="${CLS.input} min-h-10">
++        <p class="${CLS.ayuda}">Entre ${DIAS_MIN} y ${DIAS_MAX} días. Por defecto ${DIAS_DEFECTO}.</p>
++        <p id="e-inv-dias" data-error="dias" role="alert" hidden class="${CLS.errorCampo}"></p>
++      </div>
++      <div class="flex items-end justify-end sm:col-span-2">
++        <button type="submit" class="${boton(CLS.btnPrimario, 'min-h-10')}">${icono('link', 'h-4 w-4')}<span>Generar enlace</span></button>
++      </div>
++    </form>
++    <div id="inv-resultado" class="mt-4" aria-live="polite"></div>
++  </section>`;
++}
++
++function tarjetaExitoHtml(r: RespuestaCrearInvitacion, nombreSede: string): HtmlSeguro {
++  return html`<section class="${CLS.tarjetaCristal} border-emerald-700/30 p-6" aria-labelledby="t-inv-ok">
++    <h2 id="t-inv-ok" class="flex items-center gap-2 text-base font-bold text-slate-900">${icono('check', 'h-5 w-5 text-emerald-700')}Invitación creada</h2>
++    <p class="${CLS.ayuda} mb-4">${nombreSede} · ${r.nivel_asignado} · vence el ${fechaHora(r.expira_en)} · un solo uso.</p>
++    <label for="inv-enlace" class="${CLS.etiqueta}">Enlace de inscripción</label>
++    <div class="flex flex-col gap-3 sm:flex-row">
++      <input id="inv-enlace" type="text" readonly value="${r.enlace}" class="${CLS.input} min-h-10 flex-1 font-mono text-xs">
++      <button type="button" id="inv-copiar" class="${boton(CLS.btnPrimario, 'min-h-10')}">${icono('copy', 'h-4 w-4')}<span>Copiar enlace</span></button>
++    </div>
++    <div class="mt-4">${aviso('warn', 'Por seguridad el enlace se muestra solo ahora: en el sistema queda únicamente su huella cifrada. Cópialo y envíalo al representante (por ejemplo, por WhatsApp). Si lo pierdes, revoca esta invitación y emite otra.', 'Cópialo ahora')}</div>
++  </section>`;
++}
++
++function filaHtml(i: InvitacionInscripcion): HtmlSeguro {
++  const cierre =
++    i.estado === 'Usada' && i.usada_en !== null
++      ? html`Usada el ${fechaHora(i.usada_en)}`
++      : html`Vence el ${fechaHora(i.expira_en)}`;
++  return html`<tr>
++    <td class="${CLS.td}">${i.sede}</td>
++    <td class="${CLS.td}">${i.nivel_asignado}</td>
++    <td class="${CLS.td}">${etiqueta(i.estado, TONO_ESTADO[i.estado])}</td>
++    <td class="${CLS.td} whitespace-nowrap">${fechaHora(i.creado_en)}</td>
++    <td class="${CLS.td} whitespace-nowrap">${cierre}</td>
++    <td class="${CLS.td} text-right">
++      ${i.estado === 'Pendiente'
++        ? html`<button type="button" data-revocar="${i.id}" class="${boton(CLS.btnSecundario, 'min-h-10')}" aria-label="Revocar invitación de ${i.nivel_asignado} en ${i.sede}">${icono('x', 'h-4 w-4')}<span>Revocar</span></button>`
++        : null}
++    </td>
++  </tr>`;
++}
++
++function tablaHtml(filas: readonly InvitacionInscripcion[]): HtmlSeguro {
++  if (filas.length === 0) return aviso('info', 'No hay invitaciones con este filtro.', 'Sin resultados');
++  return html`<div class="overflow-x-auto rounded-xl border border-slate-200 bg-white/90 backdrop-blur">
++    <table class="${CLS.tabla}">
++      <thead><tr>
++        <th scope="col" class="${CLS.th}">Sede</th>
++        <th scope="col" class="${CLS.th}">Nivel</th>
++        <th scope="col" class="${CLS.th}">Estado</th>
++        <th scope="col" class="${CLS.th}">Emitida</th>
++        <th scope="col" class="${CLS.th}">Vigencia</th>
++        <th scope="col" class="${CLS.th}"><span class="sr-only">Acciones</span></th>
++      </tr></thead>
++      <tbody>${filas.map(filaHtml)}</tbody>
++    </table>
++  </div>`;
++}
++
++function paginadorHtml(p: Paginacion): HtmlSeguro {
++  const paginas = Math.max(1, Math.ceil(p.total / Math.max(1, p.limite)));
++  return html`<nav class="mt-4 flex flex-wrap items-center justify-between gap-4 text-sm" aria-label="Paginación de invitaciones">
++    <span class="text-slate-600">Página ${p.pagina} de ${paginas} · ${p.total} invitación(es)</span>
++    <span class="flex gap-2">
++      <button type="button" data-pag="-1" class="${boton(CLS.btnSecundario, 'min-h-10')}" ${p.pagina <= 1 ? raw('disabled') : null}>Anterior</button>
++      <button type="button" data-pag="1" class="${boton(CLS.btnSecundario, 'min-h-10')}" ${p.pagina >= paginas ? raw('disabled') : null}>Siguiente</button>
++    </span>
++  </nav>`;
++}
++
++function esqueletoHtml(): HtmlSeguro {
++  return html`<div class="h-32 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando invitaciones"></div>`;
++}
++
++function vistaHtml(alcance: AlcanceUsuario, sedes: readonly SedeResumen[]): HtmlSeguro {
++  const sinSedes = alcance.tipo === 'consolidado' && !sedes.some((s) => s.activa);
++  return html`${encabezadoVista('Invitaciones', 'Enlaces únicos de inscripción con sede y nivel blindados')}
++    <div class="flex flex-col gap-8">
++      <div class="max-w-3xl">
++        ${sinSedes
++          ? aviso('warn', 'No hay sedes activas. Crea o activa una sede en la sección Sedes antes de emitir invitaciones.', 'Sin sedes disponibles')
++          : formularioHtml(alcance, sedes)}
++      </div>
++      <div id="inv-exito" class="max-w-3xl" aria-live="polite"></div>
++      <section aria-labelledby="t-inv-lista">
++        <div class="mb-4 flex flex-wrap items-end justify-between gap-4">
++          <h2 id="t-inv-lista" class="text-base font-bold text-slate-900">Invitaciones emitidas</h2>
++          <div>
++            <label for="inv-filtro" class="${CLS.etiqueta}">Estado</label>
++            <select id="inv-filtro" class="${CLS.input} min-h-10">${FILTROS.map((f) => html`<option value="${f}">${f === '' ? 'Todas' : f}</option>`)}</select>
++          </div>
++        </div>
++        <div id="inv-lista">${esqueletoHtml()}</div>
++      </section>
++    </div>`;
++}
++
++// ───────────────────────── Comportamiento ─────────────────────────
++
++function enlazarFormulario(ctx: ContextoInvitaciones, alcance: AlcanceUsuario, sedes: readonly SedeResumen[], alCrear: () => void): void {
++  const form = buscar('#form-inv', HTMLFormElement, ctx.zona);
++  if (form === null) return; // sin sedes activas no hay formulario
++  const salida = obtener('#inv-resultado', HTMLElement, ctx.zona);
++  const exito = obtener('#inv-exito', HTMLElement, ctx.zona);
++  const selNivel = obtener('#f-inv-nivel', HTMLSelectElement, form);
++  const cajaOtro = obtener('#inv-nivel-otro', HTMLElement, form);
++
++  selNivel.addEventListener('change', () => {
++    cajaOtro.hidden = selNivel.value !== OPCION_OTRO;
++    if (!cajaOtro.hidden) obtener('#f-inv-otro', HTMLInputElement, form).focus();
++  });
++
++  form.addEventListener('submit', (ev) => {
++    ev.preventDefault();
++    const r = validarInvitacion(
++      { sede: valorDe(form, 'sede_id'), nivel: valorDe(form, 'nivel_asignado'), nivelOtro: valorDe(form, 'nivel_otro'), dias: valorDe(form, 'dias') },
++      alcance,
++    );
++    pintarErrores(form, r.errores);
++    montar(salida, html``);
++    if (r.cuerpo === null) return;
++    const cuerpo = r.cuerpo;
++    const enviar = obtener('button[type="submit"]', HTMLButtonElement, form);
++
++    void conBotonOcupado(enviar, () => bma.post<RespuestaCrearInvitacion>('/invitaciones', cuerpo))
++      .then((resp) => {
++        if (!ctx.vigente()) return;
++        const nombreSede = sedes.find((s) => s.id === resp.sede_id)?.nombre ?? 'Sede';
++        montar(exito, tarjetaExitoHtml(resp, nombreSede));
++        enlazarCopia(exito, resp.enlace);
++        obtener('#inv-copiar', HTMLButtonElement, exito).focus();
++        alCrear();
++      })
++      .catch((e: unknown) => {
++        if (e instanceof BmaSesionExpiradaError) {
++          ctx.alSesionExpirada();
++          return;
++        }
++        if (!ctx.vigente()) return;
++        const campos = erroresDeCampos(e);
++        if (campos) pintarErrores(form, campos);
++        mostrarMensaje(salida, 'err', mensajeDeError(e)); // incl. 422 SEDE_INACTIVA y 403 SEDE_NO_ASIGNADA
++      });
++  });
++}
++
++function enlazarCopia(raiz: HTMLElement, enlace: string): void {
++  const boton_ = obtener('#inv-copiar', HTMLButtonElement, raiz);
++  const entrada = obtener('#inv-enlace', HTMLInputElement, raiz);
++  const original = boton_.innerHTML;
++  boton_.addEventListener('click', () => {
++    void copiarEnlace(enlace, entrada).then((copiado) => {
++      if (!copiado) {
++        notificar('warn', 'Tu navegador no permitió copiar automáticamente. El enlace quedó seleccionado: pulsa Ctrl+C (⌘+C en Mac).');
++        return;
++      }
++      montar(boton_, html`${icono('check', 'h-4 w-4')}<span>¡Copiado!</span>`);
++      notificar('ok', 'Enlace copiado. Ya puedes pegarlo en WhatsApp.');
++      window.setTimeout(() => {
++        if (boton_.isConnected) boton_.innerHTML = original;
++      }, 2_500);
++    });
++  });
++}
++
++function confirmarRevocacion(inv: InvitacionInscripcion, alRevocar: () => void, alSesionExpirada: () => void): void {
++  const modal = abrirModal({
++    titulo: 'Revocar invitación',
++    cuerpo: html`<p class="text-sm text-slate-700">Se desactivará el enlace de <strong>${inv.nivel_asignado}</strong> en <strong>${inv.sede}</strong>. Quien lo abra verá que ya no es válido. Esta acción no se puede deshacer.</p>
++      <div class="mt-6 flex justify-end gap-3">
++        <button type="button" data-cancelar class="${boton(CLS.btnSecundario, 'min-h-10')}">Cancelar</button>
++        <button type="button" data-confirmar class="${boton(CLS.btnPeligro, 'min-h-10')}">${icono('x', 'h-4 w-4')}<span>Revocar</span></button>
++      </div>`,
++  });
++  buscar('[data-cancelar]', HTMLButtonElement, modal.dialogo)?.addEventListener('click', modal.cerrar);
++  const confirmar = obtener('[data-confirmar]', HTMLButtonElement, modal.dialogo);
++  confirmar.addEventListener('click', () => {
++    void conBotonOcupado(confirmar, () => bma.post<RespuestaRevocarInvitacion>(`/invitaciones/${inv.id}/revocar`))
++      .then(() => {
++        modal.cerrar();
++        notificar('ok', 'Invitación revocada: el enlace ya no sirve.');
++        alRevocar();
++      })
++      .catch((e: unknown) => {
++        if (e instanceof BmaSesionExpiradaError) {
++          modal.cerrar();
++          alSesionExpirada();
++          return;
++        }
++        if (e instanceof BmaApiError && e.codigo === 'INVITACION_NO_REVOCABLE') {
++          modal.cerrar();
++          notificar('warn', e.message); // otra persona la revocó o ya fue usada: la lista se refresca con el estado real
++          alRevocar();
++          return;
++        }
++        notificar('bad', mensajeDeError(e));
++      });
++  });
++}
++
++/** Conecta la lista (estado propio: filtro, página, carga) y devuelve la acción «volver a la primera página sin filtro y recargar». */
++function enlazarLista(ctx: ContextoInvitaciones): () => void {
++  const contenedor = obtener('#inv-lista', HTMLElement, ctx.zona);
++  const filtro = obtener('#inv-filtro', HTMLSelectElement, ctx.zona);
++  let filtroActual: '' | EstadoInvitacion = '';
++  let pagina = 1;
++  let filas: readonly InvitacionInscripcion[] = [];
++  let peticion = 0; // descarta respuestas viejas si la persona cambia de filtro o página muy rápido
++
++  const cargar = async (): Promise<void> => {
++    peticion += 1;
++    const mia = peticion;
++    montar(contenedor, esqueletoHtml());
++    try {
++      const r = await bma.pagina<InvitacionInscripcion>('/invitaciones', { estado: filtroActual, pagina, limite: LIMITE_PAGINA });
++      if (!ctx.vigente() || mia !== peticion) return;
++      filas = r.datos;
++      montar(contenedor, html`${tablaHtml(r.datos)}${paginadorHtml(r.paginacion)}`);
++    } catch (e: unknown) {
++      if (!ctx.vigente() || mia !== peticion) return;
++      if (e instanceof BmaSesionExpiradaError) {
++        ctx.alSesionExpirada();
++        return;
++      }
++      montar(contenedor, html`${aviso('bad', mensajeDeError(e), 'No se pudo cargar la lista')}
++        <button type="button" data-reintentar class="${boton(CLS.btnSecundario, 'mt-4 min-h-10')}">${icono('refresh', 'h-4 w-4')}<span>Reintentar</span></button>`);
++    }
++  };
++
++  contenedor.addEventListener('click', (ev) => {
++    const objetivo = ev.target instanceof Element ? ev.target : null;
++    const revocar = objetivo?.closest('[data-revocar]');
++    if (revocar instanceof HTMLElement) {
++      const id = Number(revocar.dataset['revocar']);
++      const inv = filas.find((f) => f.id === id);
++      if (inv) confirmarRevocacion(inv, () => void cargar(), () => ctx.alSesionExpirada());
++      return;
++    }
++    if (objetivo?.closest('[data-reintentar]')) {
++      void cargar();
++      return;
++    }
++    const pag = objetivo?.closest('[data-pag]');
++    if (pag instanceof HTMLButtonElement && !pag.disabled) {
++      pagina = Math.max(1, pagina + Number(pag.dataset['pag']));
++      void cargar();
++    }
++  });
++
++  filtro.addEventListener('change', () => {
++    const elegido = FILTROS.find((f) => f === filtro.value);
++    filtroActual = elegido ?? '';
++    pagina = 1;
++    void cargar();
++  });
++
++  void cargar();
++
++  // Tras emitir una invitación la lista vuelve a la primera página sin filtro, para que la nueva se vea arriba.
++  return () => {
++    filtro.value = '';
++    filtroActual = '';
++    pagina = 1;
++    void cargar();
++  };
++}
++
++/** Punto de entrada. Los errores de carga (red, 401) se propagan al panel, que ya sabe pintarlos. */
++export async function vistaInvitaciones(ctx: ContextoInvitaciones): Promise<void> {
++  const alcance = alcanceDe(ctx.usuario);
++  if (alcance.tipo === 'denegado') {
++    montar(ctx.zona, restringidaHtml()); // sin peticiones: el servidor respondería 403 SEDE_NO_ASIGNADA
++    return;
++  }
++  const sedes = await bma.get<readonly SedeResumen[]>('/sedes'); // un usuario de sede recibe solo la suya
++  if (!ctx.vigente()) return;
++  montar(ctx.zona, vistaHtml(alcance, sedes));
++  const recargarLista = enlazarLista(ctx);
++  enlazarFormulario(ctx, alcance, sedes, recargarLista);
++}
+diff --git a/frontend/src/lib/alcance.ts b/frontend/src/lib/alcance.ts
+new file mode 100644
+index 0000000..7764133
+--- /dev/null
++++ b/frontend/src/lib/alcance.ts
+@@ -0,0 +1,22 @@
++/**
++ * Alcance de sede del usuario del panel — espejo FAIL-CLOSED de `utils/alcance.js` (backend).
++ *  - `consolidado`: rol `admin` sin sede (SuperAdmin) → ve y gestiona todas las sedes.
++ *  - `sede`:        usuario atado a una sede (secretaria, o admin de sede) → solo opera sobre esa sede.
++ *  - `denegado`:    sin sesión, secretaria sin sede asignada o sede con valor inválido → nunca se trata como global.
++ *
++ * Es solo la cara visible de la regla: el servidor repite la comprobación en cada ruta (`requireConsolidado`, `alcanceDe`)
++ * y es la fuente de verdad. Aquí sirve para no disparar peticiones que el servidor rechazaría.
++ */
++import type { Usuario } from '../types/index';
++
++export type AlcanceUsuario =
++  | { readonly tipo: 'consolidado' }
++  | { readonly tipo: 'sede'; readonly sedeId: number }
++  | { readonly tipo: 'denegado' };
++
++export function alcanceDe(usuario: Usuario | null): AlcanceUsuario {
++  if (usuario === null) return { tipo: 'denegado' };
++  const sede = usuario.sede_id ?? null;
++  if (sede === null) return usuario.rol === 'admin' ? { tipo: 'consolidado' } : { tipo: 'denegado' };
++  return Number.isInteger(sede) && sede > 0 ? { tipo: 'sede', sedeId: sede } : { tipo: 'denegado' };
++}
+diff --git a/frontend/src/lib/formulario.ts b/frontend/src/lib/formulario.ts
+new file mode 100644
+index 0000000..918a97f
+--- /dev/null
++++ b/frontend/src/lib/formulario.ts
+@@ -0,0 +1,44 @@
++/**
++ * Utilidades de formularios compartidas por las vistas de sedes e invitaciones (mismo comportamiento que facturación masiva).
++ *  - Los errores por campo se asocian por el atributo `name` del control y por `data-error="<mismo nombre>"` del párrafo de error;
++ *    los mensajes se escriben con `textContent`, nunca como HTML.
++ *  - `.msg` (+ `.okk` | `.inf` | `.err`) está definido en styles/main.css.
++ */
++import { BmaApiError } from '../api/bmaClient';
++import { html, montar } from './html';
++import { buscar, obtener, todos } from './ui';
++
++/** Pinta (o limpia, con `{}`) los errores por campo y enfoca el primer control inválido. */
++export function pintarErrores(form: HTMLFormElement, errores: Readonly<Record<string, string>>): void {
++  for (const el of todos('[data-error]', HTMLElement, form)) {
++    const mensaje = errores[el.dataset['error'] ?? ''] ?? '';
++    el.textContent = mensaje;
++    el.hidden = mensaje === '';
++  }
++  for (const control of todos('[name]', HTMLElement, form)) {
++    if ((errores[control.getAttribute('name') ?? ''] ?? '') !== '') control.setAttribute('aria-invalid', 'true');
++    else control.removeAttribute('aria-invalid');
++  }
++  buscar('[aria-invalid="true"]', HTMLElement, form)?.focus();
++}
++
++/** Aviso en línea con rol accesible; el texto se asigna con `textContent` (el mensaje puede venir del servidor). */
++export function mostrarMensaje(salida: HTMLElement, tono: 'okk' | 'inf' | 'err', texto: string): void {
++  montar(salida, html`<p class="msg ${tono}" role="${tono === 'err' ? 'alert' : 'status'}" tabindex="-1"></p>`);
++  const p = obtener('.msg', HTMLElement, salida);
++  p.textContent = texto;
++  p.focus();
++}
++
++/** Errores 422 VALIDACION del servidor (`[{campo, mensaje}]`) como mapa campo → mensaje; `null` si el error no trae campos. */
++export function erroresDeCampos(e: unknown): Readonly<Record<string, string>> | null {
++  if (!(e instanceof BmaApiError)) return null;
++  const campos = e.camposInvalidos();
++  return campos.length > 0 ? Object.fromEntries(campos.map((c) => [c.campo, c.mensaje])) : null;
++}
++
++/** Valor de un `<input>` o `<select>` del formulario por su `name` ('' si no existe o es de otro tipo). */
++export function valorDe(form: HTMLFormElement, nombre: string): string {
++  const control = form.elements.namedItem(nombre);
++  return control instanceof HTMLInputElement || control instanceof HTMLSelectElement ? control.value : '';
++}
+diff --git a/frontend/src/lib/icons.ts b/frontend/src/lib/icons.ts
+index 8149081..dd5db05 100644
+--- a/frontend/src/lib/icons.ts
++++ b/frontend/src/lib/icons.ts
+@@ -28,6 +28,8 @@ const TRAZOS = {
+   heart: '<path d="M12 20s-8-5-8-11a4.5 4.5 0 018-2.8A4.5 4.5 0 0120 9c0 6-8 11-8 11z"/>',
+   receipt: '<path d="M6 3h12v18l-3-2-3 2-3-2-3 2zM9 8h6M9 12h6"/>',
+   wallet: '<path d="M3 7h16a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2zM3 7V6a2 2 0 012-2h11M17 14h.01"/>',
++  link: '<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>',
++  building: '<path d="M4 21V5a1 1 0 011-1h9a1 1 0 011 1v16M15 9h4a1 1 0 011 1v11M2 21h20M8 8h3M8 12h3M8 16h3"/>',
+ } as const;
+ 
+ export type NombreIcono = keyof typeof TRAZOS;
+diff --git a/frontend/src/sedes-gestion.ts b/frontend/src/sedes-gestion.ts
+new file mode 100644
+index 0000000..1a597e4
+--- /dev/null
++++ b/frontend/src/sedes-gestion.ts
+@@ -0,0 +1,175 @@
++/**
++ * Vista «Sedes» — gestión global de ubicaciones (acceso consolidado: rol `admin` sin sede).
++ *  - Guarda de alcance (lib/alcance.ts → `alcanceDe`): cualquier usuario que NO sea consolidado (secretaria o admin atado a una sede,
++ *    o sin sede asignada) ve «Sección Restringida» y NO dispara ninguna petición. El servidor impone la misma regla (`requireConsolidado`).
++ *  - GET  /api/sedes → cuadrícula responsiva de tarjetas con el estado operativo de cada sede.
++ *  - POST /api/sedes { nombre } → alta. 409 SEDE_DUPLICADA y 422 VALIDACION se pintan junto al campo.
++ *  - Core Base: hasta 2 sedes (Acarigua y Barquisimeto). A partir de la 3ª el trigger trg_sedes_limite_base (SQLSTATE BM403) responde
++ *    403 MODULO_PREMIUM_DESHABILITADO con { modulo, nombre, precio_usd }: la vista delega en `alBloquear`, que relee el catálogo y pinta
++ *    la pantalla de cristal de lib/candado.ts con el precio vigente (US$ 50.00 por defecto) y, si aún aplica, la prueba gratuita.
++ *
++ * Todo texto dinámico pasa por la etiqueta `html` (escape XSS automático); los errores se escriben con `textContent`.
++ */
++import { bma, BmaApiError, BmaSesionExpiradaError, mensajeDeError } from './api/bmaClient';
++import { html, montar, type HtmlSeguro } from './lib/html';
++import { icono } from './lib/icons';
++import { fechaHora, usd } from './lib/format';
++import { alcanceDe, type AlcanceUsuario } from './lib/alcance';
++import { CLS, aviso, boton, conBotonOcupado, etiqueta, notificar, obtener } from './lib/ui';
++import { encabezadoVista } from './lib/candado';
++import { erroresDeCampos, mostrarMensaje, pintarErrores, valorDe } from './lib/formulario';
++import type { CuerpoCrearSede, DetalleModuloPremium, RespuestaCrearSede, SedeResumen, Usuario } from './types/index';
++
++/** Sedes incluidas en el Core Base (espejo de `LIMITE_SEDES_BASE` en modules/premium/catalogo.js). */
++export const LIMITE_SEDES_BASE = 2;
++const MAX_NOMBRE = 120;
++const MODULO_MULTI_SEDE = 'MULTI_SEDE_PREMIUM';
++const NOMBRE_MODULO_MULTI_SEDE = 'Expansión Multi-Sede Avanzada (3+ Sedes)';
++/** Solo se usa si el servidor omite el precio en el detalle del error; el precio vigente siempre lo manda el servidor. */
++const PRECIO_RESPALDO_USD = 50;
++
++export interface ContextoSedes {
++  readonly zona: HTMLElement;
++  readonly vigente: () => boolean;
++  readonly usuario: Usuario | null;
++  /** El servidor respondió 403 MODULO_PREMIUM_DESHABILITADO: el panel relee el catálogo y pinta el candado de cristal. */
++  readonly alBloquear: (detalle: DetalleModuloPremium) => void;
++  readonly alSesionExpirada: () => void;
++}
++
++// ───────────────────────── Lógica pura (sin DOM) ─────────────────────────
++
++export interface ResultadoNombreSede {
++  readonly error: string | null;
++  readonly nombre: string | null;
++}
++
++/** Misma regla que el servidor (nombre obligatorio, ≤ 120). Los espacios repetidos se colapsan para evitar duplicados «fantasma». */
++export function validarNombreSede(texto: string): ResultadoNombreSede {
++  const nombre = texto.trim().replace(/\s+/g, ' ');
++  if (nombre === '') return { error: 'Escribe el nombre de la sede, por ejemplo «Sede Acarigua».', nombre: null };
++  if (nombre.length > MAX_NOMBRE) return { error: `El nombre admite hasta ${MAX_NOMBRE} caracteres.`, nombre: null };
++  return { error: null, nombre };
++}
++
++/**
++ * ¿El error es el candado premium? Acepta el código HTTP estable del servidor y, por defensa, el SQLSTATE crudo `BM403`.
++ * Si el servidor no trajo `nombre`/`precio_usd` (detalle del trigger ilegible) se completan con los datos del módulo de sedes.
++ */
++export function detallePremiumDe(e: unknown): DetalleModuloPremium | null {
++  if (!(e instanceof BmaApiError)) return null;
++  const detalle = e.moduloPremium();
++  if (detalle) return detalle;
++  if (e.codigo === 'MODULO_PREMIUM_DESHABILITADO' || e.codigo === 'BM403') {
++    return { modulo: MODULO_MULTI_SEDE, nombre: NOMBRE_MODULO_MULTI_SEDE, precio_usd: PRECIO_RESPALDO_USD };
++  }
++  return null;
++}
++
++// ───────────────────────── Interfaz ─────────────────────────
++
++function restringidaHtml(alcance: AlcanceUsuario): HtmlSeguro {
++  const motivo =
++    alcance.tipo === 'sede'
++      ? 'La gestión de sedes es una función del acceso consolidado (SuperAdmin). Tu usuario opera únicamente sobre su sede.'
++      : 'Tu usuario no tiene una sede asignada, así que no puede abrir esta sección. Pide a un administrador que revise tu cuenta.';
++  return html`${encabezadoVista('Sedes', 'Ubicaciones de la academia')}
++    <div class="max-w-2xl">${aviso('warn', motivo, 'Sección Restringida')}</div>`;
++}
++
++function tarjetaSedeHtml(s: SedeResumen): HtmlSeguro {
++  return html`<li class="${CLS.tarjeta} flex flex-col gap-3 p-4">
++    <div class="flex items-start gap-3">
++      <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-white">${icono('building')}</span>
++      <div class="min-w-0 flex-1">
++        <h3 class="break-words text-base font-bold text-slate-900">${s.nombre}</h3>
++        ${s.creado_en ? html`<p class="${CLS.ayuda}">Creada el ${fechaHora(s.creado_en)}</p>` : null}
++      </div>
++      ${etiqueta(s.activa ? 'Operativa' : 'Inactiva', s.activa ? 'ok' : 'neutral')}
++    </div>
++  </li>`;
++}
++
++function listaHtml(sedes: readonly SedeResumen[]): HtmlSeguro {
++  if (sedes.length === 0) return aviso('info', 'Todavía no hay sedes registradas. Crea la primera con el formulario de abajo.', 'Sin sedes');
++  return html`<ul class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3" aria-label="Sedes registradas">${sedes.map(tarjetaSedeHtml)}</ul>`;
++}
++
++function formularioHtml(sedes: readonly SedeResumen[]): HtmlSeguro {
++  return html`<section class="${CLS.tarjetaCristal} max-w-2xl p-6" aria-labelledby="t-nueva-sede">
++    <h2 id="t-nueva-sede" class="mb-1 flex items-center gap-2 text-base font-bold text-slate-900">${icono('building', 'h-5 w-5')}Nueva sede</h2>
++    <p class="${CLS.ayuda} mb-4">El Core Base incluye ${LIMITE_SEDES_BASE} sedes (hoy hay ${sedes.length}). Desde la tercera se requiere la Expansión Multi-Sede (${usd(PRECIO_RESPALDO_USD)} · pago único); si ya está habilitada, el alta funciona con normalidad.</p>
++    <form id="form-sede" novalidate class="flex flex-col gap-4 sm:flex-row sm:items-start" aria-label="Crear sede">
++      <div class="min-w-0 flex-1">
++        <label for="f-sede-nombre" class="${CLS.etiqueta}">Nombre de la sede <span class="text-red-800" aria-hidden="true">*</span></label>
++        <input id="f-sede-nombre" name="nombre" type="text" maxlength="${MAX_NOMBRE}" required autocomplete="off" placeholder="Sede Acarigua" aria-describedby="e-sede-nombre" class="${CLS.input} min-h-10">
++        <p id="e-sede-nombre" data-error="nombre" role="alert" hidden class="${CLS.errorCampo}"></p>
++      </div>
++      <button type="submit" class="${boton(CLS.btnPrimario, 'min-h-10 sm:mt-6')}">${icono('check', 'h-4 w-4')}<span>Crear sede</span></button>
++    </form>
++    <div id="sede-resultado" class="mt-4" aria-live="polite"></div>
++  </section>`;
++}
++
++function vistaHtml(sedes: readonly SedeResumen[]): HtmlSeguro {
++  return html`${encabezadoVista('Sedes', 'Ubicaciones de la academia y su estado operativo')}
++    <div class="flex flex-col gap-8">${listaHtml(sedes)}${formularioHtml(sedes)}</div>`;
++}
++
++// ───────────────────────── Comportamiento ─────────────────────────
++
++function enlazarFormulario(ctx: ContextoSedes, recargar: () => Promise<void>): void {
++  const form = obtener('#form-sede', HTMLFormElement, ctx.zona);
++  const salida = obtener('#sede-resultado', HTMLElement, ctx.zona);
++
++  form.addEventListener('submit', (ev) => {
++    ev.preventDefault();
++    const r = validarNombreSede(valorDe(form, 'nombre'));
++    pintarErrores(form, r.error === null ? {} : { nombre: r.error });
++    montar(salida, html``);
++    if (r.nombre === null) return;
++    const cuerpo: CuerpoCrearSede = { nombre: r.nombre };
++    const enviar = obtener('button[type="submit"]', HTMLButtonElement, form);
++
++    void conBotonOcupado(enviar, () => bma.post<RespuestaCrearSede>('/sedes', cuerpo))
++      .then(async (creada) => {
++        notificar('ok', `Sede «${creada.nombre}» creada.`);
++        if (ctx.vigente()) await recargar();
++      })
++      .catch((e: unknown) => {
++        if (e instanceof BmaSesionExpiradaError) {
++          ctx.alSesionExpirada();
++          return;
++        }
++        const premium = detallePremiumDe(e);
++        if (premium) {
++          ctx.alBloquear(premium);
++          return;
++        }
++        if (!ctx.vigente()) return;
++        if (e instanceof BmaApiError && e.codigo === 'SEDE_DUPLICADA') {
++          pintarErrores(form, { nombre: e.message });
++          return;
++        }
++        const campos = erroresDeCampos(e);
++        if (campos) pintarErrores(form, campos);
++        mostrarMensaje(salida, 'err', mensajeDeError(e));
++      });
++  });
++}
++
++/** Punto de entrada. Los errores de carga (red, 401, 403 premium) se propagan al panel, que ya sabe pintarlos. */
++export async function vistaSedesGestion(ctx: ContextoSedes): Promise<void> {
++  const alcance = alcanceDe(ctx.usuario);
++  if (alcance.tipo !== 'consolidado') {
++    montar(ctx.zona, restringidaHtml(alcance)); // sin peticiones: el servidor las rechazaría con 403
++    return;
++  }
++  const pintar = async (): Promise<void> => {
++    const sedes = await bma.get<readonly SedeResumen[]>('/sedes');
++    if (!ctx.vigente()) return;
++    montar(ctx.zona, vistaHtml(sedes));
++    enlazarFormulario(ctx, pintar);
++  };
++  await pintar();
++}
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 3bc19d3..7691595 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -363,7 +363,7 @@ export interface RespuestaPrueba {
+ 
+ // ───────────────────────── Estado de la interfaz ─────────────────────────
+ 
+-export type VistaAdmin = 'dashboard' | 'estudiantes' | 'auditoria' | 'contabilidad' | 'configuracion';
++export type VistaAdmin = 'dashboard' | 'estudiantes' | 'auditoria' | 'contabilidad' | 'configuracion' | 'sedes' | 'invitaciones';
+ 
+ export interface EstadoSidebar {
+   readonly colapsado: boolean;
+@@ -390,6 +390,62 @@ export interface SedeResumen {
+   readonly id: number;
+   readonly nombre: string;
+   readonly activa: boolean;
++  /** TIMESTAMPTZ ISO-8601 (el servidor siempre lo envía; opcional para no romper consumidores previos). */
++  readonly creado_en?: string;
++}
++
++/** Cuerpo de `POST /api/sedes` y su respuesta 201. */
++export interface CuerpoCrearSede {
++  readonly nombre: string;
++}
++
++export interface RespuestaCrearSede {
++  readonly id: number;
++  readonly nombre: string;
++}
++
++// ───────────────────────── Invitaciones de inscripción (nivel y sede blindados) ─────────────────────────
++
++/** Estado efectivo calculado por el servidor: una «Pendiente» cuyo `expira_en` ya pasó llega como «Vencida». */
++export type EstadoInvitacion = 'Pendiente' | 'Usada' | 'Revocada' | 'Vencida';
++
++/** Fila de `GET /api/invitaciones` (nunca incluye el token ni su hash). */
++export interface InvitacionInscripcion {
++  readonly id: number;
++  readonly sede_id: number;
++  readonly sede: string;
++  readonly nivel_asignado: string;
++  readonly expira_en: string;
++  readonly usada_en: string | null;
++  readonly estudiante_id: number | null;
++  readonly creado_en: string;
++  readonly estado: EstadoInvitacion;
++}
++
++/** Cuerpo de `POST /api/invitaciones`. Un usuario atado a una sede no envía `sede_id` (el servidor lo ignora y usa la suya). */
++export interface CuerpoCrearInvitacion {
++  readonly nivel_asignado: string;
++  readonly dias: number;
++  readonly sede_id?: number;
++}
++
++/**
++ * Respuesta 201 de `POST /api/invitaciones`. `token` (48 hex) y `enlace` solo existen en esta respuesta: en la base queda únicamente
++ * el SHA-256 del token, así que si no se copia ahora hay que emitir otra invitación.
++ */
++export interface RespuestaCrearInvitacion {
++  readonly id: number;
++  readonly sede_id: number;
++  readonly nivel_asignado: string;
++  readonly expira_en: string;
++  readonly token: string;
++  readonly enlace: string;
++}
++
++/** `POST /api/invitaciones/:id/revocar` */
++export interface RespuestaRevocarInvitacion {
++  readonly id: number;
++  readonly estado: 'Revocada';
+ }
+ 
+ /** Cuerpo de `POST /api/configuracion/cuentas` y `PUT /api/configuracion/cuentas/:id` (el PUT exige el cuerpo completo). */
+-- 
+2.43.0
+

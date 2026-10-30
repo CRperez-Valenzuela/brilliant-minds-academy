@@ -363,7 +363,7 @@ export interface RespuestaPrueba {
 
 // ───────────────────────── Estado de la interfaz ─────────────────────────
 
-export type VistaAdmin = 'dashboard' | 'estudiantes' | 'auditoria' | 'contabilidad' | 'configuracion';
+export type VistaAdmin = 'dashboard' | 'estudiantes' | 'auditoria' | 'contabilidad' | 'configuracion' | 'sedes' | 'invitaciones';
 
 export interface EstadoSidebar {
   readonly colapsado: boolean;
@@ -390,6 +390,62 @@ export interface SedeResumen {
   readonly id: number;
   readonly nombre: string;
   readonly activa: boolean;
+  /** TIMESTAMPTZ ISO-8601 (el servidor siempre lo envía; opcional para no romper consumidores previos). */
+  readonly creado_en?: string;
+}
+
+/** Cuerpo de `POST /api/sedes` y su respuesta 201. */
+export interface CuerpoCrearSede {
+  readonly nombre: string;
+}
+
+export interface RespuestaCrearSede {
+  readonly id: number;
+  readonly nombre: string;
+}
+
+// ───────────────────────── Invitaciones de inscripción (nivel y sede blindados) ─────────────────────────
+
+/** Estado efectivo calculado por el servidor: una «Pendiente» cuyo `expira_en` ya pasó llega como «Vencida». */
+export type EstadoInvitacion = 'Pendiente' | 'Usada' | 'Revocada' | 'Vencida';
+
+/** Fila de `GET /api/invitaciones` (nunca incluye el token ni su hash). */
+export interface InvitacionInscripcion {
+  readonly id: number;
+  readonly sede_id: number;
+  readonly sede: string;
+  readonly nivel_asignado: string;
+  readonly expira_en: string;
+  readonly usada_en: string | null;
+  readonly estudiante_id: number | null;
+  readonly creado_en: string;
+  readonly estado: EstadoInvitacion;
+}
+
+/** Cuerpo de `POST /api/invitaciones`. Un usuario atado a una sede no envía `sede_id` (el servidor lo ignora y usa la suya). */
+export interface CuerpoCrearInvitacion {
+  readonly nivel_asignado: string;
+  readonly dias: number;
+  readonly sede_id?: number;
+}
+
+/**
+ * Respuesta 201 de `POST /api/invitaciones`. `token` (48 hex) y `enlace` solo existen en esta respuesta: en la base queda únicamente
+ * el SHA-256 del token, así que si no se copia ahora hay que emitir otra invitación.
+ */
+export interface RespuestaCrearInvitacion {
+  readonly id: number;
+  readonly sede_id: number;
+  readonly nivel_asignado: string;
+  readonly expira_en: string;
+  readonly token: string;
+  readonly enlace: string;
+}
+
+/** `POST /api/invitaciones/:id/revocar` */
+export interface RespuestaRevocarInvitacion {
+  readonly id: number;
+  readonly estado: 'Revocada';
 }
 
 /** Cuerpo de `POST /api/configuracion/cuentas` y `PUT /api/configuracion/cuentas/:id` (el PUT exige el cuerpo completo). */
