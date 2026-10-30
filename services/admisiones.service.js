@@ -41,7 +41,7 @@ async function configInvitacion(token, { bcvSvc = bcv } = {}) {
 
 /**
  * Inscripción completa en UNA transacción:
- *   1) representante (upsert por cédula) → 2) estudiante "Pendiente por Validación Administrativa"
+ *   1) representante (upsert por cédula; si ya existía, sus datos de contacto NO se sobrescriben: ver el comentario del upsert) → 2) estudiante "Pendiente por Validación Administrativa"
  *   3) cuota de matrícula + referencia bancaria "Por Validar" a la tasa BCV del momento
  *   4) carpeta 'Nombre_Apellido_ID' en Drive con los 3 documentos → 5) COMMIT.
  * Con `invitacion` ({ id, sede_id, nivel_asignado } ya resuelta por el controlador) el SERVIDOR impone el nivel y la sede (se ignora el
@@ -58,24 +58,33 @@ async function registrarInscripcion({ datos, archivos, invitacion = null }, { bc
   let estudianteIdCreado = null;
   let resultado = null;
   let callbackTerminado = false; // true = solo faltaba el COMMIT: si algo falla ya, el resultado en la base es ambiguo
+  let representanteConTelefonoEnRevision = null; // id del representante cuyo teléfono nuevo quedó retenido (se avisa tras el COMMIT)
 
   try {
-    return await conTransaccion(async (tx) => {
+    const confirmada = await conTransaccion(async (tx) => {
       // El enlace se consume PRIMERO: si otro envío lo usó entre tanto, falla aquí (410) antes de tocar Drive ni crear nada.
       if (invitacion) await invitaciones.consumir(tx, invitacion.id);
 
-      // Upsert atómico por cédula (UNIQUE): sin ventana de carrera entre SELECT e INSERT. El correo existente no se borra si llega vacío.
+      // Upsert atómico por cédula (UNIQUE): sin ventana de carrera entre SELECT e INSERT.
+      // Blindaje anti-suplantación (H2): el formulario es PÚBLICO, así que si la cédula ya existe NO puede reescribir sus datos de
+      // contacto. El correo guardado manda (solo se rellena si estaba vacío) y un teléfono distinto NO se aplica: queda en
+      // `telefono_pendiente` hasta que la administración lo apruebe, porque a `telefono` llegan los enlaces privados del portal.
       const rep = await ejecutar(
         `INSERT INTO representantes (nombres, apellidos, cedula, email, telefono)
          VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (cedula) DO UPDATE
             SET nombres = EXCLUDED.nombres, apellidos = EXCLUDED.apellidos,
-                email = COALESCE(EXCLUDED.email, representantes.email), telefono = EXCLUDED.telefono
-         RETURNING id`,
+                email = COALESCE(representantes.email, EXCLUDED.email),
+                telefono_pendiente = CASE WHEN representantes.telefono IS DISTINCT FROM EXCLUDED.telefono
+                                          THEN EXCLUDED.telefono ELSE representantes.telefono_pendiente END,
+                telefono_pendiente_en = CASE WHEN representantes.telefono IS DISTINCT FROM EXCLUDED.telefono
+                                             THEN NOW() ELSE representantes.telefono_pendiente_en END
+         RETURNING id, (telefono_pendiente IS NOT NULL) AS telefono_en_revision`,
         // La cédula se guarda en mayúsculas: PostgreSQL distingue "v-123" de "V-123" y duplicaría al representante.
         [datos.representante_nombres, datos.representante_apellidos, datos.representante_cedula.toUpperCase(), datos.representante_email, datos.telefono],
         tx);
       const representanteId = rep.rows[0].id;
+      if (rep.rows[0].telefono_en_revision === true) representanteConTelefonoEnRevision = representanteId;
 
       const est = await ejecutar(
         `INSERT INTO estudiantes
@@ -135,6 +144,12 @@ async function registrarInscripcion({ datos, archivos, invitacion = null }, { bc
       callbackTerminado = true;
       return resultado;
     });
+    // Solo tras el COMMIT: si la transacción se hubiera revertido, este aviso afirmaría algo que no quedó guardado.
+    // Va únicamente al log del servidor (con ids, sin teléfonos): la respuesta pública NO revela que la cédula ya existía.
+    if (representanteConTelefonoEnRevision !== null) {
+      console.warn(`[admisiones] Representante ${representanteConTelefonoEnRevision}: el formulario trajo un teléfono distinto; se conserva el verificado y el nuevo queda PENDIENTE de aprobación (estudiante ${estudianteIdCreado}).`);
+    }
+    return confirmada;
   } catch (err) {
     if (!carpetaCreada) throw err; // nada que compensar en Drive (la subida se limpia a sí misma si falla)
 

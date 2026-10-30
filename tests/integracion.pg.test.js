@@ -128,12 +128,15 @@ test.after(async () => {
 });
 
 // ── Migraciones y scripts ───────────────────────────────────────────────────────────────────────
-t('migrate.js: aplica las 8 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
+// El total sale del directorio: un número cableado se desalinea cada vez que se añade una migración.
+const NUM_MIGRACIONES = fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql')).length;
+
+t('migrate.js: aplica todas las migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
   const primera = hijo('scripts/migrate.js');
   for (const f of fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql'))) assert.match(primera, new RegExp(`Aplicada ${f}`));
   const segunda = hijo('scripts/migrate.js');
   assert.ok(!/Aplicada/.test(segunda), segunda);
-  assert.equal((segunda.match(/ya aplicada/g) || []).length, 8);
+  assert.equal((segunda.match(/ya aplicada/g) || []).length, NUM_MIGRACIONES);
   assert.match(segunda, /Migraciones al día/);
 });
 
@@ -144,7 +147,7 @@ t(`el esquema real contiene las 19 tablas + la vista, con RLS activo y la vista 
   const v = await uno(`SELECT array_to_string(reloptions, ',') AS opciones FROM pg_class WHERE relname = 'vw_estudiantes_estado'`);
   assert.equal(v.opciones, 'security_invoker=true');
   const reg = await filas('SELECT nombre FROM schema_migrations ORDER BY nombre');
-  assert.equal(reg.length, 8);
+  assert.equal(reg.length, NUM_MIGRACIONES);
 });
 
 t('crear-admin.js: upsert por correo (ON CONFLICT), normaliza a minúsculas, reactiva y no duplica', async () => {
@@ -232,12 +235,13 @@ t('inscripción completa: representante (upsert), estudiante Pendiente, cuota ma
   assert.equal(rep.telefono, '584141234567');
 });
 
-t('segunda inscripción del mismo representante (cédula en minúsculas): no duplica, actualiza teléfono y conserva el correo', async () => {
+t('segunda inscripción del mismo representante (cédula en minúsculas): no duplica y NO sobrescribe sus datos de contacto (H2); el teléfono distinto queda pendiente', async () => {
   const datos = inscripcion({ alumno_nombres: 'María', representante_cedula: 'v-12345678', representante_email: null, telefono: '584149999999', referencia_bancaria: 'REF-000111' });
   await svc.admisiones.registrarInscripcion({ datos, archivos }, { bcvSvc: bcvFalso, driveSvc: driveFalso() });
-  const reps = await filas(`SELECT cedula, email, telefono FROM representantes WHERE upper(cedula) = 'V-12345678'`);
-  assert.deepEqual(reps, [{ cedula: 'V-12345678', email: 'ana@example.com', telefono: '584149999999' }]);
-  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM estudiantes e JOIN representantes r ON r.id = e.representante_id WHERE r.cedula = 'V-12345678'`)).n, 2);
+  const reps = await filas(`SELECT cedula, email, telefono, telefono_pendiente, telefono_pendiente_en IS NOT NULL AS tiene_fecha FROM representantes WHERE upper(cedula) = 'V-12345678'`);
+  // `telefono` (el verificado, el que recibe los enlaces del portal) NO cambia; el número nuevo espera aprobación humana.
+  assert.deepEqual(reps, [{ cedula: 'V-12345678', email: 'ana@example.com', telefono: '584141234567', telefono_pendiente: '584149999999', tiene_fecha: true }]);
+  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM estudiantes e JOIN representantes r ON r.id = e.representante_id WHERE r.cedula = 'V-12345678'`)).n, 2, 'la inscripción del alumno sí prosigue');
 });
 
 t('referencia bancaria duplicada (aunque cambie la capitalización): 409 REFERENCIA_DUPLICADA, rollback total y Drive intacto', async () => {
@@ -1157,6 +1161,116 @@ t('cron WhatsApp por sede: cada sede activa se despacha por separado (Preventiva
   await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
 });
 
+
+// ── Blindaje de admisiones (H2). Va al final: crea inscripciones y varios tests anteriores cuentan filas globales. ──
+t('admisiones H2: el correo guardado manda (solo se rellena si estaba vacío); mismo teléfono no genera pendiente; el pendiente no se borra al reenviar el verificado', async () => {
+  let n = 0;
+  const inscribir = (ov) => { n += 1; return svc.admisiones.registrarInscripcion(
+    { datos: inscripcion({ representante_cedula: 'V-7770001', alumno_nombres: `Alumno${n}`, referencia_bancaria: `REF-H2-${n}`, ...ov }), archivos }, { bcvSvc: bcvFalso, driveSvc: driveFalso() }); };
+  const rep = () => uno(`SELECT email, telefono, telefono_pendiente FROM representantes WHERE cedula = 'V-7770001'`);
+
+  await inscribir({ representante_email: null, telefono: '584142000001' }); // alta: sin correo, sin pendiente
+  assert.deepEqual(await rep(), { email: null, telefono: '584142000001', telefono_pendiente: null });
+
+  await inscribir({ representante_email: 'primero@example.com', telefono: '584142000001' }); // el correo vacío SÍ se rellena; mismo teléfono → nada pendiente
+  assert.deepEqual(await rep(), { email: 'primero@example.com', telefono: '584142000001', telefono_pendiente: null });
+
+  await inscribir({ representante_email: 'atacante@example.com', telefono: '584142000002' }); // correo ya guardado: NO se pisa; teléfono distinto → pendiente
+  assert.deepEqual(await rep(), { email: 'primero@example.com', telefono: '584142000001', telefono_pendiente: '584142000002' });
+
+  await inscribir({ representante_email: null, telefono: '584142000001' }); // reenvía el verificado: el pendiente anterior NO se borra solo
+  assert.deepEqual(await rep(), { email: 'primero@example.com', telefono: '584142000001', telefono_pendiente: '584142000002' });
+
+  await inscribir({ representante_email: null, telefono: '584142000003' }); // otro teléfono distinto: queda el más reciente (la verificación humana es el control)
+  assert.deepEqual(await rep(), { email: 'primero@example.com', telefono: '584142000001', telefono_pendiente: '584142000003' });
+
+  // La CHECK de la columna pendiente es la última defensa: sin espacios y de 10 a 15 caracteres.
+  await assert.rejects(db.ejecutar(`UPDATE representantes SET telefono_pendiente = '58 414 200' WHERE cedula = 'V-7770001'`, []), (e) => e.code === '23514');
+});
+
+// ── Bot de WhatsApp: de-duplicación con GENERADA «en vuelo» (H4) y enfriamiento por FALLIDA (H1), con el SQL real ──
+t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo», la del panel no; y 3 FALLIDA del mismo tipo en 7 días enfrían al estudiante', async () => {
+  const { candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
+  const hoy = svc.hoy();
+  const ventana = svc.notif.VENTANA_PREVENTIVA;
+  const lim = 100000;
+  const adminId = (await uno('SELECT id FROM usuarios_admin LIMIT 1')).id;
+  // Inserta una notificación con la antigüedad pedida; `creadoPor` null = la creó el bot.
+  const nota = (est, tipo, estado, { dias = 0, creadoPor = null, cuota = null } = {}) => db.ejecutar(
+    `INSERT INTO notificaciones_whatsapp (estudiante_id, cuota_id, tipo, telefono, mensaje, monto_usd, tasa_bcv, monto_bs, estado, creado_por, creado_en)
+     VALUES ($1, $2, $3, '584120000000', 'x', 10, 36.5, 365, $4, $5, NOW() - ($6::int * INTERVAL '1 day'))`, [est.estId, cuota, tipo, estado, creadoPor, dias]);
+  const ids = (rows) => rows.map((r) => r.estudiante_id);
+  const preventivas = async () => ids(await candidatosPreventiva({ hoy, ventana, limite: lim }));
+  const morosos = async () => ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim }));
+  const moroso = (n) => sembrar({ vence: sumarDias(hoy, -6), nombres: `H4Mor${n}`, apellidos: 'Cron' });
+  const prev = (n) => sembrar({ vence: sumarDias(hoy, 4), nombres: `H4Prev${n}`, apellidos: 'Cron' });
+
+  // ── H4 · MOROSIDAD ──
+  const [m1, m2, m3, m4, m5] = [await moroso(1), await moroso(2), await moroso(3), await moroso(4), await moroso(5)];
+  await nota(m2, 'MOROSIDAD', 'GENERADA');                         // bot, hoy → «en vuelo»: NO se vuelve a cobrar
+  await nota(m3, 'MOROSIDAD', 'GENERADA', { creadoPor: adminId }); // borrador del panel (envío manual) → NO bloquea
+  await nota(m4, 'MOROSIDAD', 'GENERADA', { dias: 8 });            // bot, pero fuera de la ventana de 7 días → vuelve a ser candidato
+  await nota(m5, 'MOROSIDAD', 'ENVIADA');                          // control: comportamiento previo intacto
+  const mor = await morosos();
+  assert.deepEqual([m1, m2, m3, m4, m5].map((m) => mor.includes(m.estId)), [true, false, true, true, false]);
+
+  // ── H4 · PREVENTIVA (una por cuota, sin ventana temporal) ──
+  const [p1, p2, p3, p4] = [await prev(1), await prev(2), await prev(3), await prev(4)];
+  await nota(p2, 'PREVENTIVA', 'GENERADA', { dias: 1, cuota: p2.cuotaId });                      // bot, el ciclo de ayer: huérfana tras una caída → bloquea el reenvío
+  await nota(p3, 'PREVENTIVA', 'GENERADA', { creadoPor: adminId, cuota: p3.cuotaId });           // panel → NO bloquea
+  await nota(p4, 'PREVENTIVA', 'FALLIDA', { dias: 1, cuota: p4.cuotaId });                       // una FALLIDA se reintenta (como siempre)
+  const prv = await preventivas();
+  assert.deepEqual([p1, p2, p3, p4].map((p) => prv.includes(p.estId)), [true, false, true, true]);
+
+  // ── H1 · enfriamiento: >= 3 FALLIDA del MISMO tipo en los últimos 7 días ──
+  const [c1, c2, c3, c4] = [await moroso(6), await moroso(7), await moroso(8), await moroso(9)];
+  for (const dias of [1, 2]) await nota(c1, 'MOROSIDAD', 'FALLIDA', { dias });      // 2 → todavía se intenta
+  for (const dias of [1, 2, 3]) await nota(c2, 'MOROSIDAD', 'FALLIDA', { dias });   // 3 dentro de la ventana → enfriamiento
+  for (const dias of [1, 2, 8]) await nota(c3, 'MOROSIDAD', 'FALLIDA', { dias });   // una es de hace 8 días: solo 2 cuentan
+  for (const dias of [1, 2, 3]) await nota(c4, 'PREVENTIVA', 'FALLIDA', { dias });  // son de OTRO tipo: no enfrían la morosidad
+  const mor2 = await morosos();
+  assert.deepEqual([c1, c2, c3, c4].map((c) => mor2.includes(c.estId)), [true, false, true, true]);
+
+  const [q1, q2, q3] = [await prev(5), await prev(6), await prev(7)];
+  for (const dias of [1, 2, 3]) await nota(q1, 'PREVENTIVA', 'FALLIDA', { dias, cuota: q1.cuotaId });
+  for (const dias of [1, 2, 9]) await nota(q2, 'PREVENTIVA', 'FALLIDA', { dias, cuota: q2.cuotaId });
+  for (const dias of [1, 2, 3]) await nota(q3, 'MOROSIDAD', 'FALLIDA', { dias });
+  const prv2 = await preventivas();
+  assert.deepEqual([q1, q2, q3].map((q) => prv2.includes(q.estId)), [false, true, true]);
+
+  // Los umbrales son parámetros: con maxFallidas = 2 el estudiante con 2 FALLIDA recientes (c1) pasa a enfriamiento.
+  const estricto = ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim, enfriamiento: { dias: 7, maxFallidas: 2 } }));
+  assert.ok(!estricto.includes(c1.estId));
+});
+
+t('cron WhatsApp H3 (BD real): si otra instancia toma el arrendamiento a mitad del ciclo, la renovación lo detecta y el ciclo se aborta sin enviar más; el lease ajeno no se borra', async () => {
+  const { crearCronWhatsapp, CLAVE_LEASE } = require('../cron/whatsappCron');
+  const hoy = svc.hoy();
+  for (let i = 0; i < 30; i += 1) await sembrar({ vence: sumarDias(hoy, -3), nombres: `H3Lease${i}`, apellidos: 'Congelado' });
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
+  const llamadas = [];
+  const notificaciones = {
+    VENTANA_PREVENTIVA: svc.notif.VENTANA_PREVENTIVA,
+    generarAlerta: async (a) => {
+      llamadas.push(a.estudianteId);
+      // Tras el 5.º envío «otra instancia» toma el lease: es lo que ocurre si este proceso se congela más que `arrendamientoMin`.
+      if (llamadas.length === 5) await db.ejecutar(`UPDATE parametros SET valor = 'otra-instancia', actualizado_en = NOW() WHERE clave = $1`, [CLAVE_LEASE]);
+      return { notificacion_id: 0 };
+    },
+  };
+  const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: 100000, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
+  const cron = crearCronWhatsapp({ db, guard: svc.guard.crearGuard({ ttlMs: 0 }), notificaciones, whatsapp: { configurado: () => true }, bcv: { obtenerTasa: async () => ({}) },
+    config, esperar: async () => {}, log: () => {}, logError: () => {} });
+  try {
+    const r = await cron.ejecutarCiclo();
+    assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'LEASE_PERDIDO']);
+    assert.equal(llamadas.length, 24, 'la renovación se hace en el intento 25 y el ciclo se aborta ANTES de enviarlo');
+    assert.equal((await uno(`SELECT valor FROM parametros WHERE clave = $1`, [CLAVE_LEASE])).valor, 'otra-instancia', 'liberarLease solo borra el arrendamiento propio');
+  } finally {
+    await db.ejecutar(`DELETE FROM parametros WHERE clave = $1`, [CLAVE_LEASE]);
+    await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
+  }
+});
 
 t('salud: SELECT 1 responde y una segunda llamada a closePool es inocua', async () => {
   assert.equal((await uno('SELECT 1 AS ok')).ok, 1);

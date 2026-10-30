@@ -1,0 +1,944 @@
+diff --git a/CAMBIOS_BMA_SEGURIDAD_WHATSAPP.md b/CAMBIOS_BMA_SEGURIDAD_WHATSAPP.md
+new file mode 100644
+index 0000000..e7200a7
+--- /dev/null
++++ b/CAMBIOS_BMA_SEGURIDAD_WHATSAPP.md
+@@ -0,0 +1,90 @@
++# CAMBIOS_BMA_SEGURIDAD_WHATSAPP — Blindaje de admisiones y resiliencia del cron de WhatsApp
++
++**Proyecto:** Brilliant Minds Academy · Core Base · **Rama base:** `development` (commit `22bf84d`, verificado contra el remoto antes de empezar) · **Agente:** Arquitecto Principal / Auditor de Seguridad, Astra Digital Solutions · **Motor:** PostgreSQL / Supabase (parámetros posicionales `$1, $2, $3`)
++
++Cierra los hallazgos **H1–H4** de la auditoría. Sin residuos de T-SQL: la consulta de seguridad y las dos masivas del cron siguen siendo PostgreSQL nativo con `$n` y casts explícitos; los errores viajan por el contrato JSON de `AppError`.
++
++| Hallazgo | Problema | Solución |
++|---|---|---|
++| **H2** Suplantación en admisiones | El formulario público (anónimo) reescribía nombre, correo y **teléfono** de un representante existente con solo conocer su cédula; ese teléfono recibe los enlaces privados del portal. | `ON CONFLICT` ya no toca `telefono`. El correo guardado manda (`COALESCE(representantes.email, EXCLUDED.email)`). Un teléfono distinto se retiene en `telefono_pendiente` (+ `telefono_pendiente_en`) hasta aprobación humana. |
++| **H1** Un padre sin WhatsApp aborta el ciclo | Todo fallo de Meta sumaba a `fallosSeguidos`; 5 números no entregables cortaban el envío a todos. | `whatsapp.service` clasifica el error de Meta (`DESTINATARIO` / `SISTEMICA` / `DESCONOCIDA`). Del destinatario: queda `FALLIDA` y el ciclo sigue. Sistémico: aborta ya. Desconocido: cuenta como antes. Enfriamiento: no se reintenta con ≥ 3 `FALLIDA` del mismo tipo en 7 días. |
++| **H3** Lease perdido sin detectar | `renovarLease` ignoraba el resultado: un proceso congelado seguía enviando junto a la instancia que tomó el control. | Devuelve `rowCount > 0`. Si es `false` el ciclo se aborta **antes** de enviar (`LEASE_PERDIDO`). Un error transitorio al renovar no se confunde con pérdida. |
++| **H4** Ventana de duplicados | Una fila `GENERADA` huérfana (caída entre Meta y el `UPDATE` a `ENVIADA`) no bloqueaba, y al día siguiente se reenviaba. | El de-duplicador trata `GENERADA` con `creado_por IS NULL` (creada por el bot) como «en vuelo». Las `GENERADA` del panel (borradores manuales) **no** bloquean. |
++
++## Verificación realizada (y sus límites)
++
++| Verificación | Resultado |
++|---|---|
++| `node --test tests/*.test.js` | 186 pruebas: **131 pasan, 0 fallan**, 55 omitidas (integración sin `PG_TEST_PORT`). Coincide con la corrida local del usuario. |
++| `PG_TEST_PORT=… node --test tests/integracion.pg.test.js` contra **PostgreSQL 16.15 real** | **55/55** (línea base de `22bf84d` sin estos cambios: 52/52). Incluye el SQL real de de-duplicación y enfriamiento, el upsert, el `rowCount` del lease y las pruebas `008` de multi-sede del commit base. |
++| Verificación inversa (¿las pruebas detectan el bug?) | Con el código de producción **revertido** a `development` y las pruebas nuevas puestas: fallan 9 unitarias (8 pruebas + el archivo de clasificación, que ni siquiera carga) y 4 de integración. Con el código nuevo pasan. |
++| Idempotencia de `009` | Aplicada dos veces sobre una base real: la 2.ª solo emite `NOTICE … skipping`. |
++| Auditoría del diff | 0 residuos T-SQL, 0 interpolaciones `${}` en SQL, 0 marcadores no posicionales. |
++
++**Límites.** No se probó contra un proyecto Supabase real (pooler en modo transacción) ni contra la API real de Meta: la integración corre en PostgreSQL 16 estándar con los roles `anon`/`authenticated` simulados, y los errores de Meta se reproducen con el servicio real y `http` simulado. Los códigos se contrastaron con la tabla oficial de errores de la Cloud API de WhatsApp; **131030 no figura en ella** y por eso queda sin clasificar. Un clúster local en `SQL_ASCII`/`C` hace fallar el test de CRM (`ILIKE` con acentos) por el *locale*, ajeno a este cambio; con `UTF8` pasa.
++
++## 1. H2 · `services/admisiones.service.js` + migración `009`
++
++- Se numera `009` porque `22bf84d` ya trae `008_nuevos_premium.sql`.
++- `representantes.telefono_pendiente VARCHAR(20)` (misma `CHECK` que `telefono`: sin espacios, 10–15) y `telefono_pendiente_en TIMESTAMPTZ`. Una columna por `ALTER … IF NOT EXISTS`.
++- Mismo teléfono → no se genera pendiente y **no se borra** uno previo. Teléfono distinto → queda el más reciente; la verificación humana es el control.
++- La inscripción del alumno **prosigue** (cuota, referencia, expediente); solo el contacto del representante queda intacto. Los recordatorios siguen yendo al teléfono verificado.
++- Aviso en el log del servidor **solo tras el COMMIT**, con ids y sin teléfonos. La respuesta pública no dice nada: revelar «tu cédula ya existía» permitiría enumerar cédulas.
++
++## 2. H1 · `services/whatsapp.service.js` y `cron/whatsappCron.js`
++
++- El `codigo` público sigue siendo `WHATSAPP_ENVIO_FALLIDO` (502): el envío manual y el frontend no cambian. Ahora `detalles = { motivo, meta_codigo, http_status, clase }`.
++- **Del destinatario:** 131021, 131026, 131047, 131049, 131050, 131056. **Sistémicos:** 0, 4, 10, 190, 200–299, 368, 80007, 130429, 131005, 131031, 131037, 131042, 131045, 131048, 132000, 132001, 132005, 132007, 132015, 132016, 133010. Todo lo demás (100, 131009, 131000, red, timeouts…) queda `DESCONOCIDA` y cuenta para el cortafuegos igual que antes. Editable en dos `Set` al inicio del servicio.
++- Un `code` nulo o vacío **no** se toma por el `0` (token inválido): conversión estricta.
++- Abortos nuevos en el resumen: `META_SISTEMICA_190`, `META_SISTEMICA_132001`, `META_SISTEMICA_HTTP_401`, `LEASE_PERDIDO`.
++- Enfriamiento: constante `ENFRIAMIENTO = { dias: 7, maxFallidas: 3 }`, exportada y aceptada como parámetro `enfriamiento` por `candidatosPreventiva` / `candidatosMorosidad` (hoy el ciclo usa el valor por defecto; moverlo a variables de entorno es trivial si lo prefieres).
++
++## Decisiones de diseño a confirmar
++
++1. **`131047` será la norma, no la excepción.** `enviarTexto` manda `type: 'text'`, que Meta solo entrega dentro de las 24 h posteriores al último mensaje del padre. Un recordatorio iniciado por la academia necesita una **plantilla aprobada**. Ahora esos fallos ya no abortan el ciclo, pero seguirán llegando como `FALLIDA`. Es el cambio funcional pendiente más importante (y entonces 132001 pasa a ser relevante).
++2. **`nombres`/`apellidos` aún se sobrescriben** desde el formulario público. Quedó fuera de lo pedido (solo contacto). Es el mismo tipo de vector: el mensaje se dirige a «Estimado/a <nombre>». Recomendado cerrarlo igual.
++3. **No hay pantalla para aprobar `telefono_pendiente`.** Hasta que exista, se resuelve por SQL (abajo). El siguiente paso natural es un endpoint de administración + bandeja.
++4. **Efecto lateral del enfriamiento.** Una falla sistémica deja una fila `FALLIDA` en el primer estudiante antes de abortar; con el token vencido varios días, ese estudiante acumula 3 y queda en enfriamiento aunque no fuera su culpa. Mejora sugerida: persistir `meta_codigo` en `notificaciones_whatsapp` y contar solo la clase `DESTINATARIO`.
++5. **Trade-off de H4, pedido expresamente.** Una `GENERADA` huérfana por una caída *antes* de llamar a Meta también bloquea (preventiva: esa cuota; morosidad: durante la ventana de N días). Se prefiere no enviar a duplicar. Recuperación abajo.
++6. Las fallas del destinatario son **neutrales** para el cortafuegos: ni suman ni reinician la cuenta.
++
++## SQL de operación
++
++```sql
++-- H2: teléfonos por aprobar
++SELECT id, cedula, telefono, telefono_pendiente, telefono_pendiente_en
++  FROM representantes WHERE telefono_pendiente IS NOT NULL ORDER BY telefono_pendiente_en;
++-- Aprobar / descartar (parámetro $1 = id del representante)
++UPDATE representantes SET telefono = telefono_pendiente, telefono_pendiente = NULL, telefono_pendiente_en = NULL WHERE id = $1 AND telefono_pendiente IS NOT NULL;
++UPDATE representantes SET telefono_pendiente = NULL, telefono_pendiente_en = NULL WHERE id = $1;
++
++-- H4: GENERADA del bot sin resolver. Si el mensaje sí salió → 'ENVIADA'; si no → 'FALLIDA' (cuenta 1 para el enfriamiento)
++SELECT id, estudiante_id, tipo, creado_en FROM notificaciones_whatsapp WHERE estado = 'GENERADA' AND creado_por IS NULL ORDER BY creado_en;
++UPDATE notificaciones_whatsapp SET estado = 'ENVIADA' WHERE id = $1;
++UPDATE notificaciones_whatsapp SET estado = 'FALLIDA', error = 'Revisado manualmente: no se envió' WHERE id = $1;
++```
++
++## Archivos creados
++
++- `database/migrations/009_representantes_telefono_pendiente.sql` — columnas de teléfono pendiente (idempotente).
++- `tests/whatsapp-clasificacion.test.js` — tabla de códigos, guarda contra el `0`, forma de `detalles`, contrato con Meta.
++- `CAMBIOS_BMA_SEGURIDAD_WHATSAPP.md` — este resumen.
++
++## Archivos modificados
++
++- `services/admisiones.service.js` — upsert blindado y aviso post-COMMIT.
++- `services/whatsapp.service.js` — `clasificarErrorMeta`, `CLASE_FALLA`, `detalles` estructurado.
++- `cron/whatsappCron.js` — clasificación de fallas, enfriamiento, `GENERADA` en vuelo, `renovarLease` con `rowCount`.
++- `tests/whatsapp-cron.test.js` — dobles con lease; errores producidos por el servicio real; 7 pruebas nuevas.
++- `tests/admisiones.test.js` — 3 pruebas nuevas de H2.
++- `tests/integracion.pg.test.js` — el total de migraciones pasa a calcularse desde el directorio (`NUM_MIGRACIONES`) en vez de un número cableado; el test de la 2.ª inscripción pasa a exigir lo contrario (**el viejo exigía que el teléfono se sobrescribiera, es decir, codificaba el bug**); 3 pruebas nuevas contra PostgreSQL real.
++
++## Cómo aplicar
++
++```bash
++git checkout development   # debe estar en 22bf84d
++git apply --check bma-seguridad-whatsapp.patch && git apply bma-seguridad-whatsapp.patch
++npm run migrate                                   # aplica 009 (una sola vez, dentro de una transacción)
++npm test                                          # unitarias
++PG_TEST_PORT=5432 npm run test:integracion        # contra un PostgreSQL desechable (NO la base de producción)
++```
+diff --git a/cron/whatsappCron.js b/cron/whatsappCron.js
+index 17a0e38..ec800d1 100644
+--- a/cron/whatsappCron.js
++++ b/cron/whatsappCron.js
+@@ -14,10 +14,19 @@
+  *   - Candado premium: si el módulo no está habilitado (o su prueba de 15 días venció) el ciclo no envía nada.
+  *   - Idempotente: una PREVENTIVA se envía una sola vez por cuota; la MOROSIDAD no se repite al mismo estudiante antes de
+  *     WHATSAPP_CRON_MOROSIDAD_CADA_DIAS (7). Relanzar el ciclo el mismo día no duplica mensajes.
++ *   - Sin duplicados por caídas (H4): una fila 'GENERADA' creada por el bot (creado_por NULL) se trata como «en vuelo». Si el
++ *     proceso murió (o falló el UPDATE a 'ENVIADA') después de llamar a Meta, esa fila bloquea el reenvío en vez de duplicarlo.
++ *     Las 'GENERADA' creadas por un usuario del panel (borradores para enviar a mano) NO bloquean.
+  *   - Un solo ciclo a la vez entre instancias: arrendamiento (lease) en la tabla `parametros`; funciona detrás del pooler
+- *     de Supabase en modo transacción (no usa locks de sesión) y caduca solo si el proceso muere.
+- *   - Cortafuegos: se aborta ante una falla sistémica (tasa BCV no disponible, WhatsApp sin configurar) o tras
+- *     WHATSAPP_CRON_MAX_FALLOS_SEGUIDOS fallos consecutivos, y se limita a WHATSAPP_CRON_MAX_ENVIOS por ciclo.
++ *     de Supabase en modo transacción (no usa locks de sesión) y caduca solo si el proceso muere. Si el proceso se congela y otra
++ *     instancia toma el lease, la renovación lo detecta (rowCount) y este ciclo se aborta con 'LEASE_PERDIDO' (H3).
++ *   - Cortafuegos con clasificación de fallas de Meta (H1):
++ *       · del DESTINATARIO (131026 no entregable, 131047 fuera de ventana…): la fila queda 'FALLIDA' en el histórico, el ciclo
++ *         sigue y NO suma a `fallosSeguidos` (un padre sin WhatsApp no es una avería);
++ *       · SISTÉMICAS (190 token vencido, 132001 plantilla inexistente, tasa BCV caída, WhatsApp sin configurar…): se aborta ya;
++ *       · desconocidas / de red: cuentan para WHATSAPP_CRON_MAX_FALLOS_SEGUIDOS (comportamiento conservador previo).
++ *     Además se limita a WHATSAPP_CRON_MAX_ENVIOS por ciclo.
++ *   - Enfriamiento por estudiante: no se reintenta a quien acumule >= 3 'FALLIDA' del mismo tipo en los últimos 7 días.
+  *   - La tasa BCV se consulta fresca como mucho una vez por minuto durante el ciclo (no una vez por mensaje).
+  *
+  * Uso:
+@@ -32,7 +41,7 @@ const { hoyCaracas, aFechaSql } = require('../utils/fechas');
+ const { guard: guardGlobal } = require('../modules/premium/guard');
+ const notificacionesGlobal = require('../services/notificaciones.service');
+ const { bcv: bcvGlobal } = require('../services/bcv.service');
+-const { whatsapp: whatsappGlobal } = require('../services/whatsapp.service');
++const { whatsapp: whatsappGlobal, CLASE_FALLA } = require('../services/whatsapp.service');
+ 
+ const MODULO = 'WHATSAPP_AUTOMATICO';
+ const CLAVE_LEASE = 'WHATSAPP_CRON_LEASE';
+@@ -40,6 +49,8 @@ const OFFSET_CARACAS_MS = 4 * 3600_000;
+ const MS_DIA = 86_400_000;
+ const REFRESCO_TASA_MS = 60_000;
+ const RENOVAR_LEASE_CADA = 25;
++// Enfriamiento por estudiante: con `maxFallidas` filas 'FALLIDA' del mismo tipo dentro de los últimos `dias` días no se reintenta.
++const ENFRIAMIENTO = Object.freeze({ dias: 7, maxFallidas: 3 });
+ 
+ // Errores de reglas de negocio: el estado del estudiante cambió entre la consulta masiva y el envío → se omite sin contar como fallo.
+ const CODIGOS_OMITIR = new Set(['ESTADO_NO_APLICA', 'SIN_CUOTA_PROXIMA', 'FUERA_DE_VENTANA_PREVENTIVA', 'ESTUDIANTE_NO_MOROSO', 'PAGO_EN_REVISION', 'NO_ENCONTRADO']);
+@@ -53,6 +64,9 @@ const esperarReal = (ms) => new Promise((resolve) => { setTimeout(resolve, ms);
+ /**
+  * Activos con la próxima cuota Pendiente (>= hoy) dentro de la ventana [hoy+min, hoy+max] y sin PREVENTIVA ya enviada para esa cuota.
+  * Misma definición de "próxima cuota" que notificaciones.prepararPreventiva: la de menor vencimiento ≥ hoy por estudiante.
++ *   · «Ya enviada» incluye la fila 'GENERADA' creada por el bot ($10, creado_por NULL): está «en vuelo» o quedó huérfana tras una caída
++ *     entre la llamada a Meta y el UPDATE a 'ENVIADA'; reenviar duplicaría el mensaje (H4). Los borradores 'GENERADA' del panel no cuentan.
++ *   · Enfriamiento: se excluye al estudiante con >= $13 filas $11 ('FALLIDA') de este tipo en los últimos $12 días (H1).
+  */
+ const SQL_CANDIDATOS_PREVENTIVA = `
+   SELECT p.estudiante_id, p.cuota_id, p.fecha_vencimiento
+@@ -66,13 +80,18 @@ const SQL_CANDIDATOS_PREVENTIVA = `
+     ) p
+    WHERE p.fecha_vencimiento BETWEEN ($1::date + $2::int) AND ($1::date + $3::int)
+      AND NOT EXISTS (SELECT 1 FROM notificaciones_whatsapp n
+-                      WHERE n.cuota_id = p.cuota_id AND n.tipo = $7::text AND n.estado = $8::text)
++                      WHERE n.cuota_id = p.cuota_id AND n.tipo = $7::text
++                        AND (n.estado = $8::text OR (n.estado = $10::text AND n.creado_por IS NULL)))
++     AND (SELECT COUNT(*) FROM notificaciones_whatsapp f
++           WHERE f.estudiante_id = p.estudiante_id AND f.tipo = $7::text AND f.estado = $11::text
++             AND f.creado_en > NOW() - ($12::int * INTERVAL '1 day')) < $13::int
+    ORDER BY p.fecha_vencimiento, p.estudiante_id
+    LIMIT $4::int`;
+ 
+ /**
+  * Morosos con al menos una cuota vencida en estado Pendiente (si todas están En Revisión no aparecen) y sin cobro ENVIADO
+- * dentro de los últimos N días.
++ * dentro de los últimos N días. Igual que en la preventiva: la 'GENERADA' del bot ($9) cuenta como cobro en vuelo dentro de esa misma
++ * ventana (H4) y el estudiante con >= $12 'FALLIDA' ($10) de MOROSIDAD en los últimos $11 días queda en enfriamiento (H1).
+  */
+ const SQL_CANDIDATOS_MOROSIDAD = `
+   SELECT v.id AS estudiante_id, MIN(c.fecha_vencimiento) AS vencida_desde
+@@ -81,8 +100,12 @@ const SQL_CANDIDATOS_MOROSIDAD = `
+    WHERE v.estado_dinamico = $5::text
+      AND (($8::int IS NOT NULL AND v.sede_id = $8::int) OR ($8::int IS NULL AND v.sede_id IS NULL))
+      AND NOT EXISTS (SELECT 1 FROM notificaciones_whatsapp n
+-                      WHERE n.estudiante_id = v.id AND n.tipo = $6::text AND n.estado = $7::text
++                      WHERE n.estudiante_id = v.id AND n.tipo = $6::text
++                        AND (n.estado = $7::text OR (n.estado = $9::text AND n.creado_por IS NULL))
+                         AND n.creado_en > NOW() - ($2::int * INTERVAL '1 day'))
++     AND (SELECT COUNT(*) FROM notificaciones_whatsapp f
++           WHERE f.estudiante_id = v.id AND f.tipo = $6::text AND f.estado = $10::text
++             AND f.creado_en > NOW() - ($11::int * INTERVAL '1 day')) < $12::int
+    GROUP BY v.id
+    ORDER BY MIN(c.fecha_vencimiento), v.id
+    LIMIT $3::int`;
+@@ -91,13 +114,17 @@ const SQL_CANDIDATOS_MOROSIDAD = `
+  * `sedeId` entero → solo los estudiantes de esa sede; `null` → solo los que NO tienen sede asignada (datos anteriores a la
+  * migración multi-sede). Cada sede se procesa por separado: ver ejecutarCiclo().
+  */
+-async function candidatosPreventiva({ hoy, ventana, limite, sedeId = null, db = { ejecutar } }) {
+-  const r = await db.ejecutar(SQL_CANDIDATOS_PREVENTIVA, [aFechaSql(hoy), ventana.min, ventana.max, limite, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', sedeId]);
++async function candidatosPreventiva({ hoy, ventana, limite, sedeId = null, enfriamiento = ENFRIAMIENTO, db = { ejecutar } }) {
++  const r = await db.ejecutar(SQL_CANDIDATOS_PREVENTIVA, [
++    aFechaSql(hoy), ventana.min, ventana.max, limite, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', sedeId,
++    'GENERADA', 'FALLIDA', enfriamiento.dias, enfriamiento.maxFallidas]);
+   return r.rows;
+ }
+ 
+-async function candidatosMorosidad({ hoy, cadaDias, limite, sedeId = null, db = { ejecutar } }) {
+-  const r = await db.ejecutar(SQL_CANDIDATOS_MOROSIDAD, [aFechaSql(hoy), cadaDias, limite, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', sedeId]);
++async function candidatosMorosidad({ hoy, cadaDias, limite, sedeId = null, enfriamiento = ENFRIAMIENTO, db = { ejecutar } }) {
++  const r = await db.ejecutar(SQL_CANDIDATOS_MOROSIDAD, [
++    aFechaSql(hoy), cadaDias, limite, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', sedeId,
++    'GENERADA', 'FALLIDA', enfriamiento.dias, enfriamiento.maxFallidas]);
+   return r.rows;
+ }
+ 
+@@ -113,14 +140,37 @@ async function adquirirLease(db, titular, minutos) {
+   return r.rowCount > 0;
+ }
+ 
+-const renovarLease = (db, titular) =>
+-  db.ejecutar('UPDATE parametros SET actualizado_en = NOW() WHERE clave = $1 AND valor = $2', [CLAVE_LEASE, titular]);
++/**
++ * Renueva el arrendamiento SOLO si seguimos siendo el titular (valor = $2). Devuelve `true` si lo renovó y `false` si ya no es
++ * nuestro (H3): el proceso se congeló más que el lease, caducó y otra instancia lo tomó. Quien llama debe abortar sin enviar más.
++ */
++async function renovarLease(db, titular) {
++  const r = await db.ejecutar('UPDATE parametros SET actualizado_en = NOW() WHERE clave = $1 AND valor = $2', [CLAVE_LEASE, titular]);
++  return r.rowCount > 0;
++}
+ 
+ const liberarLease = (db, titular) =>
+   db.ejecutar('DELETE FROM parametros WHERE clave = $1 AND valor = $2', [CLAVE_LEASE, titular]);
+ 
+ // ───────────────────────── Utilidades puras ─────────────────────────
+ 
++/**
++ * Clase de la falla (ver whatsapp.service). Solo se confía en `detalles.clase` cuando el error viene de un envío a Meta; cualquier
++ * otra cosa (error de base, bug, error sin clase) es DESCONOCIDA y conserva el tratamiento conservador: cuenta para el cortafuegos.
++ */
++function claseDeFalla(err) {
++  if (!err || err.codigo !== 'WHATSAPP_ENVIO_FALLIDO' || !err.detalles) return CLASE_FALLA.DESCONOCIDA;
++  const c = err.detalles.clase;
++  return c === CLASE_FALLA.DESTINATARIO || c === CLASE_FALLA.SISTEMICA ? c : CLASE_FALLA.DESCONOCIDA;
++}
++
++/** Motivo de aborto legible para el resumen: `META_SISTEMICA_190`, `META_SISTEMICA_132001` o `META_SISTEMICA_HTTP_401`. */
++function etiquetaAbortoMeta(err) {
++  const d = (err && err.detalles) || {};
++  if (Number.isInteger(d.meta_codigo)) return `META_SISTEMICA_${d.meta_codigo}`;
++  return d.http_status ? `META_SISTEMICA_HTTP_${d.http_status}` : 'META_SISTEMICA';
++}
++
+ /** Milisegundos hasta la próxima ocurrencia de `hora` ('HH:MM', hora de Caracas). Siempre > 0 y <= 24 h. */
+ function msHastaProximaEjecucion(hora, ahoraMs = Date.now()) {
+   const [h, m] = hora.split(':').map(Number);
+@@ -175,7 +225,17 @@ function crearCronWhatsapp({
+       if (estado.llamoAMeta) await esperar(config.delayMs); // pausa anti-baneo entre envíos consecutivos
+       estado.llamoAMeta = false;
+       estado.intentos += 1;
+-      if (estado.intentos % RENOVAR_LEASE_CADA === 0) await renovarLease(db, estado.titular).catch((e) => logError('No se pudo renovar el arrendamiento:', e.message));
++      if (estado.intentos % RENOVAR_LEASE_CADA === 0) {
++        // H3: `true` = seguimos siendo el titular; `false` = otra instancia tomó el lease (este proceso estuvo congelado más de
++        // `arrendamientoMin`) → se aborta ANTES de enviar este mensaje para no duplicar envíos con la otra instancia.
++        // Un error transitorio de la base (`null`) no es evidencia de pérdida: se registra y se sigue, como antes.
++        const vigente = await renovarLease(db, estado.titular).catch((err) => { logError('No se pudo renovar el arrendamiento:', err.message); return null; });
++        if (vigente === false) {
++          logError('El arrendamiento ya no es nuestro (otra instancia lo tomó); se aborta el ciclo sin enviar más mensajes.');
++          resumen.abortado = 'LEASE_PERDIDO';
++          return;
++        }
++      }
+ 
+       const parcial = resumen[item.tipo.toLowerCase()];
+       try {
+@@ -194,10 +254,16 @@ function crearCronWhatsapp({
+           continue;
+         }
+         if (codigo === 'WHATSAPP_ENVIO_FALLIDO') estado.llamoAMeta = true; // la solicitud sí llegó a Meta
++        // La fila ya quedó 'FALLIDA' en notificaciones_whatsapp (la escribe notificaciones.generarAlerta antes de relanzar el error).
++        const clase = claseDeFalla(err);
+         parcial.fallidas += 1;
+-        estado.fallosSeguidos += 1;
+-        logError(`${item.tipo} FALLIDA estudiante=${item.estudiante_id}: ${codigo || 'ERROR'} ${(err && err.detalles && err.detalles.motivo) || (err && err.message)}`);
++        logError(`${item.tipo} FALLIDA estudiante=${item.estudiante_id}: ${codigo || 'ERROR'}${clase === CLASE_FALLA.DESCONOCIDA ? '' : ` [${clase}]`} ${(err && err.detalles && err.detalles.motivo) || (err && err.message)}`);
+         if (CODIGOS_ABORTAR.has(codigo)) { resumen.abortado = codigo; return; }
++        // Falla sistémica de Meta (token vencido, plantilla inexistente…): cualquier envío siguiente fallaría igual → se corta ya.
++        if (clase === CLASE_FALLA.SISTEMICA) { resumen.abortado = etiquetaAbortoMeta(err); return; }
++        // Falla del destinatario (no entregable, fuera de ventana…): queda registrada, pero NO es una avería → no suma al cortafuegos.
++        if (clase === CLASE_FALLA.DESTINATARIO) continue;
++        estado.fallosSeguidos += 1;
+         if (estado.fallosSeguidos >= config.maxFallosSeguidos) { resumen.abortado = 'DEMASIADOS_FALLOS_SEGUIDOS'; return; }
+       }
+     }
+@@ -292,7 +358,7 @@ function crearCronWhatsapp({
+ 
+ const cron = crearCronWhatsapp();
+ 
+-module.exports = { crearCronWhatsapp, cron, msHastaProximaEjecucion, bcvDelCiclo, candidatosPreventiva, candidatosMorosidad, MODULO, CLAVE_LEASE };
++module.exports = { crearCronWhatsapp, cron, msHastaProximaEjecucion, bcvDelCiclo, candidatosPreventiva, candidatosMorosidad, MODULO, CLAVE_LEASE, ENFRIAMIENTO };
+ 
+ // Ejecución directa: `node cron/whatsappCron.js` (un ciclo) o `node cron/whatsappCron.js --daemon` (planificador propio).
+ if (require.main === module) {
+diff --git a/database/migrations/009_representantes_telefono_pendiente.sql b/database/migrations/009_representantes_telefono_pendiente.sql
+new file mode 100644
+index 0000000..e860ce1
+--- /dev/null
++++ b/database/migrations/009_representantes_telefono_pendiente.sql
+@@ -0,0 +1,8 @@
++-- 009_representantes_telefono_pendiente.sql — Blindaje contra suplantación en admisiones (hallazgo H2).
++-- El formulario público es anónimo: quien conozca una cédula NO puede reescribir el teléfono de un representante existente
++-- (ese número recibe los enlaces privados del portal por WhatsApp). Un teléfono distinto llegado por el formulario se guarda
++-- AQUÍ, sin tocar `representantes.telefono`, hasta que una persona de la administración lo apruebe o lo descarte.
++-- `telefono` sigue siendo el único número verificado y el único que usan las notificaciones.
++
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS telefono_pendiente VARCHAR(20) NULL CONSTRAINT ck_representantes_tel_pendiente CHECK (telefono_pendiente IS NULL OR (telefono_pendiente !~ '\s' AND char_length(telefono_pendiente) BETWEEN 10 AND 15));
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS telefono_pendiente_en TIMESTAMPTZ NULL;
+diff --git a/services/admisiones.service.js b/services/admisiones.service.js
+index 021259b..2aaf842 100644
+--- a/services/admisiones.service.js
++++ b/services/admisiones.service.js
+@@ -41,7 +41,7 @@ async function configInvitacion(token, { bcvSvc = bcv } = {}) {
+ 
+ /**
+  * Inscripción completa en UNA transacción:
+- *   1) representante (upsert por cédula) → 2) estudiante "Pendiente por Validación Administrativa"
++ *   1) representante (upsert por cédula; si ya existía, sus datos de contacto NO se sobrescriben: ver el comentario del upsert) → 2) estudiante "Pendiente por Validación Administrativa"
+  *   3) cuota de matrícula + referencia bancaria "Por Validar" a la tasa BCV del momento
+  *   4) carpeta 'Nombre_Apellido_ID' en Drive con los 3 documentos → 5) COMMIT.
+  * Con `invitacion` ({ id, sede_id, nivel_asignado } ya resuelta por el controlador) el SERVIDOR impone el nivel y la sede (se ignora el
+@@ -58,24 +58,33 @@ async function registrarInscripcion({ datos, archivos, invitacion = null }, { bc
+   let estudianteIdCreado = null;
+   let resultado = null;
+   let callbackTerminado = false; // true = solo faltaba el COMMIT: si algo falla ya, el resultado en la base es ambiguo
++  let representanteConTelefonoEnRevision = null; // id del representante cuyo teléfono nuevo quedó retenido (se avisa tras el COMMIT)
+ 
+   try {
+-    return await conTransaccion(async (tx) => {
++    const confirmada = await conTransaccion(async (tx) => {
+       // El enlace se consume PRIMERO: si otro envío lo usó entre tanto, falla aquí (410) antes de tocar Drive ni crear nada.
+       if (invitacion) await invitaciones.consumir(tx, invitacion.id);
+ 
+-      // Upsert atómico por cédula (UNIQUE): sin ventana de carrera entre SELECT e INSERT. El correo existente no se borra si llega vacío.
++      // Upsert atómico por cédula (UNIQUE): sin ventana de carrera entre SELECT e INSERT.
++      // Blindaje anti-suplantación (H2): el formulario es PÚBLICO, así que si la cédula ya existe NO puede reescribir sus datos de
++      // contacto. El correo guardado manda (solo se rellena si estaba vacío) y un teléfono distinto NO se aplica: queda en
++      // `telefono_pendiente` hasta que la administración lo apruebe, porque a `telefono` llegan los enlaces privados del portal.
+       const rep = await ejecutar(
+         `INSERT INTO representantes (nombres, apellidos, cedula, email, telefono)
+          VALUES ($1, $2, $3, $4, $5)
+          ON CONFLICT (cedula) DO UPDATE
+             SET nombres = EXCLUDED.nombres, apellidos = EXCLUDED.apellidos,
+-                email = COALESCE(EXCLUDED.email, representantes.email), telefono = EXCLUDED.telefono
+-         RETURNING id`,
++                email = COALESCE(representantes.email, EXCLUDED.email),
++                telefono_pendiente = CASE WHEN representantes.telefono IS DISTINCT FROM EXCLUDED.telefono
++                                          THEN EXCLUDED.telefono ELSE representantes.telefono_pendiente END,
++                telefono_pendiente_en = CASE WHEN representantes.telefono IS DISTINCT FROM EXCLUDED.telefono
++                                             THEN NOW() ELSE representantes.telefono_pendiente_en END
++         RETURNING id, (telefono_pendiente IS NOT NULL) AS telefono_en_revision`,
+         // La cédula se guarda en mayúsculas: PostgreSQL distingue "v-123" de "V-123" y duplicaría al representante.
+         [datos.representante_nombres, datos.representante_apellidos, datos.representante_cedula.toUpperCase(), datos.representante_email, datos.telefono],
+         tx);
+       const representanteId = rep.rows[0].id;
++      if (rep.rows[0].telefono_en_revision === true) representanteConTelefonoEnRevision = representanteId;
+ 
+       const est = await ejecutar(
+         `INSERT INTO estudiantes
+@@ -135,6 +144,12 @@ async function registrarInscripcion({ datos, archivos, invitacion = null }, { bc
+       callbackTerminado = true;
+       return resultado;
+     });
++    // Solo tras el COMMIT: si la transacción se hubiera revertido, este aviso afirmaría algo que no quedó guardado.
++    // Va únicamente al log del servidor (con ids, sin teléfonos): la respuesta pública NO revela que la cédula ya existía.
++    if (representanteConTelefonoEnRevision !== null) {
++      console.warn(`[admisiones] Representante ${representanteConTelefonoEnRevision}: el formulario trajo un teléfono distinto; se conserva el verificado y el nuevo queda PENDIENTE de aprobación (estudiante ${estudianteIdCreado}).`);
++    }
++    return confirmada;
+   } catch (err) {
+     if (!carpetaCreada) throw err; // nada que compensar en Drive (la subida se limpia a sí misma si falla)
+ 
+diff --git a/services/whatsapp.service.js b/services/whatsapp.service.js
+index 92b81bb..aa44eff 100644
+--- a/services/whatsapp.service.js
++++ b/services/whatsapp.service.js
+@@ -3,9 +3,63 @@ const axios = require('axios');
+ const cfg = require('../config/env');
+ const { AppError, e } = require('../errors/AppError');
+ 
++/**
++ * Clasificación de las fallas de Meta (hallazgo H1). Quien llama (el cron) decide qué hacer según la CLASE:
++ *   DESTINATARIO — el problema es de ESTE destinatario/mensaje (no está en WhatsApp, pasaron 24 h desde su último mensaje, límite
++ *                  por par, opt-out…). Reintentar con el SIGUIENTE estudiante funcionaría igual de bien: no debe cortar el ciclo.
++ *   SISTEMICA    — token vencido, permisos, plantilla inexistente/pausada, cuenta restringida, límites de la cuenta…: cualquier otro
++ *                  envío fallaría igual, así que se corta el ciclo de inmediato.
++ *   DESCONOCIDA  — código no documentado como inequívoco, error de red o sin cuerpo de Meta: comportamiento conservador previo
++ *                  (cuenta para el cortafuegos de fallos seguidos).
++ * Fuente de los códigos: tabla oficial de errores de la Cloud API de WhatsApp (developers.facebook.com → WhatsApp → Error codes).
++ * Los ambiguos (p. ej. 100/131009 «parámetro inválido», que puede ser el número o la plantilla) se dejan a propósito en DESCONOCIDA.
++ */
++const CLASE_FALLA = Object.freeze({ DESTINATARIO: 'DESTINATARIO', SISTEMICA: 'SISTEMICA', DESCONOCIDA: 'DESCONOCIDA' });
++
++const META_DESTINATARIO = new Set([
++  131021, // remitente y destinatario son el mismo número
++  131026, // mensaje no entregable a este destinatario (no usa WhatsApp, no aceptó términos, cliente desactualizado)
++  131047, // pasaron más de 24 h desde la última respuesta del destinatario (fuera de la ventana de servicio)
++  131049, // Meta frenó el mensaje para proteger la calidad del ecosistema (límite por usuario)
++  131050, // el destinatario se dio de baja de mensajes de marketing
++  131056, // demasiados mensajes entre este par remitente–destinatario en poco tiempo
++]);
++
++const META_SISTEMICOS = new Set([
++  0, 190, // token ausente, vencido, invalidado o revocado
++  4, 80007, 130429, // límites de llamadas / de la cuenta / de throughput: seguir empeoraría el bloqueo
++  10, // permiso no concedido (los 200–299 se evalúan como rango)
++  368, 131031, // cuenta restringida o deshabilitada por incumplir políticas
++  131005, // acceso denegado
++  131037, 131042, 131045, 133010, // número sin nombre aprobado / problema de pago / registro del número / número no registrado
++  131048, // envío restringido desde este número por spam o bloqueos (calidad)
++  132000, 132001, 132005, 132007, 132015, 132016, // plantilla inexistente, mal parametrizada, rechazada, pausada o deshabilitada
++]);
++
++/** Entero estricto o null. `Number(null)` y `Number('')` valen 0, y el 0 de Meta significa «token inválido» (sistémico): no deben colarse. */
++function codigoEntero(v) {
++  if (typeof v === 'number') return Number.isInteger(v) ? v : null;
++  if (typeof v === 'string' && /^\d{1,9}$/.test(v.trim())) return Number(v.trim());
++  return null;
++}
++
++/** @returns {'DESTINATARIO'|'SISTEMICA'|'DESCONOCIDA'} */
++function clasificarErrorMeta({ codigo, http } = {}) {
++  const c = codigoEntero(codigo);
++  if (c !== null) {
++    if (META_DESTINATARIO.has(c)) return CLASE_FALLA.DESTINATARIO;
++    if (META_SISTEMICOS.has(c) || (c >= 200 && c <= 299)) return CLASE_FALLA.SISTEMICA;
++    return CLASE_FALLA.DESCONOCIDA;
++  }
++  // Sin cuerpo de Meta: solo un rechazo de credenciales es inequívocamente sistémico; timeouts y cortes de red no lo son.
++  if (http === 401 || http === 403) return CLASE_FALLA.SISTEMICA;
++  return CLASE_FALLA.DESCONOCIDA;
++}
++
+ /**
+  * Envío por la API oficial de WhatsApp Business (Meta Cloud API). LANZA AppError si Meta rechaza o no está configurada,
+  * para que la notificación quede registrada como FALLIDA en lugar de darse por enviada.
++ * Toda falla de Meta sale como `WHATSAPP_ENVIO_FALLIDO` (502) con `detalles = { motivo, meta_codigo, http_status, clase }`.
+  */
+ function crearWhatsappService({ http = axios, token = cfg.whatsapp.token, phoneId = cfg.whatsapp.phoneNumberId, version = cfg.whatsapp.graphVersion } = {}) {
+   const configurado = () => Boolean(token && phoneId);
+@@ -24,11 +78,15 @@ function crearWhatsappService({ http = axios, token = cfg.whatsapp.token, phoneI
+       if (err instanceof AppError) throw err;
+       const meta = err.response && err.response.data && err.response.data.error;
+       const detalle = meta ? `Meta ${meta.code}: ${meta.message}` : err.message;
+-      throw new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó o no pudo entregar el mensaje.', { motivo: detalle });
++      const metaCodigo = meta ? codigoEntero(meta.code) : null;
++      const httpStatus = (err.response && err.response.status) || null;
++      throw new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó o no pudo entregar el mensaje.', {
++        motivo: detalle, meta_codigo: metaCodigo, http_status: httpStatus, clase: clasificarErrorMeta({ codigo: metaCodigo, http: httpStatus }),
++      });
+     }
+   }
+ 
+   return { enviarTexto, configurado };
+ }
+ 
+-module.exports = { crearWhatsappService, whatsapp: crearWhatsappService() };
++module.exports = { crearWhatsappService, whatsapp: crearWhatsappService(), clasificarErrorMeta, CLASE_FALLA };
+diff --git a/tests/admisiones.test.js b/tests/admisiones.test.js
+index f54bf71..8eee082 100644
+--- a/tests/admisiones.test.js
++++ b/tests/admisiones.test.js
+@@ -9,12 +9,13 @@ const { AppError } = require('../errors/AppError');
+ const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
+ const bcvOk = { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false }) };
+ 
+-function programar({ matricula = '100.00', fallaEn } = {}) {
++/** `telefonoEnRevision` = el upsert reporta (RETURNING) que el teléfono del formulario difirió del verificado y quedó pendiente (H2). */
++function programar({ matricula = '100.00', fallaEn, telefonoEnRevision = false } = {}) {
+   db.reiniciar();
+   db.handler = async (texto) => {
+     if (fallaEn && fallaEn.test(texto)) throw Object.assign(new Error('duplicate key value violates unique constraint "ux_pagos_referencia_activa"'), { name: 'error', severity: 'ERROR', code: '23505', constraint: 'ux_pagos_referencia_activa' });
+     if (/FROM parametros/.test(texto)) return rs({ valor: matricula });
+-    if (/INSERT INTO representantes[\s\S]*ON CONFLICT \(cedula\)/.test(texto)) return rs({ id: 5 });
++    if (/INSERT INTO representantes[\s\S]*ON CONFLICT \(cedula\)/.test(texto)) return rs({ id: 5, telefono_en_revision: telefonoEnRevision });
+     if (/INSERT INTO estudiantes/.test(texto)) return rs({ id: 10 });
+     if (/INSERT INTO cuotas/.test(texto)) return rs({ id: 20 });
+     if (/UPDATE cuotas SET estado = 'En Revisión'/.test(texto)) return rs({ monto_usd: 100 });
+@@ -67,6 +68,50 @@ test('inscripción OK: estatus "Pendiente por Validación Administrativa", monto
+   assert.ok(orden > -1 && orden < db.llamadas.findIndex((l) => /UPDATE estudiantes SET drive_folder_id/.test(l.texto)));
+ });
+ 
++// ── H2: blindaje contra suplantación (el formulario es público y anónimo) ───────────────────────
++/** Ejecuta `fn` capturando console.warn; cada aviso guarda cuántos COMMIT llevaba la base en ese instante. */
++async function conAvisos(fn) {
++  const avisos = []; const original = console.warn;
++  console.warn = (m) => avisos.push({ m: String(m), commits: db.commits });
++  try { await fn(); } finally { console.warn = original; }
++  return avisos;
++}
++
++test('H2: el upsert por cédula NO sobrescribe el contacto: el correo guardado manda y un teléfono distinto va a telefono_pendiente (nunca a telefono)', async () => {
++  programar();
++  await registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: driveFalso() });
++  const up = db.llamadas.find((l) => /INSERT INTO representantes/.test(l.texto));
++  assert.match(up.texto, /email = COALESCE\(representantes\.email, EXCLUDED\.email\)/, 'el correo EXISTENTE gana; el del formulario solo rellena un hueco');
++  assert.ok(!/COALESCE\(EXCLUDED\.email/.test(up.texto), 'el correo del formulario público ya no pisa al guardado');
++  assert.ok(!/(?<![\w.])telefono\s*=\s*EXCLUDED\.telefono/.test(up.texto), 'el teléfono verificado jamás se reescribe desde el formulario');
++  assert.match(up.texto, /telefono_pendiente = CASE WHEN representantes\.telefono IS DISTINCT FROM EXCLUDED\.telefono\s+THEN EXCLUDED\.telefono ELSE representantes\.telefono_pendiente END/);
++  assert.match(up.texto, /telefono_pendiente_en = CASE WHEN representantes\.telefono IS DISTINCT FROM EXCLUDED\.telefono\s+THEN NOW\(\) ELSE representantes\.telefono_pendiente_en END/);
++  assert.match(up.texto, /RETURNING id, \(telefono_pendiente IS NOT NULL\) AS telefono_en_revision/);
++  assert.deepEqual(up.params, ['Ana', 'Pérez', 'V-12345678', null, '584141234567'], 'parámetros posicionales $1..$5, cédula en mayúsculas');
++});
++
++test('H2: con un teléfono retenido se avisa SOLO tras el COMMIT, en el log del servidor y sin teléfonos; la respuesta pública no revela que la cédula ya existía', async () => {
++  programar({ telefonoEnRevision: true });
++  let r;
++  const avisos = await conAvisos(async () => { r = await registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: driveFalso() }); });
++  assert.equal(avisos.length, 1);
++  assert.match(avisos[0].m, /Representante 5.*PENDIENTE de aprobación.*estudiante 10/);
++  assert.equal(avisos[0].commits, 1, 'el aviso va después del COMMIT, no dentro de la transacción');
++  assert.ok(!avisos[0].m.includes(datos.telefono), 'el log no lleva el teléfono (dato personal)');
++  assert.ok(!/telefono/i.test(JSON.stringify(r)), 'la respuesta al cliente no menciona teléfonos ni revisión: sería una fuga de enumeración de cédulas');
++  assert.equal(r.estudiante_id, 10, 'la inscripción del alumno prosigue con normalidad');
++});
++
++test('H2: sin teléfono retenido no hay aviso, y si la transacción se revierte tampoco (no se afirma algo que no quedó guardado)', async () => {
++  programar();
++  assert.deepEqual(await conAvisos(() => registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: driveFalso() })), []);
++
++  programar({ telefonoEnRevision: true, fallaEn: /INSERT INTO documentos_estudiante/ });
++  const avisos = await conAvisos(() => silenciar(() => assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: driveFalso() }), (e) => e.code === '23505')));
++  assert.deepEqual(avisos, []);
++  assert.equal(db.rollbacks, 1);
++});
++
+ test('si Drive falla, TODO se revierte (rollback) y el error JSON 502 se propaga; no hay carpeta que limpiar', async () => {
+   programar();
+   const drive = driveFalso('falla');
+diff --git a/tests/integracion.pg.test.js b/tests/integracion.pg.test.js
+index 84cd932..2637aab 100644
+--- a/tests/integracion.pg.test.js
++++ b/tests/integracion.pg.test.js
+@@ -128,12 +128,15 @@ test.after(async () => {
+ });
+ 
+ // ── Migraciones y scripts ───────────────────────────────────────────────────────────────────────
+-t('migrate.js: aplica las 8 migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
++// El total sale del directorio: un número cableado se desalinea cada vez que se añade una migración.
++const NUM_MIGRACIONES = fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql')).length;
++
++t('migrate.js: aplica todas las migraciones en orden y una segunda ejecución no hace nada (idempotente)', () => {
+   const primera = hijo('scripts/migrate.js');
+   for (const f of fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((x) => x.endsWith('.sql'))) assert.match(primera, new RegExp(`Aplicada ${f}`));
+   const segunda = hijo('scripts/migrate.js');
+   assert.ok(!/Aplicada/.test(segunda), segunda);
+-  assert.equal((segunda.match(/ya aplicada/g) || []).length, 8);
++  assert.equal((segunda.match(/ya aplicada/g) || []).length, NUM_MIGRACIONES);
+   assert.match(segunda, /Migraciones al día/);
+ });
+ 
+@@ -144,7 +147,7 @@ t(`el esquema real contiene las 19 tablas + la vista, con RLS activo y la vista
+   const v = await uno(`SELECT array_to_string(reloptions, ',') AS opciones FROM pg_class WHERE relname = 'vw_estudiantes_estado'`);
+   assert.equal(v.opciones, 'security_invoker=true');
+   const reg = await filas('SELECT nombre FROM schema_migrations ORDER BY nombre');
+-  assert.equal(reg.length, 8);
++  assert.equal(reg.length, NUM_MIGRACIONES);
+ });
+ 
+ t('crear-admin.js: upsert por correo (ON CONFLICT), normaliza a minúsculas, reactiva y no duplica', async () => {
+@@ -232,12 +235,13 @@ t('inscripción completa: representante (upsert), estudiante Pendiente, cuota ma
+   assert.equal(rep.telefono, '584141234567');
+ });
+ 
+-t('segunda inscripción del mismo representante (cédula en minúsculas): no duplica, actualiza teléfono y conserva el correo', async () => {
++t('segunda inscripción del mismo representante (cédula en minúsculas): no duplica y NO sobrescribe sus datos de contacto (H2); el teléfono distinto queda pendiente', async () => {
+   const datos = inscripcion({ alumno_nombres: 'María', representante_cedula: 'v-12345678', representante_email: null, telefono: '584149999999', referencia_bancaria: 'REF-000111' });
+   await svc.admisiones.registrarInscripcion({ datos, archivos }, { bcvSvc: bcvFalso, driveSvc: driveFalso() });
+-  const reps = await filas(`SELECT cedula, email, telefono FROM representantes WHERE upper(cedula) = 'V-12345678'`);
+-  assert.deepEqual(reps, [{ cedula: 'V-12345678', email: 'ana@example.com', telefono: '584149999999' }]);
+-  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM estudiantes e JOIN representantes r ON r.id = e.representante_id WHERE r.cedula = 'V-12345678'`)).n, 2);
++  const reps = await filas(`SELECT cedula, email, telefono, telefono_pendiente, telefono_pendiente_en IS NOT NULL AS tiene_fecha FROM representantes WHERE upper(cedula) = 'V-12345678'`);
++  // `telefono` (el verificado, el que recibe los enlaces del portal) NO cambia; el número nuevo espera aprobación humana.
++  assert.deepEqual(reps, [{ cedula: 'V-12345678', email: 'ana@example.com', telefono: '584141234567', telefono_pendiente: '584149999999', tiene_fecha: true }]);
++  assert.equal((await uno(`SELECT COUNT(*)::int AS n FROM estudiantes e JOIN representantes r ON r.id = e.representante_id WHERE r.cedula = 'V-12345678'`)).n, 2, 'la inscripción del alumno sí prosigue');
+ });
+ 
+ t('referencia bancaria duplicada (aunque cambie la capitalización): 409 REFERENCIA_DUPLICADA, rollback total y Drive intacto', async () => {
+@@ -1158,6 +1162,116 @@ t('cron WhatsApp por sede: cada sede activa se despacha por separado (Preventiva
+ });
+ 
+ 
++// ── Blindaje de admisiones (H2). Va al final: crea inscripciones y varios tests anteriores cuentan filas globales. ──
++t('admisiones H2: el correo guardado manda (solo se rellena si estaba vacío); mismo teléfono no genera pendiente; el pendiente no se borra al reenviar el verificado', async () => {
++  let n = 0;
++  const inscribir = (ov) => { n += 1; return svc.admisiones.registrarInscripcion(
++    { datos: inscripcion({ representante_cedula: 'V-7770001', alumno_nombres: `Alumno${n}`, referencia_bancaria: `REF-H2-${n}`, ...ov }), archivos }, { bcvSvc: bcvFalso, driveSvc: driveFalso() }); };
++  const rep = () => uno(`SELECT email, telefono, telefono_pendiente FROM representantes WHERE cedula = 'V-7770001'`);
++
++  await inscribir({ representante_email: null, telefono: '584142000001' }); // alta: sin correo, sin pendiente
++  assert.deepEqual(await rep(), { email: null, telefono: '584142000001', telefono_pendiente: null });
++
++  await inscribir({ representante_email: 'primero@example.com', telefono: '584142000001' }); // el correo vacío SÍ se rellena; mismo teléfono → nada pendiente
++  assert.deepEqual(await rep(), { email: 'primero@example.com', telefono: '584142000001', telefono_pendiente: null });
++
++  await inscribir({ representante_email: 'atacante@example.com', telefono: '584142000002' }); // correo ya guardado: NO se pisa; teléfono distinto → pendiente
++  assert.deepEqual(await rep(), { email: 'primero@example.com', telefono: '584142000001', telefono_pendiente: '584142000002' });
++
++  await inscribir({ representante_email: null, telefono: '584142000001' }); // reenvía el verificado: el pendiente anterior NO se borra solo
++  assert.deepEqual(await rep(), { email: 'primero@example.com', telefono: '584142000001', telefono_pendiente: '584142000002' });
++
++  await inscribir({ representante_email: null, telefono: '584142000003' }); // otro teléfono distinto: queda el más reciente (la verificación humana es el control)
++  assert.deepEqual(await rep(), { email: 'primero@example.com', telefono: '584142000001', telefono_pendiente: '584142000003' });
++
++  // La CHECK de la columna pendiente es la última defensa: sin espacios y de 10 a 15 caracteres.
++  await assert.rejects(db.ejecutar(`UPDATE representantes SET telefono_pendiente = '58 414 200' WHERE cedula = 'V-7770001'`, []), (e) => e.code === '23514');
++});
++
++// ── Bot de WhatsApp: de-duplicación con GENERADA «en vuelo» (H4) y enfriamiento por FALLIDA (H1), con el SQL real ──
++t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo», la del panel no; y 3 FALLIDA del mismo tipo en 7 días enfrían al estudiante', async () => {
++  const { candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
++  const hoy = svc.hoy();
++  const ventana = svc.notif.VENTANA_PREVENTIVA;
++  const lim = 100000;
++  const adminId = (await uno('SELECT id FROM usuarios_admin LIMIT 1')).id;
++  // Inserta una notificación con la antigüedad pedida; `creadoPor` null = la creó el bot.
++  const nota = (est, tipo, estado, { dias = 0, creadoPor = null, cuota = null } = {}) => db.ejecutar(
++    `INSERT INTO notificaciones_whatsapp (estudiante_id, cuota_id, tipo, telefono, mensaje, monto_usd, tasa_bcv, monto_bs, estado, creado_por, creado_en)
++     VALUES ($1, $2, $3, '584120000000', 'x', 10, 36.5, 365, $4, $5, NOW() - ($6::int * INTERVAL '1 day'))`, [est.estId, cuota, tipo, estado, creadoPor, dias]);
++  const ids = (rows) => rows.map((r) => r.estudiante_id);
++  const preventivas = async () => ids(await candidatosPreventiva({ hoy, ventana, limite: lim }));
++  const morosos = async () => ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim }));
++  const moroso = (n) => sembrar({ vence: sumarDias(hoy, -6), nombres: `H4Mor${n}`, apellidos: 'Cron' });
++  const prev = (n) => sembrar({ vence: sumarDias(hoy, 4), nombres: `H4Prev${n}`, apellidos: 'Cron' });
++
++  // ── H4 · MOROSIDAD ──
++  const [m1, m2, m3, m4, m5] = [await moroso(1), await moroso(2), await moroso(3), await moroso(4), await moroso(5)];
++  await nota(m2, 'MOROSIDAD', 'GENERADA');                         // bot, hoy → «en vuelo»: NO se vuelve a cobrar
++  await nota(m3, 'MOROSIDAD', 'GENERADA', { creadoPor: adminId }); // borrador del panel (envío manual) → NO bloquea
++  await nota(m4, 'MOROSIDAD', 'GENERADA', { dias: 8 });            // bot, pero fuera de la ventana de 7 días → vuelve a ser candidato
++  await nota(m5, 'MOROSIDAD', 'ENVIADA');                          // control: comportamiento previo intacto
++  const mor = await morosos();
++  assert.deepEqual([m1, m2, m3, m4, m5].map((m) => mor.includes(m.estId)), [true, false, true, true, false]);
++
++  // ── H4 · PREVENTIVA (una por cuota, sin ventana temporal) ──
++  const [p1, p2, p3, p4] = [await prev(1), await prev(2), await prev(3), await prev(4)];
++  await nota(p2, 'PREVENTIVA', 'GENERADA', { dias: 1, cuota: p2.cuotaId });                      // bot, el ciclo de ayer: huérfana tras una caída → bloquea el reenvío
++  await nota(p3, 'PREVENTIVA', 'GENERADA', { creadoPor: adminId, cuota: p3.cuotaId });           // panel → NO bloquea
++  await nota(p4, 'PREVENTIVA', 'FALLIDA', { dias: 1, cuota: p4.cuotaId });                       // una FALLIDA se reintenta (como siempre)
++  const prv = await preventivas();
++  assert.deepEqual([p1, p2, p3, p4].map((p) => prv.includes(p.estId)), [true, false, true, true]);
++
++  // ── H1 · enfriamiento: >= 3 FALLIDA del MISMO tipo en los últimos 7 días ──
++  const [c1, c2, c3, c4] = [await moroso(6), await moroso(7), await moroso(8), await moroso(9)];
++  for (const dias of [1, 2]) await nota(c1, 'MOROSIDAD', 'FALLIDA', { dias });      // 2 → todavía se intenta
++  for (const dias of [1, 2, 3]) await nota(c2, 'MOROSIDAD', 'FALLIDA', { dias });   // 3 dentro de la ventana → enfriamiento
++  for (const dias of [1, 2, 8]) await nota(c3, 'MOROSIDAD', 'FALLIDA', { dias });   // una es de hace 8 días: solo 2 cuentan
++  for (const dias of [1, 2, 3]) await nota(c4, 'PREVENTIVA', 'FALLIDA', { dias });  // son de OTRO tipo: no enfrían la morosidad
++  const mor2 = await morosos();
++  assert.deepEqual([c1, c2, c3, c4].map((c) => mor2.includes(c.estId)), [true, false, true, true]);
++
++  const [q1, q2, q3] = [await prev(5), await prev(6), await prev(7)];
++  for (const dias of [1, 2, 3]) await nota(q1, 'PREVENTIVA', 'FALLIDA', { dias, cuota: q1.cuotaId });
++  for (const dias of [1, 2, 9]) await nota(q2, 'PREVENTIVA', 'FALLIDA', { dias, cuota: q2.cuotaId });
++  for (const dias of [1, 2, 3]) await nota(q3, 'MOROSIDAD', 'FALLIDA', { dias });
++  const prv2 = await preventivas();
++  assert.deepEqual([q1, q2, q3].map((q) => prv2.includes(q.estId)), [false, true, true]);
++
++  // Los umbrales son parámetros: con maxFallidas = 2 el estudiante con 2 FALLIDA recientes (c1) pasa a enfriamiento.
++  const estricto = ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim, enfriamiento: { dias: 7, maxFallidas: 2 } }));
++  assert.ok(!estricto.includes(c1.estId));
++});
++
++t('cron WhatsApp H3 (BD real): si otra instancia toma el arrendamiento a mitad del ciclo, la renovación lo detecta y el ciclo se aborta sin enviar más; el lease ajeno no se borra', async () => {
++  const { crearCronWhatsapp, CLAVE_LEASE } = require('../cron/whatsappCron');
++  const hoy = svc.hoy();
++  for (let i = 0; i < 30; i += 1) await sembrar({ vence: sumarDias(hoy, -3), nombres: `H3Lease${i}`, apellidos: 'Congelado' });
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
++  const llamadas = [];
++  const notificaciones = {
++    VENTANA_PREVENTIVA: svc.notif.VENTANA_PREVENTIVA,
++    generarAlerta: async (a) => {
++      llamadas.push(a.estudianteId);
++      // Tras el 5.º envío «otra instancia» toma el lease: es lo que ocurre si este proceso se congela más que `arrendamientoMin`.
++      if (llamadas.length === 5) await db.ejecutar(`UPDATE parametros SET valor = 'otra-instancia', actualizado_en = NOW() WHERE clave = $1`, [CLAVE_LEASE]);
++      return { notificacion_id: 0 };
++    },
++  };
++  const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: 100000, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
++  const cron = crearCronWhatsapp({ db, guard: svc.guard.crearGuard({ ttlMs: 0 }), notificaciones, whatsapp: { configurado: () => true }, bcv: { obtenerTasa: async () => ({}) },
++    config, esperar: async () => {}, log: () => {}, logError: () => {} });
++  try {
++    const r = await cron.ejecutarCiclo();
++    assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'LEASE_PERDIDO']);
++    assert.equal(llamadas.length, 24, 'la renovación se hace en el intento 25 y el ciclo se aborta ANTES de enviarlo');
++    assert.equal((await uno(`SELECT valor FROM parametros WHERE clave = $1`, [CLAVE_LEASE])).valor, 'otra-instancia', 'liberarLease solo borra el arrendamiento propio');
++  } finally {
++    await db.ejecutar(`DELETE FROM parametros WHERE clave = $1`, [CLAVE_LEASE]);
++    await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
++  }
++});
++
+ t('salud: SELECT 1 responde y una segunda llamada a closePool es inocua', async () => {
+   assert.equal((await uno('SELECT 1 AS ok')).ok, 1);
+ });
+diff --git a/tests/whatsapp-clasificacion.test.js b/tests/whatsapp-clasificacion.test.js
+new file mode 100644
+index 0000000..2e356ab
+--- /dev/null
++++ b/tests/whatsapp-clasificacion.test.js
+@@ -0,0 +1,89 @@
++'use strict';
++require('./helpers/entorno');
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { AppError } = require('../errors/AppError');
++const { crearWhatsappService, clasificarErrorMeta, CLASE_FALLA } = require('../services/whatsapp.service');
++
++const { DESTINATARIO: D, SISTEMICA: S, DESCONOCIDA: X } = CLASE_FALLA;
++const clase = (codigo, http) => clasificarErrorMeta({ codigo, http });
++
++/** Servicio con `http` simulado que rechaza con la forma de error de axios (response.status + response.data.error). */
++const conRespuesta = (status, error) => crearWhatsappService({
++  http: { post: async () => { throw Object.assign(new Error(`Request failed with status code ${status}`), { response: { status, data: error === undefined ? {} : { error } } }); } },
++  token: 't', phoneId: 'p', version: 'v1',
++});
++const fallo = (svc) => svc.enviarTexto('584141234567', 'hola').then(() => assert.fail('debía fallar'), (err) => err);
++
++test('H1 · clasificación: códigos del DESTINATARIO, SISTÉMICOS y desconocidos según la tabla oficial de errores de la Cloud API', () => {
++  for (const c of [131021, 131026, 131047, 131049, 131050, 131056]) assert.equal(clase(c), D, `${c} debe ser del destinatario`);
++  for (const c of [0, 4, 10, 190, 200, 250, 299, 368, 80007, 130429, 131005, 131031, 131037, 131042, 131045, 131048, 132000, 132001, 132005, 132007, 132015, 132016, 133010]) {
++    assert.equal(clase(c), S, `${c} debe ser sistémico`);
++  }
++  // Ambiguos o no documentados: a propósito NO se clasifican (cuentan para el cortafuegos, como antes de H1). Los bordes del rango 200–299 son 199 y 300.
++  for (const c of [100, 131000, 131009, 131016, 131030, 131051, 132012, 133004, 135000, 130472, 199, 300]) assert.equal(clase(c), X, `${c} debe quedar sin clasificar`);
++});
++
++test('H1 · el código llega como número o texto numérico; null, vacío o basura NO se confunden con el 0 (que significa «token inválido»)', () => {
++  assert.equal(clase('190'), S);
++  assert.equal(clase(' 131026 '), D);
++  assert.equal(clase(0), S, 'el 0 real de Meta es una falla de autenticación');
++  assert.equal(clase('0'), S);
++  for (const basura of [null, undefined, '', '   ', 'abc', NaN, 1.5, '1.5', '-190', true, {}, []]) assert.equal(clase(basura), X, `${JSON.stringify(basura)} no debe tomarse por un código`);
++});
++
++test('H1 · sin código de Meta solo un 401/403 es sistémico; timeouts, 5xx y 429 sin cuerpo no lo son; con código, el código manda', () => {
++  assert.equal(clase(null, 401), S);
++  assert.equal(clase(undefined, 403), S);
++  for (const http of [500, 502, 429, 408, 400, null, undefined]) assert.equal(clase(null, http), X, `HTTP ${http} sin cuerpo`);
++  assert.equal(clasificarErrorMeta(), X);
++  assert.equal(clase(131026, 401), D, 'el código documentado pesa más que el estado HTTP');
++  assert.equal(clase(100, 401), X, 'un código sin clasificar no se escala por el estado HTTP');
++});
++
++test('H1 · enviarTexto: toda falla de Meta sale como WHATSAPP_ENVIO_FALLIDO (502) con detalles { motivo, meta_codigo, http_status, clase }', async () => {
++  let err = await fallo(conRespuesta(400, { code: 131047, message: 'Re-engagement message' }));
++  assert.ok(err instanceof AppError);
++  assert.deepEqual([err.status, err.codigo], [502, 'WHATSAPP_ENVIO_FALLIDO'], 'el código público no cambia: el envío manual y el frontend siguen igual');
++  assert.deepEqual(err.detalles, { motivo: 'Meta 131047: Re-engagement message', meta_codigo: 131047, http_status: 400, clase: 'DESTINATARIO' });
++
++  err = await fallo(conRespuesta(401, { code: 190, message: 'Access token expired' }));
++  assert.deepEqual([err.detalles.meta_codigo, err.detalles.http_status, err.detalles.clase], [190, 401, 'SISTEMICA']);
++
++  err = await fallo(conRespuesta(400, { code: '132001', message: 'Template name does not exist' })); // código como texto → se normaliza a número
++  assert.deepEqual([err.detalles.meta_codigo, err.detalles.clase], [132001, 'SISTEMICA']);
++
++  err = await fallo(conRespuesta(500, { code: null, message: 'sin código' })); // code nulo NO es el 0
++  assert.deepEqual([err.detalles.meta_codigo, err.detalles.clase], [null, 'DESCONOCIDA']);
++
++  err = await fallo(conRespuesta(401, undefined)); // 401 sin cuerpo de error
++  assert.deepEqual([err.detalles.meta_codigo, err.detalles.http_status, err.detalles.clase], [null, 401, 'SISTEMICA']);
++  assert.match(err.detalles.motivo, /status code 401/);
++});
++
++test('H1 · corte de red / timeout (sin respuesta de Meta): clase DESCONOCIDA y el motivo conserva el texto del error', async () => {
++  const svc = crearWhatsappService({ http: { post: async () => { throw new Error('timeout of 10000ms exceeded'); } }, token: 't', phoneId: 'p', version: 'v1' });
++  const err = await fallo(svc);
++  assert.deepEqual(err.detalles, { motivo: 'timeout of 10000ms exceeded', meta_codigo: null, http_status: null, clase: 'DESCONOCIDA' });
++});
++
++test('sin configurar sigue siendo 503 WHATSAPP_NO_CONFIGURADO sin tocar la red, y un AppError previo se relanza intacto', async () => {
++  const sinRed = { post: async () => { throw new Error('no debía llamar a la red'); } };
++  const err = await fallo(crearWhatsappService({ http: sinRed, token: '', phoneId: '', version: 'v1' }));
++  assert.deepEqual([err.status, err.codigo], [503, 'WHATSAPP_NO_CONFIGURADO']);
++
++  const propio = new AppError(500, 'PROPIO', 'ya era un AppError');
++  const rel = await fallo(crearWhatsappService({ http: { post: async () => { throw propio; } }, token: 't', phoneId: 'p', version: 'v1' }));
++  assert.equal(rel, propio);
++});
++
++test('envío correcto: POST a la Graph API con Bearer y cuerpo de texto (el contrato con Meta no cambió)', async () => {
++  const llamadas = [];
++  const svc = crearWhatsappService({ http: { post: async (...a) => { llamadas.push(a); return {}; } }, token: 'tok', phoneId: '123', version: 'v99.0' });
++  assert.equal(svc.configurado(), true);
++  await svc.enviarTexto('584141234567', 'Hola');
++  const [url, cuerpo, opciones] = llamadas[0];
++  assert.equal(url, 'https://graph.facebook.com/v99.0/123/messages');
++  assert.deepEqual(cuerpo, { messaging_product: 'whatsapp', to: '584141234567', type: 'text', text: { body: 'Hola', preview_url: true } });
++  assert.equal(opciones.headers.Authorization, 'Bearer tok');
++});
+diff --git a/tests/whatsapp-cron.test.js b/tests/whatsapp-cron.test.js
+index c95f0d5..2c4b119 100644
+--- a/tests/whatsapp-cron.test.js
++++ b/tests/whatsapp-cron.test.js
+@@ -6,6 +6,7 @@ const fs = require('node:fs');
+ const path = require('node:path');
+ const { AppError, e } = require('../errors/AppError');
+ const { crearCronWhatsapp, msHastaProximaEjecucion, bcvDelCiclo } = require('../cron/whatsappCron');
++const { crearWhatsappService } = require('../services/whatsapp.service');
+ 
+ const HORA = Date.parse('2026-10-23T12:00:00-04:00');
+ const CONFIG = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: 400, morosidadCadaDias: 7, maxFallosSeguidos: 5, arrendamientoMin: 120 };
+@@ -14,8 +15,9 @@ const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
+ /**
+  * Arma el bot con dobles. `resultados[estudianteId]` = 'ok' | AppError | Error. Cada envío queda en `eventos`
+  * junto con las pausas (`esperar`), para comprobar el orden secuencial y el delay.
++ * `leasePerdido` = el UPDATE de renovación no encuentra nuestra fila (otra instancia tomó el lease); `renovarFalla` = ese UPDATE lanza.
+  */
+-function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { habilitado: true }, configurado = true, lease = true, config = {} } = {}) {
++function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { habilitado: true }, configurado = true, lease = true, leasePerdido = false, renovarFalla = false, config = {} } = {}) {
+   const eventos = [];
+   const sql = [];
+   const db = {
+@@ -24,6 +26,7 @@ function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { hab
+       const maximo = Math.max(0, ...[...texto.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])));
+       assert.equal(params.length, maximo, `parámetros posicionales: usa $1..$${maximo}, recibió ${params.length}`);
+       if (/INSERT INTO parametros/.test(texto)) return lease ? rs({ clave: 'x' }) : rs();
++      if (/^\s*UPDATE parametros/.test(texto)) { if (renovarFalla) throw new Error('base caída al renovar'); return leasePerdido ? rs() : rs({ clave: 'x' }); }
+       if (/FROM \(\s*SELECT DISTINCT ON/.test(texto)) return rs(...preventivas);
+       if (/GROUP BY v\.id/.test(texto)) return rs(...morosos);
+       return rs();
+@@ -54,7 +57,26 @@ function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { hab
+ 
+ const prev = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, cuota_id: estudiante_id * 10, fecha_vencimiento: '2026-10-27' }));
+ const mor = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, vencida_desde: '2026-10-01' }));
+-const metaFalla = () => new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131047' });
++// Falla de Meta NO clasificada como del destinatario ni sistémica (131000 = «error desconocido»): cuenta para el cortafuegos, como siempre.
++const metaFalla = () => new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131000: error desconocido', meta_codigo: 131000, http_status: 500, clase: 'DESCONOCIDA' });
++
++/**
++ * Error REAL tal como lo produce whatsapp.service ante una respuesta de Meta. Se usa el servicio de verdad (con `http` simulado) para
++ * probar el CONTRATO servicio ↔ cron: si alguno renombra `detalles.clase`, estas pruebas lo detectan.
++ * `codigo === null` simula una respuesta sin cuerpo de error (solo el estado HTTP).
++ */
++async function errorMeta(codigo, { status = 400 } = {}) {
++  const http = { post: async () => { throw Object.assign(new Error(`Request failed with status code ${status}`), { response: { status, data: codigo === null ? {} : { error: { code: codigo, message: 'detalle de Meta' } } } }); } };
++  return crearWhatsappService({ http, token: 't', phoneId: 'p', version: 'v1' }).enviarTexto('584141234567', 'hola')
++    .then(() => { throw new Error('el envío debía fallar'); }, (err) => err);
++}
++/** Corte de red / timeout: no hay `response` de Meta. */
++async function errorRed() {
++  const http = { post: async () => { throw new Error('timeout of 10000ms exceeded'); } };
++  return crearWhatsappService({ http, token: 't', phoneId: 'p', version: 'v1' }).enviarTexto('584141234567', 'hola')
++    .then(() => { throw new Error('el envío debía fallar'); }, (err) => err);
++}
++const desde = (n) => Array.from({ length: n }, (_, i) => i + 1);
+ 
+ test('ciclo: preventivas primero, luego morosidad; envío SECUENCIAL con pausa de 1,5 s entre mensajes (no antes del primero ni después del último)', async () => {
+   const { bot, eventos, pausas } = armar({ preventivas: prev(1, 2), morosos: mor(3) });
+@@ -157,8 +179,9 @@ test('las consultas masivas son PostgreSQL con parámetros posicionales y reglas
+   await bot.ejecutarCiclo();
+   const p = sql.find((s) => /DISTINCT ON/.test(s.texto));
+   const m = sql.find((s) => /GROUP BY v\.id/.test(s.texto));
+-  assert.deepEqual(p.params, ['2026-10-23', 3, 5, 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', null]); // null = ámbito «sin sede» (no hay sedes en este doble)
+-  assert.deepEqual(m.params, ['2026-10-23', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', null]);
++  // null = ámbito «sin sede» (no hay sedes en este doble). Los 4 últimos de cada consulta: estado «en vuelo» (H4), estado a enfriar y umbrales (H1).
++  assert.deepEqual(p.params, ['2026-10-23', 3, 5, 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
++  assert.deepEqual(m.params, ['2026-10-23', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
+   assert.match(p.texto, /BETWEEN \(\$1::date \+ \$2::int\) AND \(\$1::date \+ \$3::int\)/);
+   assert.match(p.texto, /NOT EXISTS[\s\S]*n\.cuota_id = p\.cuota_id/, 'una PREVENTIVA por cuota');
+   assert.match(m.texto, /c\.estado = \$4::text AND c\.fecha_vencimiento < \$1::date/, 'solo cuotas vencidas en Pendiente (no En Revisión)');
+@@ -166,6 +189,81 @@ test('las consultas masivas son PostgreSQL con parámetros posicionales y reglas
+   assert.ok(!/\b(TOP|GETDATE|DATEADD|ISNULL|dbo\.|@\w+)\b/i.test(p.texto + m.texto));
+ });
+ 
++test('H4/H1 en el SQL: la GENERADA del bot (creado_por NULL) es «en vuelo» y no la del panel; el enfriamiento cuenta FALLIDA del mismo tipo en la ventana', async () => {
++  const { bot, sql } = armar({});
++  await bot.ejecutarCiclo();
++  const p = sql.find((s) => /DISTINCT ON/.test(s.texto)).texto;
++  const m = sql.find((s) => /GROUP BY v\.id/.test(s.texto)).texto;
++  assert.match(p, /\(n\.estado = \$8::text OR \(n\.estado = \$10::text AND n\.creado_por IS NULL\)\)/, 'preventiva: ENVIADA o GENERADA del bot');
++  assert.match(m, /\(n\.estado = \$7::text OR \(n\.estado = \$9::text AND n\.creado_por IS NULL\)\)/, 'morosidad: ENVIADA o GENERADA del bot');
++  assert.match(m, /n\.creado_en > NOW\(\) - \(\$2::int \* INTERVAL '1 day'\)/, 'la GENERADA del bot en morosidad respeta la misma ventana de N días');
++  assert.match(p, /\(SELECT COUNT\(\*\) FROM notificaciones_whatsapp f\s+WHERE f\.estudiante_id = p\.estudiante_id AND f\.tipo = \$7::text AND f\.estado = \$11::text\s+AND f\.creado_en > NOW\(\) - \(\$12::int \* INTERVAL '1 day'\)\) < \$13::int/);
++  assert.match(m, /\(SELECT COUNT\(\*\) FROM notificaciones_whatsapp f\s+WHERE f\.estudiante_id = v\.id AND f\.tipo = \$6::text AND f\.estado = \$10::text\s+AND f\.creado_en > NOW\(\) - \(\$11::int \* INTERVAL '1 day'\)\) < \$12::int/);
++  assert.ok(!/\b(TOP|GETDATE|DATEADD|ISNULL|dbo\.|@\w+)\b/i.test(p + m), 'sin residuos de T-SQL');
++});
++
++test('H1: fallas del DESTINATARIO (131026, 131047, 131049…) quedan FALLIDA pero NO suman al cortafuegos: el ciclo sigue', async () => {
++  const codigos = [131026, 131047, 131049, 131026, 131047, 131049, 131056]; // 7 seguidas; con umbral 3 un conteo erróneo abortaría en la 3.ª
++  const resultados = Object.fromEntries(await Promise.all(codigos.map(async (c, i) => [i + 1, await errorMeta(c)])));
++  const { bot, eventos, pausas } = armar({ preventivas: prev(...desde(8)), resultados, config: { maxFallosSeguidos: 3 } });
++  const r = await bot.ejecutarCiclo();
++  assert.equal(r.estado, 'COMPLETADO');
++  assert.equal(r.abortado, null);
++  assert.deepEqual([r.preventiva.enviadas, r.preventiva.fallidas], [1, 7], 'las 7 quedan contadas como fallidas (la fila FALLIDA la escribe generarAlerta)');
++  assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 8, 'se intentó a TODOS: el último sí se envió');
++  assert.ok(pausas.length >= 7 && pausas.every((ms) => ms === 1500), 'la solicitud sí llegó a Meta: se respeta la pausa anti-baneo');
++});
++
++test('H1: fallas SISTÉMICAS de Meta (190 token vencido, 132001 plantilla inexistente, 130429, rango 200–299, 401 sin cuerpo) abortan de inmediato', async () => {
++  const casos = [[190, 401, 'META_SISTEMICA_190'], [132001, 400, 'META_SISTEMICA_132001'], [130429, 429, 'META_SISTEMICA_130429'], [250, 403, 'META_SISTEMICA_250'], [null, 401, 'META_SISTEMICA_HTTP_401']];
++  for (const [codigo, status, esperado] of casos) {
++    const { bot, eventos } = armar({ preventivas: prev(1, 2, 3), resultados: { 1: await errorMeta(codigo, { status }) } });
++    const r = await bot.ejecutarCiclo();
++    assert.deepEqual([r.estado, r.abortado], ['ABORTADO', esperado], `código ${codigo}`);
++    assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 1, `código ${codigo}: no se intentó a los restantes`);
++    assert.equal(r.preventiva.fallidas, 1);
++  }
++});
++
++test('H1: fallas desconocidas o de red conservan el comportamiento previo (cuentan); las del destinatario intercaladas ni suman ni reinician la cuenta', async () => {
++  const [desconocida, destinatario, red] = [await errorMeta(131000, { status: 500 }), await errorMeta(131026), await errorRed()];
++  // cuentan: 1.º y 3.º y 5.º; el umbral es 3 → aborta tras el 5.º intento aunque haya fallas del destinatario en medio
++  const { bot, eventos } = armar({ preventivas: prev(...desde(7)), resultados: { 1: desconocida, 2: destinatario, 3: red, 4: destinatario, 5: desconocida }, config: { maxFallosSeguidos: 3 } });
++  const r = await bot.ejecutarCiclo();
++  assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'DEMASIADOS_FALLOS_SEGUIDOS']);
++  assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 5);
++});
++
++test('H1: un error que NO viene de Meta no puede hacerse pasar por falla del destinatario ni sistémica (solo se confía en `clase` de WHATSAPP_ENVIO_FALLIDO)', async () => {
++  const impostor = new AppError(422, 'OTRO_ERROR', 'x', { clase: 'DESTINATARIO' });
++  const { bot } = armar({ preventivas: prev(...desde(6)), resultados: { 1: impostor, 2: impostor, 3: impostor }, config: { maxFallosSeguidos: 3 } });
++  const r = await bot.ejecutarCiclo();
++  assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'DEMASIADOS_FALLOS_SEGUIDOS']);
++});
++
++test('H3: si la renovación del arrendamiento no encuentra nuestra fila (otra instancia lo tomó) el ciclo se aborta ANTES de enviar y no borra el lease ajeno', async () => {
++  const { bot, eventos, sql } = armar({ preventivas: prev(...desde(30)), leasePerdido: true });
++  const r = await bot.ejecutarCiclo();
++  assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'LEASE_PERDIDO']);
++  assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 24, 'se renueva en el intento 25 y se aborta sin enviarlo');
++  const renov = sql.find((s) => /^\s*UPDATE parametros/.test(s.texto));
++  assert.match(renov.texto, /WHERE clave = \$1 AND valor = \$2/, 'solo renueva si seguimos siendo el titular');
++  const liberar = sql.find((s) => /^\s*DELETE FROM parametros/.test(s.texto));
++  assert.match(liberar.texto, /WHERE clave = \$1 AND valor = \$2/, 'solo libera el arrendamiento propio');
++  assert.equal(liberar.params[1], renov.params[1], 'mismo titular en renovar y liberar');
++});
++
++test('H3: con el arrendamiento vigente el ciclo completo sigue; un error TRANSITORIO al renovar no se confunde con pérdida del lease', async () => {
++  let { bot, eventos, sql } = armar({ preventivas: prev(...desde(30)) });
++  let r = await bot.ejecutarCiclo();
++  assert.deepEqual([r.estado, r.abortado, eventos.filter((x) => x.startsWith('envio')).length], ['COMPLETADO', null, 30]);
++  assert.equal(sql.filter((s) => /^\s*UPDATE parametros/.test(s.texto)).length, 1, 'una renovación cada 25 intentos');
++
++  ({ bot, eventos } = armar({ preventivas: prev(...desde(30)), renovarFalla: true }));
++  r = await bot.ejecutarCiclo();
++  assert.deepEqual([r.estado, r.abortado, eventos.filter((x) => x.startsWith('envio')).length], ['COMPLETADO', null, 30]);
++});
++
+ test('la tasa BCV se consulta fresca como mucho una vez por minuto durante el ciclo', async () => {
+   let t = 0; const llamadas = [];
+   const w = bcvDelCiclo({ obtenerTasa: async (o) => { llamadas.push(o.fresca); return { tasa: 36, desactualizada: false }; } }, () => t, 60_000);

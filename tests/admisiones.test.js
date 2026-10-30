@@ -9,12 +9,13 @@ const { AppError } = require('../errors/AppError');
 const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
 const bcvOk = { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false }) };
 
-function programar({ matricula = '100.00', fallaEn } = {}) {
+/** `telefonoEnRevision` = el upsert reporta (RETURNING) que el teléfono del formulario difirió del verificado y quedó pendiente (H2). */
+function programar({ matricula = '100.00', fallaEn, telefonoEnRevision = false } = {}) {
   db.reiniciar();
   db.handler = async (texto) => {
     if (fallaEn && fallaEn.test(texto)) throw Object.assign(new Error('duplicate key value violates unique constraint "ux_pagos_referencia_activa"'), { name: 'error', severity: 'ERROR', code: '23505', constraint: 'ux_pagos_referencia_activa' });
     if (/FROM parametros/.test(texto)) return rs({ valor: matricula });
-    if (/INSERT INTO representantes[\s\S]*ON CONFLICT \(cedula\)/.test(texto)) return rs({ id: 5 });
+    if (/INSERT INTO representantes[\s\S]*ON CONFLICT \(cedula\)/.test(texto)) return rs({ id: 5, telefono_en_revision: telefonoEnRevision });
     if (/INSERT INTO estudiantes/.test(texto)) return rs({ id: 10 });
     if (/INSERT INTO cuotas/.test(texto)) return rs({ id: 20 });
     if (/UPDATE cuotas SET estado = 'En Revisión'/.test(texto)) return rs({ monto_usd: 100 });
@@ -65,6 +66,50 @@ test('inscripción OK: estatus "Pendiente por Validación Administrativa", monto
   // la referencia se persiste ANTES de tocar Drive: un duplicado nunca deja archivos huérfanos
   const orden = db.llamadas.findIndex((l) => /INSERT INTO pagos_referencias/.test(l.texto));
   assert.ok(orden > -1 && orden < db.llamadas.findIndex((l) => /UPDATE estudiantes SET drive_folder_id/.test(l.texto)));
+});
+
+// ── H2: blindaje contra suplantación (el formulario es público y anónimo) ───────────────────────
+/** Ejecuta `fn` capturando console.warn; cada aviso guarda cuántos COMMIT llevaba la base en ese instante. */
+async function conAvisos(fn) {
+  const avisos = []; const original = console.warn;
+  console.warn = (m) => avisos.push({ m: String(m), commits: db.commits });
+  try { await fn(); } finally { console.warn = original; }
+  return avisos;
+}
+
+test('H2: el upsert por cédula NO sobrescribe el contacto: el correo guardado manda y un teléfono distinto va a telefono_pendiente (nunca a telefono)', async () => {
+  programar();
+  await registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: driveFalso() });
+  const up = db.llamadas.find((l) => /INSERT INTO representantes/.test(l.texto));
+  assert.match(up.texto, /email = COALESCE\(representantes\.email, EXCLUDED\.email\)/, 'el correo EXISTENTE gana; el del formulario solo rellena un hueco');
+  assert.ok(!/COALESCE\(EXCLUDED\.email/.test(up.texto), 'el correo del formulario público ya no pisa al guardado');
+  assert.ok(!/(?<![\w.])telefono\s*=\s*EXCLUDED\.telefono/.test(up.texto), 'el teléfono verificado jamás se reescribe desde el formulario');
+  assert.match(up.texto, /telefono_pendiente = CASE WHEN representantes\.telefono IS DISTINCT FROM EXCLUDED\.telefono\s+THEN EXCLUDED\.telefono ELSE representantes\.telefono_pendiente END/);
+  assert.match(up.texto, /telefono_pendiente_en = CASE WHEN representantes\.telefono IS DISTINCT FROM EXCLUDED\.telefono\s+THEN NOW\(\) ELSE representantes\.telefono_pendiente_en END/);
+  assert.match(up.texto, /RETURNING id, \(telefono_pendiente IS NOT NULL\) AS telefono_en_revision/);
+  assert.deepEqual(up.params, ['Ana', 'Pérez', 'V-12345678', null, '584141234567'], 'parámetros posicionales $1..$5, cédula en mayúsculas');
+});
+
+test('H2: con un teléfono retenido se avisa SOLO tras el COMMIT, en el log del servidor y sin teléfonos; la respuesta pública no revela que la cédula ya existía', async () => {
+  programar({ telefonoEnRevision: true });
+  let r;
+  const avisos = await conAvisos(async () => { r = await registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: driveFalso() }); });
+  assert.equal(avisos.length, 1);
+  assert.match(avisos[0].m, /Representante 5.*PENDIENTE de aprobación.*estudiante 10/);
+  assert.equal(avisos[0].commits, 1, 'el aviso va después del COMMIT, no dentro de la transacción');
+  assert.ok(!avisos[0].m.includes(datos.telefono), 'el log no lleva el teléfono (dato personal)');
+  assert.ok(!/telefono/i.test(JSON.stringify(r)), 'la respuesta al cliente no menciona teléfonos ni revisión: sería una fuga de enumeración de cédulas');
+  assert.equal(r.estudiante_id, 10, 'la inscripción del alumno prosigue con normalidad');
+});
+
+test('H2: sin teléfono retenido no hay aviso, y si la transacción se revierte tampoco (no se afirma algo que no quedó guardado)', async () => {
+  programar();
+  assert.deepEqual(await conAvisos(() => registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: driveFalso() })), []);
+
+  programar({ telefonoEnRevision: true, fallaEn: /INSERT INTO documentos_estudiante/ });
+  const avisos = await conAvisos(() => silenciar(() => assert.rejects(registrarInscripcion({ datos, archivos }, { bcvSvc: bcvOk, driveSvc: driveFalso() }), (e) => e.code === '23505')));
+  assert.deepEqual(avisos, []);
+  assert.equal(db.rollbacks, 1);
 });
 
 test('si Drive falla, TODO se revierte (rollback) y el error JSON 502 se propaga; no hay carpeta que limpiar', async () => {

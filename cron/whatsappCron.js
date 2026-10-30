@@ -14,10 +14,19 @@
  *   - Candado premium: si el módulo no está habilitado (o su prueba de 15 días venció) el ciclo no envía nada.
  *   - Idempotente: una PREVENTIVA se envía una sola vez por cuota; la MOROSIDAD no se repite al mismo estudiante antes de
  *     WHATSAPP_CRON_MOROSIDAD_CADA_DIAS (7). Relanzar el ciclo el mismo día no duplica mensajes.
+ *   - Sin duplicados por caídas (H4): una fila 'GENERADA' creada por el bot (creado_por NULL) se trata como «en vuelo». Si el
+ *     proceso murió (o falló el UPDATE a 'ENVIADA') después de llamar a Meta, esa fila bloquea el reenvío en vez de duplicarlo.
+ *     Las 'GENERADA' creadas por un usuario del panel (borradores para enviar a mano) NO bloquean.
  *   - Un solo ciclo a la vez entre instancias: arrendamiento (lease) en la tabla `parametros`; funciona detrás del pooler
- *     de Supabase en modo transacción (no usa locks de sesión) y caduca solo si el proceso muere.
- *   - Cortafuegos: se aborta ante una falla sistémica (tasa BCV no disponible, WhatsApp sin configurar) o tras
- *     WHATSAPP_CRON_MAX_FALLOS_SEGUIDOS fallos consecutivos, y se limita a WHATSAPP_CRON_MAX_ENVIOS por ciclo.
+ *     de Supabase en modo transacción (no usa locks de sesión) y caduca solo si el proceso muere. Si el proceso se congela y otra
+ *     instancia toma el lease, la renovación lo detecta (rowCount) y este ciclo se aborta con 'LEASE_PERDIDO' (H3).
+ *   - Cortafuegos con clasificación de fallas de Meta (H1):
+ *       · del DESTINATARIO (131026 no entregable, 131047 fuera de ventana…): la fila queda 'FALLIDA' en el histórico, el ciclo
+ *         sigue y NO suma a `fallosSeguidos` (un padre sin WhatsApp no es una avería);
+ *       · SISTÉMICAS (190 token vencido, 132001 plantilla inexistente, tasa BCV caída, WhatsApp sin configurar…): se aborta ya;
+ *       · desconocidas / de red: cuentan para WHATSAPP_CRON_MAX_FALLOS_SEGUIDOS (comportamiento conservador previo).
+ *     Además se limita a WHATSAPP_CRON_MAX_ENVIOS por ciclo.
+ *   - Enfriamiento por estudiante: no se reintenta a quien acumule >= 3 'FALLIDA' del mismo tipo en los últimos 7 días.
  *   - La tasa BCV se consulta fresca como mucho una vez por minuto durante el ciclo (no una vez por mensaje).
  *
  * Uso:
@@ -32,7 +41,7 @@ const { hoyCaracas, aFechaSql } = require('../utils/fechas');
 const { guard: guardGlobal } = require('../modules/premium/guard');
 const notificacionesGlobal = require('../services/notificaciones.service');
 const { bcv: bcvGlobal } = require('../services/bcv.service');
-const { whatsapp: whatsappGlobal } = require('../services/whatsapp.service');
+const { whatsapp: whatsappGlobal, CLASE_FALLA } = require('../services/whatsapp.service');
 
 const MODULO = 'WHATSAPP_AUTOMATICO';
 const CLAVE_LEASE = 'WHATSAPP_CRON_LEASE';
@@ -40,6 +49,8 @@ const OFFSET_CARACAS_MS = 4 * 3600_000;
 const MS_DIA = 86_400_000;
 const REFRESCO_TASA_MS = 60_000;
 const RENOVAR_LEASE_CADA = 25;
+// Enfriamiento por estudiante: con `maxFallidas` filas 'FALLIDA' del mismo tipo dentro de los últimos `dias` días no se reintenta.
+const ENFRIAMIENTO = Object.freeze({ dias: 7, maxFallidas: 3 });
 
 // Errores de reglas de negocio: el estado del estudiante cambió entre la consulta masiva y el envío → se omite sin contar como fallo.
 const CODIGOS_OMITIR = new Set(['ESTADO_NO_APLICA', 'SIN_CUOTA_PROXIMA', 'FUERA_DE_VENTANA_PREVENTIVA', 'ESTUDIANTE_NO_MOROSO', 'PAGO_EN_REVISION', 'NO_ENCONTRADO']);
@@ -53,6 +64,9 @@ const esperarReal = (ms) => new Promise((resolve) => { setTimeout(resolve, ms); 
 /**
  * Activos con la próxima cuota Pendiente (>= hoy) dentro de la ventana [hoy+min, hoy+max] y sin PREVENTIVA ya enviada para esa cuota.
  * Misma definición de "próxima cuota" que notificaciones.prepararPreventiva: la de menor vencimiento ≥ hoy por estudiante.
+ *   · «Ya enviada» incluye la fila 'GENERADA' creada por el bot ($10, creado_por NULL): está «en vuelo» o quedó huérfana tras una caída
+ *     entre la llamada a Meta y el UPDATE a 'ENVIADA'; reenviar duplicaría el mensaje (H4). Los borradores 'GENERADA' del panel no cuentan.
+ *   · Enfriamiento: se excluye al estudiante con >= $13 filas $11 ('FALLIDA') de este tipo en los últimos $12 días (H1).
  */
 const SQL_CANDIDATOS_PREVENTIVA = `
   SELECT p.estudiante_id, p.cuota_id, p.fecha_vencimiento
@@ -66,13 +80,18 @@ const SQL_CANDIDATOS_PREVENTIVA = `
     ) p
    WHERE p.fecha_vencimiento BETWEEN ($1::date + $2::int) AND ($1::date + $3::int)
      AND NOT EXISTS (SELECT 1 FROM notificaciones_whatsapp n
-                      WHERE n.cuota_id = p.cuota_id AND n.tipo = $7::text AND n.estado = $8::text)
+                      WHERE n.cuota_id = p.cuota_id AND n.tipo = $7::text
+                        AND (n.estado = $8::text OR (n.estado = $10::text AND n.creado_por IS NULL)))
+     AND (SELECT COUNT(*) FROM notificaciones_whatsapp f
+           WHERE f.estudiante_id = p.estudiante_id AND f.tipo = $7::text AND f.estado = $11::text
+             AND f.creado_en > NOW() - ($12::int * INTERVAL '1 day')) < $13::int
    ORDER BY p.fecha_vencimiento, p.estudiante_id
    LIMIT $4::int`;
 
 /**
  * Morosos con al menos una cuota vencida en estado Pendiente (si todas están En Revisión no aparecen) y sin cobro ENVIADO
- * dentro de los últimos N días.
+ * dentro de los últimos N días. Igual que en la preventiva: la 'GENERADA' del bot ($9) cuenta como cobro en vuelo dentro de esa misma
+ * ventana (H4) y el estudiante con >= $12 'FALLIDA' ($10) de MOROSIDAD en los últimos $11 días queda en enfriamiento (H1).
  */
 const SQL_CANDIDATOS_MOROSIDAD = `
   SELECT v.id AS estudiante_id, MIN(c.fecha_vencimiento) AS vencida_desde
@@ -81,8 +100,12 @@ const SQL_CANDIDATOS_MOROSIDAD = `
    WHERE v.estado_dinamico = $5::text
      AND (($8::int IS NOT NULL AND v.sede_id = $8::int) OR ($8::int IS NULL AND v.sede_id IS NULL))
      AND NOT EXISTS (SELECT 1 FROM notificaciones_whatsapp n
-                      WHERE n.estudiante_id = v.id AND n.tipo = $6::text AND n.estado = $7::text
+                      WHERE n.estudiante_id = v.id AND n.tipo = $6::text
+                        AND (n.estado = $7::text OR (n.estado = $9::text AND n.creado_por IS NULL))
                         AND n.creado_en > NOW() - ($2::int * INTERVAL '1 day'))
+     AND (SELECT COUNT(*) FROM notificaciones_whatsapp f
+           WHERE f.estudiante_id = v.id AND f.tipo = $6::text AND f.estado = $10::text
+             AND f.creado_en > NOW() - ($11::int * INTERVAL '1 day')) < $12::int
    GROUP BY v.id
    ORDER BY MIN(c.fecha_vencimiento), v.id
    LIMIT $3::int`;
@@ -91,13 +114,17 @@ const SQL_CANDIDATOS_MOROSIDAD = `
  * `sedeId` entero → solo los estudiantes de esa sede; `null` → solo los que NO tienen sede asignada (datos anteriores a la
  * migración multi-sede). Cada sede se procesa por separado: ver ejecutarCiclo().
  */
-async function candidatosPreventiva({ hoy, ventana, limite, sedeId = null, db = { ejecutar } }) {
-  const r = await db.ejecutar(SQL_CANDIDATOS_PREVENTIVA, [aFechaSql(hoy), ventana.min, ventana.max, limite, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', sedeId]);
+async function candidatosPreventiva({ hoy, ventana, limite, sedeId = null, enfriamiento = ENFRIAMIENTO, db = { ejecutar } }) {
+  const r = await db.ejecutar(SQL_CANDIDATOS_PREVENTIVA, [
+    aFechaSql(hoy), ventana.min, ventana.max, limite, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', sedeId,
+    'GENERADA', 'FALLIDA', enfriamiento.dias, enfriamiento.maxFallidas]);
   return r.rows;
 }
 
-async function candidatosMorosidad({ hoy, cadaDias, limite, sedeId = null, db = { ejecutar } }) {
-  const r = await db.ejecutar(SQL_CANDIDATOS_MOROSIDAD, [aFechaSql(hoy), cadaDias, limite, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', sedeId]);
+async function candidatosMorosidad({ hoy, cadaDias, limite, sedeId = null, enfriamiento = ENFRIAMIENTO, db = { ejecutar } }) {
+  const r = await db.ejecutar(SQL_CANDIDATOS_MOROSIDAD, [
+    aFechaSql(hoy), cadaDias, limite, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', sedeId,
+    'GENERADA', 'FALLIDA', enfriamiento.dias, enfriamiento.maxFallidas]);
   return r.rows;
 }
 
@@ -113,13 +140,36 @@ async function adquirirLease(db, titular, minutos) {
   return r.rowCount > 0;
 }
 
-const renovarLease = (db, titular) =>
-  db.ejecutar('UPDATE parametros SET actualizado_en = NOW() WHERE clave = $1 AND valor = $2', [CLAVE_LEASE, titular]);
+/**
+ * Renueva el arrendamiento SOLO si seguimos siendo el titular (valor = $2). Devuelve `true` si lo renovó y `false` si ya no es
+ * nuestro (H3): el proceso se congeló más que el lease, caducó y otra instancia lo tomó. Quien llama debe abortar sin enviar más.
+ */
+async function renovarLease(db, titular) {
+  const r = await db.ejecutar('UPDATE parametros SET actualizado_en = NOW() WHERE clave = $1 AND valor = $2', [CLAVE_LEASE, titular]);
+  return r.rowCount > 0;
+}
 
 const liberarLease = (db, titular) =>
   db.ejecutar('DELETE FROM parametros WHERE clave = $1 AND valor = $2', [CLAVE_LEASE, titular]);
 
 // ───────────────────────── Utilidades puras ─────────────────────────
+
+/**
+ * Clase de la falla (ver whatsapp.service). Solo se confía en `detalles.clase` cuando el error viene de un envío a Meta; cualquier
+ * otra cosa (error de base, bug, error sin clase) es DESCONOCIDA y conserva el tratamiento conservador: cuenta para el cortafuegos.
+ */
+function claseDeFalla(err) {
+  if (!err || err.codigo !== 'WHATSAPP_ENVIO_FALLIDO' || !err.detalles) return CLASE_FALLA.DESCONOCIDA;
+  const c = err.detalles.clase;
+  return c === CLASE_FALLA.DESTINATARIO || c === CLASE_FALLA.SISTEMICA ? c : CLASE_FALLA.DESCONOCIDA;
+}
+
+/** Motivo de aborto legible para el resumen: `META_SISTEMICA_190`, `META_SISTEMICA_132001` o `META_SISTEMICA_HTTP_401`. */
+function etiquetaAbortoMeta(err) {
+  const d = (err && err.detalles) || {};
+  if (Number.isInteger(d.meta_codigo)) return `META_SISTEMICA_${d.meta_codigo}`;
+  return d.http_status ? `META_SISTEMICA_HTTP_${d.http_status}` : 'META_SISTEMICA';
+}
 
 /** Milisegundos hasta la próxima ocurrencia de `hora` ('HH:MM', hora de Caracas). Siempre > 0 y <= 24 h. */
 function msHastaProximaEjecucion(hora, ahoraMs = Date.now()) {
@@ -175,7 +225,17 @@ function crearCronWhatsapp({
       if (estado.llamoAMeta) await esperar(config.delayMs); // pausa anti-baneo entre envíos consecutivos
       estado.llamoAMeta = false;
       estado.intentos += 1;
-      if (estado.intentos % RENOVAR_LEASE_CADA === 0) await renovarLease(db, estado.titular).catch((e) => logError('No se pudo renovar el arrendamiento:', e.message));
+      if (estado.intentos % RENOVAR_LEASE_CADA === 0) {
+        // H3: `true` = seguimos siendo el titular; `false` = otra instancia tomó el lease (este proceso estuvo congelado más de
+        // `arrendamientoMin`) → se aborta ANTES de enviar este mensaje para no duplicar envíos con la otra instancia.
+        // Un error transitorio de la base (`null`) no es evidencia de pérdida: se registra y se sigue, como antes.
+        const vigente = await renovarLease(db, estado.titular).catch((err) => { logError('No se pudo renovar el arrendamiento:', err.message); return null; });
+        if (vigente === false) {
+          logError('El arrendamiento ya no es nuestro (otra instancia lo tomó); se aborta el ciclo sin enviar más mensajes.');
+          resumen.abortado = 'LEASE_PERDIDO';
+          return;
+        }
+      }
 
       const parcial = resumen[item.tipo.toLowerCase()];
       try {
@@ -194,10 +254,16 @@ function crearCronWhatsapp({
           continue;
         }
         if (codigo === 'WHATSAPP_ENVIO_FALLIDO') estado.llamoAMeta = true; // la solicitud sí llegó a Meta
+        // La fila ya quedó 'FALLIDA' en notificaciones_whatsapp (la escribe notificaciones.generarAlerta antes de relanzar el error).
+        const clase = claseDeFalla(err);
         parcial.fallidas += 1;
-        estado.fallosSeguidos += 1;
-        logError(`${item.tipo} FALLIDA estudiante=${item.estudiante_id}: ${codigo || 'ERROR'} ${(err && err.detalles && err.detalles.motivo) || (err && err.message)}`);
+        logError(`${item.tipo} FALLIDA estudiante=${item.estudiante_id}: ${codigo || 'ERROR'}${clase === CLASE_FALLA.DESCONOCIDA ? '' : ` [${clase}]`} ${(err && err.detalles && err.detalles.motivo) || (err && err.message)}`);
         if (CODIGOS_ABORTAR.has(codigo)) { resumen.abortado = codigo; return; }
+        // Falla sistémica de Meta (token vencido, plantilla inexistente…): cualquier envío siguiente fallaría igual → se corta ya.
+        if (clase === CLASE_FALLA.SISTEMICA) { resumen.abortado = etiquetaAbortoMeta(err); return; }
+        // Falla del destinatario (no entregable, fuera de ventana…): queda registrada, pero NO es una avería → no suma al cortafuegos.
+        if (clase === CLASE_FALLA.DESTINATARIO) continue;
+        estado.fallosSeguidos += 1;
         if (estado.fallosSeguidos >= config.maxFallosSeguidos) { resumen.abortado = 'DEMASIADOS_FALLOS_SEGUIDOS'; return; }
       }
     }
@@ -292,7 +358,7 @@ function crearCronWhatsapp({
 
 const cron = crearCronWhatsapp();
 
-module.exports = { crearCronWhatsapp, cron, msHastaProximaEjecucion, bcvDelCiclo, candidatosPreventiva, candidatosMorosidad, MODULO, CLAVE_LEASE };
+module.exports = { crearCronWhatsapp, cron, msHastaProximaEjecucion, bcvDelCiclo, candidatosPreventiva, candidatosMorosidad, MODULO, CLAVE_LEASE, ENFRIAMIENTO };
 
 // Ejecución directa: `node cron/whatsappCron.js` (un ciclo) o `node cron/whatsappCron.js --daemon` (planificador propio).
 if (require.main === module) {

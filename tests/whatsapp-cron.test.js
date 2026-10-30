@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { AppError, e } = require('../errors/AppError');
 const { crearCronWhatsapp, msHastaProximaEjecucion, bcvDelCiclo } = require('../cron/whatsappCron');
+const { crearWhatsappService } = require('../services/whatsapp.service');
 
 const HORA = Date.parse('2026-10-23T12:00:00-04:00');
 const CONFIG = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: 400, morosidadCadaDias: 7, maxFallosSeguidos: 5, arrendamientoMin: 120 };
@@ -14,8 +15,9 @@ const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
 /**
  * Arma el bot con dobles. `resultados[estudianteId]` = 'ok' | AppError | Error. Cada envío queda en `eventos`
  * junto con las pausas (`esperar`), para comprobar el orden secuencial y el delay.
+ * `leasePerdido` = el UPDATE de renovación no encuentra nuestra fila (otra instancia tomó el lease); `renovarFalla` = ese UPDATE lanza.
  */
-function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { habilitado: true }, configurado = true, lease = true, config = {} } = {}) {
+function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { habilitado: true }, configurado = true, lease = true, leasePerdido = false, renovarFalla = false, config = {} } = {}) {
   const eventos = [];
   const sql = [];
   const db = {
@@ -24,6 +26,7 @@ function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { hab
       const maximo = Math.max(0, ...[...texto.matchAll(/\$(\d+)/g)].map((m) => Number(m[1])));
       assert.equal(params.length, maximo, `parámetros posicionales: usa $1..$${maximo}, recibió ${params.length}`);
       if (/INSERT INTO parametros/.test(texto)) return lease ? rs({ clave: 'x' }) : rs();
+      if (/^\s*UPDATE parametros/.test(texto)) { if (renovarFalla) throw new Error('base caída al renovar'); return leasePerdido ? rs() : rs({ clave: 'x' }); }
       if (/FROM \(\s*SELECT DISTINCT ON/.test(texto)) return rs(...preventivas);
       if (/GROUP BY v\.id/.test(texto)) return rs(...morosos);
       return rs();
@@ -54,7 +57,26 @@ function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { hab
 
 const prev = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, cuota_id: estudiante_id * 10, fecha_vencimiento: '2026-10-27' }));
 const mor = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, vencida_desde: '2026-10-01' }));
-const metaFalla = () => new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131047' });
+// Falla de Meta NO clasificada como del destinatario ni sistémica (131000 = «error desconocido»): cuenta para el cortafuegos, como siempre.
+const metaFalla = () => new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131000: error desconocido', meta_codigo: 131000, http_status: 500, clase: 'DESCONOCIDA' });
+
+/**
+ * Error REAL tal como lo produce whatsapp.service ante una respuesta de Meta. Se usa el servicio de verdad (con `http` simulado) para
+ * probar el CONTRATO servicio ↔ cron: si alguno renombra `detalles.clase`, estas pruebas lo detectan.
+ * `codigo === null` simula una respuesta sin cuerpo de error (solo el estado HTTP).
+ */
+async function errorMeta(codigo, { status = 400 } = {}) {
+  const http = { post: async () => { throw Object.assign(new Error(`Request failed with status code ${status}`), { response: { status, data: codigo === null ? {} : { error: { code: codigo, message: 'detalle de Meta' } } } }); } };
+  return crearWhatsappService({ http, token: 't', phoneId: 'p', version: 'v1' }).enviarTexto('584141234567', 'hola')
+    .then(() => { throw new Error('el envío debía fallar'); }, (err) => err);
+}
+/** Corte de red / timeout: no hay `response` de Meta. */
+async function errorRed() {
+  const http = { post: async () => { throw new Error('timeout of 10000ms exceeded'); } };
+  return crearWhatsappService({ http, token: 't', phoneId: 'p', version: 'v1' }).enviarTexto('584141234567', 'hola')
+    .then(() => { throw new Error('el envío debía fallar'); }, (err) => err);
+}
+const desde = (n) => Array.from({ length: n }, (_, i) => i + 1);
 
 test('ciclo: preventivas primero, luego morosidad; envío SECUENCIAL con pausa de 1,5 s entre mensajes (no antes del primero ni después del último)', async () => {
   const { bot, eventos, pausas } = armar({ preventivas: prev(1, 2), morosos: mor(3) });
@@ -157,13 +179,89 @@ test('las consultas masivas son PostgreSQL con parámetros posicionales y reglas
   await bot.ejecutarCiclo();
   const p = sql.find((s) => /DISTINCT ON/.test(s.texto));
   const m = sql.find((s) => /GROUP BY v\.id/.test(s.texto));
-  assert.deepEqual(p.params, ['2026-10-23', 3, 5, 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', null]); // null = ámbito «sin sede» (no hay sedes en este doble)
-  assert.deepEqual(m.params, ['2026-10-23', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', null]);
+  // null = ámbito «sin sede» (no hay sedes en este doble). Los 4 últimos de cada consulta: estado «en vuelo» (H4), estado a enfriar y umbrales (H1).
+  assert.deepEqual(p.params, ['2026-10-23', 3, 5, 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
+  assert.deepEqual(m.params, ['2026-10-23', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
   assert.match(p.texto, /BETWEEN \(\$1::date \+ \$2::int\) AND \(\$1::date \+ \$3::int\)/);
   assert.match(p.texto, /NOT EXISTS[\s\S]*n\.cuota_id = p\.cuota_id/, 'una PREVENTIVA por cuota');
   assert.match(m.texto, /c\.estado = \$4::text AND c\.fecha_vencimiento < \$1::date/, 'solo cuotas vencidas en Pendiente (no En Revisión)');
   assert.match(m.texto, /n\.creado_en > NOW\(\) - \(\$2::int \* INTERVAL '1 day'\)/);
   assert.ok(!/\b(TOP|GETDATE|DATEADD|ISNULL|dbo\.|@\w+)\b/i.test(p.texto + m.texto));
+});
+
+test('H4/H1 en el SQL: la GENERADA del bot (creado_por NULL) es «en vuelo» y no la del panel; el enfriamiento cuenta FALLIDA del mismo tipo en la ventana', async () => {
+  const { bot, sql } = armar({});
+  await bot.ejecutarCiclo();
+  const p = sql.find((s) => /DISTINCT ON/.test(s.texto)).texto;
+  const m = sql.find((s) => /GROUP BY v\.id/.test(s.texto)).texto;
+  assert.match(p, /\(n\.estado = \$8::text OR \(n\.estado = \$10::text AND n\.creado_por IS NULL\)\)/, 'preventiva: ENVIADA o GENERADA del bot');
+  assert.match(m, /\(n\.estado = \$7::text OR \(n\.estado = \$9::text AND n\.creado_por IS NULL\)\)/, 'morosidad: ENVIADA o GENERADA del bot');
+  assert.match(m, /n\.creado_en > NOW\(\) - \(\$2::int \* INTERVAL '1 day'\)/, 'la GENERADA del bot en morosidad respeta la misma ventana de N días');
+  assert.match(p, /\(SELECT COUNT\(\*\) FROM notificaciones_whatsapp f\s+WHERE f\.estudiante_id = p\.estudiante_id AND f\.tipo = \$7::text AND f\.estado = \$11::text\s+AND f\.creado_en > NOW\(\) - \(\$12::int \* INTERVAL '1 day'\)\) < \$13::int/);
+  assert.match(m, /\(SELECT COUNT\(\*\) FROM notificaciones_whatsapp f\s+WHERE f\.estudiante_id = v\.id AND f\.tipo = \$6::text AND f\.estado = \$10::text\s+AND f\.creado_en > NOW\(\) - \(\$11::int \* INTERVAL '1 day'\)\) < \$12::int/);
+  assert.ok(!/\b(TOP|GETDATE|DATEADD|ISNULL|dbo\.|@\w+)\b/i.test(p + m), 'sin residuos de T-SQL');
+});
+
+test('H1: fallas del DESTINATARIO (131026, 131047, 131049…) quedan FALLIDA pero NO suman al cortafuegos: el ciclo sigue', async () => {
+  const codigos = [131026, 131047, 131049, 131026, 131047, 131049, 131056]; // 7 seguidas; con umbral 3 un conteo erróneo abortaría en la 3.ª
+  const resultados = Object.fromEntries(await Promise.all(codigos.map(async (c, i) => [i + 1, await errorMeta(c)])));
+  const { bot, eventos, pausas } = armar({ preventivas: prev(...desde(8)), resultados, config: { maxFallosSeguidos: 3 } });
+  const r = await bot.ejecutarCiclo();
+  assert.equal(r.estado, 'COMPLETADO');
+  assert.equal(r.abortado, null);
+  assert.deepEqual([r.preventiva.enviadas, r.preventiva.fallidas], [1, 7], 'las 7 quedan contadas como fallidas (la fila FALLIDA la escribe generarAlerta)');
+  assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 8, 'se intentó a TODOS: el último sí se envió');
+  assert.ok(pausas.length >= 7 && pausas.every((ms) => ms === 1500), 'la solicitud sí llegó a Meta: se respeta la pausa anti-baneo');
+});
+
+test('H1: fallas SISTÉMICAS de Meta (190 token vencido, 132001 plantilla inexistente, 130429, rango 200–299, 401 sin cuerpo) abortan de inmediato', async () => {
+  const casos = [[190, 401, 'META_SISTEMICA_190'], [132001, 400, 'META_SISTEMICA_132001'], [130429, 429, 'META_SISTEMICA_130429'], [250, 403, 'META_SISTEMICA_250'], [null, 401, 'META_SISTEMICA_HTTP_401']];
+  for (const [codigo, status, esperado] of casos) {
+    const { bot, eventos } = armar({ preventivas: prev(1, 2, 3), resultados: { 1: await errorMeta(codigo, { status }) } });
+    const r = await bot.ejecutarCiclo();
+    assert.deepEqual([r.estado, r.abortado], ['ABORTADO', esperado], `código ${codigo}`);
+    assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 1, `código ${codigo}: no se intentó a los restantes`);
+    assert.equal(r.preventiva.fallidas, 1);
+  }
+});
+
+test('H1: fallas desconocidas o de red conservan el comportamiento previo (cuentan); las del destinatario intercaladas ni suman ni reinician la cuenta', async () => {
+  const [desconocida, destinatario, red] = [await errorMeta(131000, { status: 500 }), await errorMeta(131026), await errorRed()];
+  // cuentan: 1.º y 3.º y 5.º; el umbral es 3 → aborta tras el 5.º intento aunque haya fallas del destinatario en medio
+  const { bot, eventos } = armar({ preventivas: prev(...desde(7)), resultados: { 1: desconocida, 2: destinatario, 3: red, 4: destinatario, 5: desconocida }, config: { maxFallosSeguidos: 3 } });
+  const r = await bot.ejecutarCiclo();
+  assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'DEMASIADOS_FALLOS_SEGUIDOS']);
+  assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 5);
+});
+
+test('H1: un error que NO viene de Meta no puede hacerse pasar por falla del destinatario ni sistémica (solo se confía en `clase` de WHATSAPP_ENVIO_FALLIDO)', async () => {
+  const impostor = new AppError(422, 'OTRO_ERROR', 'x', { clase: 'DESTINATARIO' });
+  const { bot } = armar({ preventivas: prev(...desde(6)), resultados: { 1: impostor, 2: impostor, 3: impostor }, config: { maxFallosSeguidos: 3 } });
+  const r = await bot.ejecutarCiclo();
+  assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'DEMASIADOS_FALLOS_SEGUIDOS']);
+});
+
+test('H3: si la renovación del arrendamiento no encuentra nuestra fila (otra instancia lo tomó) el ciclo se aborta ANTES de enviar y no borra el lease ajeno', async () => {
+  const { bot, eventos, sql } = armar({ preventivas: prev(...desde(30)), leasePerdido: true });
+  const r = await bot.ejecutarCiclo();
+  assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'LEASE_PERDIDO']);
+  assert.equal(eventos.filter((x) => x.startsWith('envio')).length, 24, 'se renueva en el intento 25 y se aborta sin enviarlo');
+  const renov = sql.find((s) => /^\s*UPDATE parametros/.test(s.texto));
+  assert.match(renov.texto, /WHERE clave = \$1 AND valor = \$2/, 'solo renueva si seguimos siendo el titular');
+  const liberar = sql.find((s) => /^\s*DELETE FROM parametros/.test(s.texto));
+  assert.match(liberar.texto, /WHERE clave = \$1 AND valor = \$2/, 'solo libera el arrendamiento propio');
+  assert.equal(liberar.params[1], renov.params[1], 'mismo titular en renovar y liberar');
+});
+
+test('H3: con el arrendamiento vigente el ciclo completo sigue; un error TRANSITORIO al renovar no se confunde con pérdida del lease', async () => {
+  let { bot, eventos, sql } = armar({ preventivas: prev(...desde(30)) });
+  let r = await bot.ejecutarCiclo();
+  assert.deepEqual([r.estado, r.abortado, eventos.filter((x) => x.startsWith('envio')).length], ['COMPLETADO', null, 30]);
+  assert.equal(sql.filter((s) => /^\s*UPDATE parametros/.test(s.texto)).length, 1, 'una renovación cada 25 intentos');
+
+  ({ bot, eventos } = armar({ preventivas: prev(...desde(30)), renovarFalla: true }));
+  r = await bot.ejecutarCiclo();
+  assert.deepEqual([r.estado, r.abortado, eventos.filter((x) => x.startsWith('envio')).length], ['COMPLETADO', null, 30]);
 });
 
 test('la tasa BCV se consulta fresca como mucho una vez por minuto durante el ciclo', async () => {
