@@ -1,7 +1,9 @@
 /**
  * Vista «Ficha del estudiante» — PARTE INTEGRAL DEL CORE BASE (US$ 750): sin candados premium.
  *  - Consume el endpoint existente  GET  /api/estudiantes/:id   (estudiante + estado dinámico + representante + cuotas + documentos + pagos).
- *  - Secciones: datos académicos, ficha médica, expediente digitalizado en Google Drive, representante.
+ *  - Secciones: datos académicos, ficha médica, expediente digitalizado en Google Drive, representante principal y, de la planilla oficial
+ *    del Ministerio, el bloque familiar (madre, padre y personas autorizadas a retirar al menor). Los expedientes anteriores a la planilla
+ *    muestran «Sin registrar» en lo que no tienen.
  *  - Dos tablas simétricas (mismas 5 columnas, mismo estilo): histórico de cuotas y bandeja de pagos declarados por el representante.
  *  - «Retirar Estudiante»  → modal con motivo OBLIGATORIO (1–300 caracteres) y fecha de retiro → POST /api/estudiantes/:id/retirar
  *    «Reactivar Estudiante» → confirmación → POST /api/estudiantes/:id/reactivar
@@ -12,14 +14,17 @@
 import { bma, BmaSesionExpiradaError, mensajeDeError } from './api/bmaClient';
 import { HtmlSeguro, html, montar, urlSegura } from './lib/html';
 import { icono } from './lib/icons';
-import { bs, esVencida, fechaCorta, fechaHora, hoyCaracas, nombreMetodo, usd } from './lib/format';
+import { bs, edadEnAnios, esVencida, fechaCorta, fechaHora, hoyCaracas, nombreMetodo, usd } from './lib/format';
 import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiqueta, etiquetaEstado, notificar, obtener, type Modal } from './lib/ui';
 import type {
+  CampoProgenitor,
   CuerpoRetiro,
   CuotaEstudiante,
   DetalleEstudiante,
   DocumentoEstudiante,
   PagoEstudiante,
+  PersonaAutorizada,
+  ProgenitorClave,
   RespuestaCambioEstatus,
   TipoDocumentoEstudiante,
 } from './types/index';
@@ -53,17 +58,7 @@ const NOMBRE_TIPO_CUOTA: Readonly<Record<CuotaEstudiante['tipo'], string>> = {
 
 // ───────────────────────── Utilidades puras ─────────────────────────
 
-/** Años cumplidos a la fecha `hoy` (ambas 'AAAA-MM-DD'); `null` si alguna no tiene el formato esperado. */
-export function edadEnAnios(nacimiento: string, hoy: string): number | null {
-  const n = /^(\d{4})-(\d{2})-(\d{2})$/.exec(nacimiento);
-  const h = /^(\d{4})-(\d{2})-(\d{2})$/.exec(hoy);
-  if (!n || !h) return null;
-  const [, ny, nm, nd] = n.map(Number);
-  const [, hy, hm, hd] = h.map(Number);
-  if (ny === undefined || nm === undefined || nd === undefined || hy === undefined || hm === undefined || hd === undefined) return null;
-  const edad = hy - ny - (hm < nm || (hm === nm && hd < nd) ? 1 : 0);
-  return edad >= 0 ? edad : null;
-}
+export { edadEnAnios };
 
 export function tamanoLegible(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -102,8 +97,11 @@ function seccionAcademica(d: DetalleEstudiante): HtmlSeguro {
       ${dato('Grado', d.grado_solicitado)}
       ${dato('Cédula de identidad', d.cedula_identidad)}
       ${dato('Fecha de nacimiento', `${fechaCorta(d.fecha_nacimiento)}${edad !== null ? ` · ${edad} años` : ''}`)}
-      ${dato('Colegio de procedencia', d.colegio_procedencia)}
-      ${dato('Último grado aprobado', d.ultimo_grado_aprobado)}
+      ${dato('Lugar de nacimiento', d.lugar_nacimiento)}
+      ${dato('Lugar de estudio', d.lugar_estudio)}
+      ${dato('Grado de estudio', d.ultimo_grado_aprobado)}
+      ${dato('Horario', d.horario_preferido)}
+      ${d.colegio_procedencia !== null && d.colegio_procedencia.trim() !== '' ? dato('Colegio de procedencia', d.colegio_procedencia) : null}
       ${dato('Inscrito', fechaHora(d.creado_en))}
     </dl>
   </section>`;
@@ -117,6 +115,7 @@ function seccionMedica(d: DetalleEstudiante): HtmlSeguro {
       ${dato('Tipo de sangre', d.tipo_sangre)}
       ${dato('Alergias', alerta(d.alergias) ?? SIN_DATO)}
       ${dato('Condiciones médicas', alerta(d.condiciones_medicas) ?? SIN_DATO)}
+      ${dato('Bajo tratamiento médico', d.bajo_tratamiento ? alerta(d.tratamiento_explicacion ?? 'Sí (sin explicación registrada)') : 'No')}
       ${dato('Medicamentos', d.medicamentos)}
       ${dato('Contacto de emergencia', d.emergencia_nombre)}
       ${dato('Teléfono de emergencia', d.emergencia_telefono)}
@@ -151,13 +150,80 @@ function seccionDrive(d: DetalleEstudiante): HtmlSeguro {
 
 function seccionRepresentante(d: DetalleEstudiante): HtmlSeguro {
   return html`<section class="${CLS.tarjeta} p-6" aria-labelledby="t-representante">
-    ${tituloSeccion('t-representante', 'Representante', 'users')}
+    ${tituloSeccion('t-representante', 'Representante principal', 'users')}
     <dl class="grid gap-4">
       ${dato('Nombre', `${d.rep_nombres} ${d.rep_apellidos}`)}
       ${dato('Cédula', d.rep_cedula)}
       ${dato('Correo', d.rep_email)}
-      ${dato('Teléfono', d.rep_telefono)}
+      ${dato('Teléfono (WhatsApp de cobro)', d.rep_telefono)}
     </dl>
+  </section>`;
+}
+
+const TITULO_PROGENITOR: Readonly<Record<ProgenitorClave, string>> = { madre: 'Madre', padre: 'Padre' };
+
+/** Lee `madre_*` / `padre_*` de la ficha sin perder el tipo estricto de cada columna. */
+function campoProgenitor(d: DetalleEstudiante, p: ProgenitorClave, c: CampoProgenitor): string | number | null {
+  return d[`${p}_${c}` as const];
+}
+
+const textoOVacio = (v: string | number | null): string | null => (v === null ? null : String(v).trim() === '' ? null : String(v));
+
+/** Cédulas iguales sin distinguir mayúsculas: marca quién de los dos progenitores es el representante principal. */
+function esRepresentantePrincipal(d: DetalleEstudiante, p: ProgenitorClave): boolean {
+  const cedula = campoProgenitor(d, p, 'cedula');
+  return typeof cedula === 'string' && cedula.trim() !== '' && cedula.trim().toUpperCase() === d.rep_cedula.trim().toUpperCase();
+}
+
+function tarjetaProgenitor(d: DetalleEstudiante, p: ProgenitorClave): HtmlSeguro {
+  const v = (c: CampoProgenitor): string | null => textoOVacio(campoProgenitor(d, p, c));
+  const registrado = (['nombres', 'apellidos', 'cedula', 'edad', 'fecha_nacimiento', 'direccion', 'telefono_fijo', 'telefono_movil', 'email'] as const).some((c) => v(c) !== null);
+  const nombre = [v('nombres'), v('apellidos')].filter((x): x is string => x !== null).join(' ');
+  const fecha = v('fecha_nacimiento');
+  const edadFecha = fecha !== null ? edadEnAnios(fecha, hoyCaracas()) : null;
+  const nacimiento = fecha !== null
+    ? `${fechaCorta(fecha)}${edadFecha !== null ? ` · ${edadFecha} años` : ''}`
+    : v('edad') !== null ? `${v('edad')} años` : null;
+  return html`<article class="min-w-0 rounded-lg border border-slate-200 p-4" aria-label="${TITULO_PROGENITOR[p]}">
+    <h3 class="mb-3 flex flex-wrap items-center gap-2 text-sm font-bold text-slate-900">${TITULO_PROGENITOR[p]}${esRepresentantePrincipal(d, p) ? etiqueta('Representante principal', 'info') : null}</h3>
+    ${registrado
+      ? html`<dl class="grid gap-3">
+          ${dato('Nombre', nombre)}
+          ${dato('Cédula', v('cedula'))}
+          ${dato('Nacimiento', nacimiento)}
+          ${dato('Dirección de habitación', v('direccion'))}
+          ${dato('Teléfono fijo', v('telefono_fijo'))}
+          ${dato('Teléfono móvil', v('telefono_movil'))}
+          ${dato('Correo', v('email'))}
+        </dl>`
+      : html`<p class="text-sm text-slate-600">No se registró en la planilla.</p>`}
+  </article>`;
+}
+
+function filaAutorizada(a: PersonaAutorizada): HtmlSeguro {
+  return html`<li class="border-b border-slate-100 py-2 last:border-0">
+    <span class="block text-sm font-medium text-slate-900">${a.nombre}</span>
+    <span class="block text-xs text-slate-600">${a.parentesco} · ${a.telefono !== '' ? `+${a.telefono}` : SIN_DATO}</span>
+  </li>`;
+}
+
+function tarjetaAutorizadas(d: DetalleEstudiante): HtmlSeguro {
+  return html`<article class="min-w-0 rounded-lg border border-slate-200 p-4" aria-label="Personas autorizadas para retirar al menor">
+    <h3 class="mb-3 text-sm font-bold text-slate-900">Personas autorizadas para retirar al menor</h3>
+    ${d.personas_autorizadas.length > 0
+      ? html`<ul>${d.personas_autorizadas.map(filaAutorizada)}</ul>`
+      : html`<p class="text-sm text-slate-600">Sin personas autorizadas registradas.</p>`}
+  </article>`;
+}
+
+function seccionFamilia(d: DetalleEstudiante): HtmlSeguro {
+  return html`<section class="${CLS.tarjeta} p-6 lg:col-span-3" aria-labelledby="t-familia">
+    ${tituloSeccion('t-familia', 'Familia y autorizados (planilla oficial)', 'users')}
+    <div class="grid gap-4 md:grid-cols-3">
+      ${tarjetaProgenitor(d, 'madre')}
+      ${tarjetaProgenitor(d, 'padre')}
+      ${tarjetaAutorizadas(d)}
+    </div>
   </section>`;
 }
 
@@ -250,6 +316,7 @@ function fichaHtml(d: DetalleEstudiante): HtmlSeguro {
       ${seccionRepresentante(d)}
       ${seccionMedica(d)}
       ${seccionDrive(d)}
+      ${seccionFamilia(d)}
     </div>
     <div class="mt-6 grid gap-6 xl:grid-cols-2">
       ${tablaCuotas(d)}

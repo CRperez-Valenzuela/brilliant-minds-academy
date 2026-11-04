@@ -13,7 +13,7 @@
 
   /* Foco visible para teclado en TODO control interactivo (contraste 3:1 mínimo sobre fondos claros). */
   :focus-visible {
-    @apply outline-none ring-2 ring-slate-900 ring-offset-2 ring-offset-white;
+    @apply outline-none ring-2 ring-bma-azul ring-offset-2 ring-offset-white;
   }
 
   @media (prefers-reduced-motion: reduce) {
@@ -32,12 +32,12 @@
     @apply rounded-lg border p-4 text-sm font-medium;
   }
   .msg.okk {
-    @apply border-emerald-700/30 bg-emerald-50 text-emerald-900;
+    @apply border-bma-verde/50 bg-bma-verde-suave text-bma-verde-oscuro;
   }
   .msg.inf {
-    @apply border-sky-700/30 bg-sky-50 text-sky-900;
+    @apply border-bma-azul/30 bg-bma-azul-suave text-bma-azul-oscuro;
   }
   .msg.err {
-    @apply border-red-700/30 bg-red-50 text-red-900;
+    @apply border-bma-coral/50 bg-bma-coral-suave text-bma-coral-oscuro;
   }
 }

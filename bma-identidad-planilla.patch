@@ -1,0 +1,1922 @@
+From 1f72c15cb3d239e17ddc9a5fde0a1a12885f47b3 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 3 Nov 2026 23:16:06 -0400
+Subject: [PATCH] =?UTF-8?q?feat:=20identidad=20visual=20BMA=20y=20planilla?=
+ =?UTF-8?q?=20de=20inscripci=C3=B3n=20oficial=20(MPPE)=20con=20expediente?=
+ =?UTF-8?q?=20dual=20Madre/Padre?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Tailwind: paleta bma-azul/verde/coral/amarillo/purpura (DEFAULT + suave + oscuro con contraste AA) aplicada vía tokens CLS.
+- Migración 010 idempotente (PL/pgSQL): ficha médica del estudiante, madre_*/padre_* y personas_autorizadas JSONB con CHECK.
+- Backend: utils/planilla.js, representante principal, upsert con parámetros posicionales que solo rellena vacíos (H2) y no
+  permite reescribir a los autorizados a retirar al menor.
+- Frontend TS estricto: planilla pública en secciones numeradas con grilla dinámica de autorizados y ficha del alumno con bloque familiar.
+- Tests: +9 unitarios y +2 de integración contra PostgreSQL real.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01P7rPe1tpococoQyGArbWwS
+---
+ CAMBIOS_BMA_IDENTIDAD_PLANILLA.md             | 105 +++++
+ controllers/admisiones.controller.js          |  50 +-
+ .../migrations/010_ampliacion_planilla.sql    |  80 ++++
+ frontend/src/admisiones.ts                    | 440 +++++++++++++++---
+ frontend/src/estudiantes-detalle.ts           | 101 +++-
+ frontend/src/lib/candado.ts                   |   2 +-
+ frontend/src/lib/format.ts                    |  12 +
+ frontend/src/lib/ui.ts                        |  24 +-
+ frontend/src/styles/main.css                  |   8 +-
+ frontend/src/types/index.ts                   |  76 ++-
+ frontend/tailwind.config.js                   |  21 +-
+ services/admisiones.service.js                |  50 +-
+ services/crm.service.js                       |   7 +-
+ tests/admisiones.test.js                      |   6 +-
+ tests/integracion.pg.test.js                  |  64 +++
+ tests/planilla.test.js                        | 114 +++++
+ tests/schema-consistencia.test.js             |   2 +-
+ utils/planilla.js                             | 162 +++++++
+ 18 files changed, 1197 insertions(+), 127 deletions(-)
+ create mode 100644 CAMBIOS_BMA_IDENTIDAD_PLANILLA.md
+ create mode 100644 database/migrations/010_ampliacion_planilla.sql
+ create mode 100644 tests/planilla.test.js
+ create mode 100644 utils/planilla.js
+
+diff --git a/CAMBIOS_BMA_IDENTIDAD_PLANILLA.md b/CAMBIOS_BMA_IDENTIDAD_PLANILLA.md
+new file mode 100644
+index 0000000..65731ca
+--- /dev/null
++++ b/CAMBIOS_BMA_IDENTIDAD_PLANILLA.md
+@@ -0,0 +1,105 @@
++# CAMBIOS_BMA_IDENTIDAD_PLANILLA — Identidad visual BMA + Planilla de Inscripción oficial (MPPE) con expediente dual Madre/Padre
++
++**Proyecto:** Brilliant Minds Academy · **Base real:** `origin/development` @ `0390b25` · **Agente:** Ingeniero Fullstack Senior, Astra Digital Solutions
++**Motor de datos:** PostgreSQL 15+ / Supabase. Todas las consultas nuevas usan parámetros posicionales (`$1…$24`); sin residuos de MSSQL.
++
++## ⚠️ Anclaje de Git: `37b0a2b` NO existe en `development`
++
++El prompt exigía estar parado sobre `37b0a2b`. Ese commit **no está en el historial** de `development` (se descargaron sus 16 commits completos; el tip es `0390b25 Feat: Implementación frontend v2 de gestión de sedes…`). Se trabajó sobre `0390b25`, que es la rama pedida. Si tu copia local está en otro commit (p. ej. tienes uno sin subir), aplica con `git apply --3way`; si tu `HEAD` local es `0390b25`, el diff es limpio. `git apply --check` pasó contra un clon nuevo de `0390b25`.
++
++## Verificación realizada (y sus límites)
++
++| Verificación | Resultado |
++|---|---|
++| `npm test` (sin base de datos) | **140 pasan**, 0 fallan, 57 omitidas (integración) — línea base previa: 131 pasan / 55 omitidas |
++| `npm run test:integracion` contra **PostgreSQL 16.15 real** | **57/57** (55 previas + 2 nuevas). Suite completa con BD: **197/197** |
++| Migración `010` aplicada por `scripts/migrate.js` y reaplicada dos veces a mano | Sin errores; los 8 CHECK no se duplican |
++| `tsc` estricto sobre `frontend/src/**` (todas las reglas de `tsconfig.json`) | 0 errores (línea base: 0). **0 usos de `any`** |
++| Planilla pública en **Chromium real** (API simulada) | **25/25**: secciones 1–5, campos condicionales, grilla de autorizadas, edades automáticas, errores por campo, contenido exacto del multipart, 0 errores de consola |
++| Ficha del alumno en Chromium real | **13/13**, incluido XSS (`<script>`, `onerror`, `"><b>`) en datos de madre, tratamiento y autorizados: no se ejecuta, se muestra literal |
++| Auditor estático SQL↔código (`schema-consistencia`) | Verde: sin T-SQL, parámetros posicionales, columnas existentes |
++
++**Lo que NO se pudo comprobar**
++- `npm ci`/`vite build` fallaron en este entorno (el CLI de npm se cerró con error y luego el registro quedó bloqueado por el proxy). **No se compiló Tailwind ni se ejecutó `vite build`**; el tipado y el comportamiento se verificaron con un `tsc` global y módulos ES compilados. **No pude ver el diseño ya pintado**: revisa a ojo la planilla y la ficha tras el build.
++- **`public/` NO se regeneró** (salida de Vite con hashes). Ejecuta `npm run frontend:install && npm run frontend:build` y comprueba el diff de `public/assets`.
++- El contraste se calculó con la fórmula WCAG sobre los hex (tabla abajo), no sobre pantalla.
++
++## 1. Sistema de diseño — `frontend/tailwind.config.js`, `lib/ui.ts`, `styles/main.css`, `lib/candado.ts`
++
++Los cinco colores exactos del prompt, en `theme.extend.colors`. Cada uno es un objeto para conservar `bg-bma-azul` **y** añadir dos tonos auxiliares (`-suave` fondo tenue, `-oscuro` texto/hover):
++
++| Token | `DEFAULT` | Texto blanco encima | Uso |
++|---|---|---|---|
++| `bma-azul` | `#0073BB` | 5.04 : 1 ✅ | botones primarios, foco, acentos |
++| `bma-verde` | `#4BB387` | 2.59 : 1 ❌ | éxito/«Activo» → solo fondo suave + `bma-verde-oscuro` (5.78 : 1) |
++| `bma-coral` | `#F37365` | 2.82 : 1 ❌ | «Moroso»/alertas → fondo suave + `bma-coral-oscuro` (5.29 : 1) |
++| `bma-amarillo` | `#F9D03D` | 1.49 : 1 ❌ | avisos → fondo suave + `bma-amarillo-oscuro` (5.88 : 1) |
++| `bma-purpura` | `#8C59A4` | 5.15 : 1 ✅ | cabeceras de tabla, candado premium |
++
++Aplicado a través de los tokens centralizados `CLS` (un solo sitio): botón primario azul, botón «Retirar» coral oscuro, «Reactivar» verde oscuro, **cabeceras de todas las tablas en púrpura**, etiquetas/avisos de estado en verde/amarillo/coral/azul suaves, anillo de foco azul y badge del candado premium en púrpura. Los verdes/corales/amarillos puros **no** llevan texto blanco por contraste (lo advierte un comentario en el config).
++
++## 2. Base de datos — `database/migrations/010_ampliacion_planilla.sql`
++
++- **Estudiantes:** `lugar_nacimiento`, `lugar_estudio`, `horario_preferido`, `bajo_tratamiento`, `tratamiento_explicacion`, `emergencia_telefono`.
++- **Representantes:** 9 columnas `madre_*` + 9 `padre_*` + `personas_autorizadas JSONB`.
++- Idempotente: `ADD COLUMN IF NOT EXISTS` y 8 `CHECK` creados en un bloque `DO $$ … $$` (PL/pgSQL) solo si su nombre no existe: máx. 2 autorizados y JSON tipo arreglo, edad 14–120, teléfonos sin espacios y de 10 a 15 dígitos, explicación de tratamiento ≤ 500.
++
++## 3. Backend (parámetros posicionales)
++
++- `utils/planilla.js` (**nuevo**): validación/normalización pura de ficha médica, Madre/Padre, representante principal y hasta 2 autorizados. Acumula todos los errores en un solo 422.
++- `controllers/admisiones.controller.js`: integra el módulo; el **representante principal** (madre o padre) alimenta `representantes.nombres/cedula/email/telefono`, y el **móvil del principal** es el WhatsApp de cobro. El formulario clásico (representante único + teléfono) **sigue funcionando**.
++- `services/admisiones.service.js`: upsert del representante con 24 parámetros (`$24::jsonb`) y del estudiante con 20.
++- `services/crm.service.js`: `GET /api/estudiantes/:id` devuelve también `madre_*`, `padre_*` y `personas_autorizadas`.
++
++## 4. Frontend
++
++- `types/index.ts`: tipos estrictos sin `any`; los campos `madre_*`/`padre_*`/`autorizada_N_*` se **derivan** de una sola definición con tipos mapeados.
++- `admisiones.ts`: planilla en secciones numeradas **1 Estudiante · 2 Representante (madre y padre) · 3 Personas autorizadas** y, como requisitos del flujo, **4 Documentos · 5 Pago**. Campos condicionales (alergia / tratamiento), edades calculadas desde la fecha, grilla dinámica de hasta 2 autorizados (Añadir/Quitar), asteriscos de obligatoriedad que siguen al representante principal. Todo texto dinámico pasa por `html` → `esc()`.
++- `estudiantes-detalle.ts`: nueva sección «Familia y autorizados» (tarjeta Madre, Padre — con insignia «Representante principal» — y Personas autorizadas), datos de nacimiento/estudio/horario y tratamiento resaltado. Tablas contables y botones Retirar/Reactivar **intactos**. Expedientes anteriores muestran «No se registró en la planilla».
++- `lib/format.ts`: `edadEnAnios` pasó aquí (compartida por la planilla y la ficha; `estudiantes-detalle` la sigue re-exportando).
++
++## Decisiones y desviaciones respecto al prompt
++
++| Prompt | Qué se hizo y por qué |
++|---|---|
++| `009_ampliacion_planilla.sql` | **`010_…`**: ya existe `009_representantes_telefono_pendiente.sql`; dos `009` serían ambiguas. |
++| `public.estudiantes`, `INT` | Tablas **sin `public.`** (convención del repo y requisito del auditor de tests) e **`INTEGER`** (mismo tipo en PostgreSQL). Se añadió `JSONB` a la lista de tipos del auditor. |
++| `bajo_tratamiento BOOLEAN DEFAULT FALSE` | Además **`NOT NULL`** (un sí/no no necesita tercer estado). `personas_autorizadas` también `NOT NULL`. |
++| `emergencia_telefono` «nueva» | **Ya existía** desde 001: la línea es un no-op deliberado. |
++| Datos de madre/padre «individuales» | Se añadió el concepto de **representante principal**: `representantes.nombres/cedula/email/telefono` siguen siendo el contacto de cobro (UNIQUE por cédula, usado por notificaciones y portal). |
++| Edad (`madre_edad`) | Con fecha de nacimiento, el servidor **calcula** la edad y descarta la enviada. |
++| Planilla «tres secciones» | Las 3 oficiales van numeradas 1–3; documentos y pago (necesarios para inscribir) quedan como 4 y 5, y la nota de costo ya apuntaba al «paso 5». |
++| Campos del formulario anterior | `colegio_procedencia`, `condiciones_medicas` y `medicamentos` **salen del formulario público** (la planilla oficial no los pide; «lugar de estudio» y «tratamiento + explicación» los reemplazan). Las columnas, la API y la ficha los conservan. |
++
++## ⚠️ Seguridad: autorizados a retirar al menor
++
++El formulario público es anónimo. Con el esquema pedido (`personas_autorizadas` en `representantes`), quien conociera una cédula podría reescribir **quién puede retirar a un niño**. El upsert aplica la misma regla de H2: `personas_autorizadas` solo se asigna si está en `[]`, y madre/padre solo **rellenan vacíos** (`COALESCE`). Un test con PostgreSQL real lo demuestra. **Consecuencia:** al no haber pantalla de edición, corregir esos datos exige al administrador (SQL o una futura vista). Además, los autorizados pertenecen al **representante**, no al niño: hermanos comparten la lista.
++
++## Pendiente / fuera de alcance (conviene decidirlo)
++
++- **Planilla de Adolescentes** (.docx adjunto): sus campos comunes ya están cubiertos, pero el modelo sigue exigiendo un representante con teléfono para todo estudiante (firma el propio alumno en esa planilla). Habría que decidir si un adolescente puede inscribirse sin representante.
++- La planilla pide **dirección y teléfono del estudiante**; no estaban en la lista de columnas del prompt y no se añadieron (las direcciones de madre/padre sí).
++- **Logotipo**: no se incrustó (el PNG adjunto pesa 1.4 MB y tiene halo oscuro); la identidad se aplicó vía paleta. Conviene un SVG/PNG optimizado.
++- «Año escolar 2026-2027» de la planilla en papel no se cableó (evita quedar desfasado).
++
++## Archivos creados
++- `database/migrations/010_ampliacion_planilla.sql`
++- `utils/planilla.js`
++- `tests/planilla.test.js` (9 pruebas)
++- `CAMBIOS_BMA_IDENTIDAD_PLANILLA.md`
++
++## Archivos modificados
++- `frontend/tailwind.config.js`, `frontend/src/lib/ui.ts`, `frontend/src/lib/candado.ts`, `frontend/src/styles/main.css`, `frontend/src/lib/format.ts`
++- `frontend/src/types/index.ts`, `frontend/src/admisiones.ts`, `frontend/src/estudiantes-detalle.ts`
++- `controllers/admisiones.controller.js`, `services/admisiones.service.js`, `services/crm.service.js`
++- `tests/admisiones.test.js` (el test H2 fijaba los 5 parámetros antiguos), `tests/integracion.pg.test.js` (+2 pruebas), `tests/schema-consistencia.test.js` (+`JSONB`)
++
++## Cómo aplicarlo
++
++```bash
++git checkout development && git status          # debe estar limpio, en 0390b25
++git apply --check bma-identidad-planilla.patch   # o: git am bma-identidad-planilla.patch
++git am bma-identidad-planilla.patch              # (o git apply para dejarlo sin commit)
++npm run migrate                                  # aplica 010 (transaccional, idempotente)
++npm test && npm run frontend:install && npm run frontend:build
++```
+diff --git a/controllers/admisiones.controller.js b/controllers/admisiones.controller.js
+index ad8313f..ec3d795 100644
+--- a/controllers/admisiones.controller.js
++++ b/controllers/admisiones.controller.js
+@@ -4,6 +4,7 @@ const cfg = require('../config/env');
+ const { AppError, e } = require('../errors/AppError');
+ const { validar } = require('../utils/validar');
+ const { sanitizarTelefono } = require('../utils/telefono');
++const { normalizarPlanilla, CEDULA } = require('../utils/planilla');
+ const { detectarTipo } = require('../utils/archivos');
+ const { Semaforo } = require('../utils/semaforo');
+ const { asyncHandler, ok } = require('../utils/http');
+@@ -11,7 +12,6 @@ const admisiones = require('../services/admisiones.service');
+ const invitaciones = require('../services/invitaciones.service');
+ 
+ const METODOS = ['ZELLE', 'BINANCE', 'PAYPAL', 'PAGO_MOVIL'];
+-const CEDULA = { patron: /^[A-Za-z0-9.-]{4,20}$/, mensajePatron: 'Solo letras, números, puntos y guiones (4 a 20).' };
+ 
+ const REGLAS = {
+   alumno_nombres: { requerido: true, max: 100 },
+@@ -28,9 +28,11 @@ const REGLAS = {
+   condiciones_medicas: { max: 500 },
+   medicamentos: { max: 500 },
+   emergencia_nombre: { max: 150 },
+-  representante_nombres: { requerido: true, max: 100 },
+-  representante_apellidos: { requerido: true, max: 100 },
+-  representante_cedula: { requerido: true, ...CEDULA },
++  // Representante «clásico» (un solo adulto). Con la planilla oficial el representante PRINCIPAL se toma de la Madre o del Padre
++  // (`representante_principal`, ver utils/planilla.js) y estos tres campos pasan a derivarse de ahí: su obligatoriedad se evalúa en prepararInscripcion.
++  representante_nombres: { max: 100 },
++  representante_apellidos: { max: 100 },
++  representante_cedula: { max: 20, ...CEDULA },
+   representante_email: { tipo: 'email', max: 160 },
+   referencia_bancaria: { requerido: true, patron: /^[A-Za-z0-9-]{4,40}$/, mensajePatron: 'La referencia debe tener de 4 a 40 caracteres (letras, números o guiones, sin espacios).' },
+   metodo_pago: { tipo: 'enum', valores: METODOS, requerido: true },
+@@ -42,7 +44,7 @@ const DOCUMENTOS = [
+   { campo: 'acta_nacimiento', tipo: 'ACTA_NACIMIENTO', permitidos: ['image/jpeg', 'image/png', 'application/pdf'] },
+ ];
+ 
+-/** Valida campos + teléfonos (unificados sin espacios) + 3 documentos. Acumula TODOS los errores en un solo 422. */
++/** Valida campos + planilla oficial (ficha médica, madre/padre, autorizados) + teléfonos (sin espacios) + 3 documentos. Acumula TODOS los errores en un solo 422. */
+ function prepararInscripcion(body, files) {
+   const detalles = [];
+   let datos = {};
+@@ -55,6 +57,10 @@ function prepararInscripcion(body, files) {
+   // Sin invitación el nivel lo elige la familia (obligatorio). Se lee del cuerpo crudo: si `validar` falló, `datos` está vacío y no debe duplicar errores.
+   if (!body.invitacion && !String(body.grado_solicitado ?? '').trim()) detalles.push({ campo: 'grado_solicitado', mensaje: 'Es obligatorio.' });
+ 
++  // Planilla oficial: nunca lanza; sus errores se suman a los del formulario base.
++  const { valores: planilla, detalles: detallesPlanilla } = normalizarPlanilla(body);
++  detalles.push(...detallesPlanilla);
++
+   const unir = (campo, ...partes) => {
+     try {
+       return sanitizarTelefono(...partes);
+@@ -63,12 +69,38 @@ function prepararInscripcion(body, files) {
+       return null;
+     }
+   };
+-  // Se aceptan fragmentos (código + número) o un solo campo; en ambos casos se guarda UNA cadena sin espacios.
+-  datos.telefono = body.telefono || body.telefono_numero
+-    ? unir('telefono', body.telefono_codigo || '', body.telefono || body.telefono_numero)
+-    : (detalles.push({ campo: 'telefono', mensaje: 'Es obligatorio.' }), null);
++  if (planilla.principal) {
++    // El representante principal sale de la Madre o del Padre: nombres, cédula, correo y el MÓVIL (WhatsApp de cobro).
++    datos.representante_nombres = planilla.principal.nombres;
++    datos.representante_apellidos = planilla.principal.apellidos;
++    datos.representante_cedula = planilla.principal.cedula;
++    datos.representante_email = planilla.principal.email;
++    datos.telefono = planilla.principal.telefono;
++  } else {
++    // Formulario clásico: representante único obligatorio. Se aceptan fragmentos (código + número) o un solo campo; se guarda UNA cadena sin espacios.
++    for (const campo of ['representante_nombres', 'representante_apellidos', 'representante_cedula']) {
++      // Se lee del cuerpo crudo: si `validar` falló, `datos` está vacío y no debe inventar faltantes (igual que con el grado).
++      if (!String(body[campo] ?? '').trim() && !detalles.some((d) => d.campo === campo)) detalles.push({ campo, mensaje: 'Es obligatorio.' });
++    }
++    datos.telefono = body.telefono || body.telefono_numero
++      ? unir('telefono', body.telefono_codigo || '', body.telefono || body.telefono_numero)
++      : (detalles.push({ campo: 'telefono', mensaje: 'Es obligatorio.' }), null);
++  }
+   datos.emergencia_telefono = body.emergencia_telefono ? unir('emergencia_telefono', body.emergencia_telefono_codigo || '', body.emergencia_telefono) : null;
+ 
++  // Ficha médica y datos de la planilla oficial (el «NO» a ¿Es alérgico? vacía `alergias`).
++  if (planilla.es_alergico === 'NO') datos.alergias = null;
++  Object.assign(datos, {
++    lugar_nacimiento: planilla.lugar_nacimiento,
++    lugar_estudio: planilla.lugar_estudio,
++    horario_preferido: planilla.horario_preferido,
++    bajo_tratamiento: planilla.bajo_tratamiento,
++    tratamiento_explicacion: planilla.tratamiento_explicacion,
++    madre: planilla.madre,
++    padre: planilla.padre,
++    personas_autorizadas: planilla.personas_autorizadas,
++  });
++
+   const archivos = [];
+   for (const d of DOCUMENTOS) {
+     const f = files && files[d.campo] && files[d.campo][0];
+diff --git a/database/migrations/010_ampliacion_planilla.sql b/database/migrations/010_ampliacion_planilla.sql
+new file mode 100644
+index 0000000..6803db9
+--- /dev/null
++++ b/database/migrations/010_ampliacion_planilla.sql
+@@ -0,0 +1,80 @@
++-- 010_ampliacion_planilla.sql — Planilla de Inscripción oficial (MPPE · Autogestión): expediente médico del estudiante y
++-- estructura DUAL de representantes (Madre / Padre) + personas autorizadas para retirar al menor.
++--
++-- Idempotente: cada columna usa ADD COLUMN IF NOT EXISTS y cada restricción se crea solo si su nombre aún no existe
++-- (PostgreSQL no admite ADD CONSTRAINT IF NOT EXISTS, de ahí los bloques DO … PL/pgSQL). Sin T-SQL; sin datos de usuario en el DDL.
++-- Las tablas se nombran sin esquema (search_path = public), igual que el resto de migraciones y que el auditor de tests/schema-consistencia.test.js.
++-- Nota de numeración: ya existe 009_representantes_telefono_pendiente.sql, por eso esta migración es la 010.
++
++-- ───────────────────────── estudiantes: planilla del estudiante y ficha médica ─────────────────────────
++ALTER TABLE estudiantes ADD COLUMN IF NOT EXISTS lugar_nacimiento VARCHAR(150) NULL;
++ALTER TABLE estudiantes ADD COLUMN IF NOT EXISTS lugar_estudio VARCHAR(150) NULL;
++ALTER TABLE estudiantes ADD COLUMN IF NOT EXISTS horario_preferido VARCHAR(50) NULL;
++ALTER TABLE estudiantes ADD COLUMN IF NOT EXISTS bajo_tratamiento BOOLEAN NOT NULL DEFAULT FALSE;
++ALTER TABLE estudiantes ADD COLUMN IF NOT EXISTS tratamiento_explicacion TEXT NULL;
++-- `emergencia_telefono` ya existe desde 001_core_base.sql (con su CHECK sin espacios): esta línea es un no-op deliberado que deja
++-- la migración autosuficiente si se aplica sobre un esquema anterior.
++ALTER TABLE estudiantes ADD COLUMN IF NOT EXISTS emergencia_telefono VARCHAR(20) NULL;
++
++-- ───────────────────────── representantes: Madre, Padre y personas autorizadas ─────────────────────────
++-- `representantes.nombres/apellidos/cedula/email/telefono` siguen siendo el representante PRINCIPAL (contacto de cobro y de WhatsApp);
++-- las columnas madre_* / padre_* guardan los datos individuales de ambos progenitores tal como los pide el Ministerio.
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS madre_nombres VARCHAR(100) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS madre_apellidos VARCHAR(100) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS madre_cedula VARCHAR(20) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS madre_edad INTEGER NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS madre_fecha_nacimiento DATE NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS madre_direccion VARCHAR(250) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS madre_telefono_fijo VARCHAR(20) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS madre_telefono_movil VARCHAR(20) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS madre_email VARCHAR(100) NULL;
++
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS padre_nombres VARCHAR(100) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS padre_apellidos VARCHAR(100) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS padre_cedula VARCHAR(20) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS padre_edad INTEGER NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS padre_fecha_nacimiento DATE NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS padre_direccion VARCHAR(250) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS padre_telefono_fijo VARCHAR(20) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS padre_telefono_movil VARCHAR(20) NULL;
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS padre_email VARCHAR(100) NULL;
++
++-- Arreglo JSON de hasta 2 objetos { "nombre": …, "telefono": …, "parentesco": … } (quién puede retirar al menor).
++ALTER TABLE representantes ADD COLUMN IF NOT EXISTS personas_autorizadas JSONB NOT NULL DEFAULT '[]'::jsonb;
++
++-- ───────────────────────── Restricciones (última línea de defensa; el backend ya valida y sanea) ─────────────────────────
++DO $$
++DECLARE
++  -- (tabla, nombre, definición): solo se crea si el nombre aún no existe en el catálogo.
++  r RECORD;
++BEGIN
++  FOR r IN
++    SELECT * FROM (VALUES
++      ('estudiantes',   'ck_estudiantes_tratamiento_len',
++         'CHECK (tratamiento_explicacion IS NULL OR char_length(tratamiento_explicacion) <= 500)'),
++      ('representantes','ck_representantes_personas_autorizadas',
++         'CHECK (jsonb_typeof(personas_autorizadas) = ''array'' AND jsonb_array_length(personas_autorizadas) <= 2)'),
++      ('representantes','ck_representantes_madre_edad',
++         'CHECK (madre_edad IS NULL OR madre_edad BETWEEN 14 AND 120)'),
++      ('representantes','ck_representantes_padre_edad',
++         'CHECK (padre_edad IS NULL OR padre_edad BETWEEN 14 AND 120)'),
++      ('representantes','ck_representantes_madre_tel_fijo',
++         'CHECK (madre_telefono_fijo IS NULL OR (madre_telefono_fijo !~ ''\s'' AND char_length(madre_telefono_fijo) BETWEEN 10 AND 15))'),
++      ('representantes','ck_representantes_madre_tel_movil',
++         'CHECK (madre_telefono_movil IS NULL OR (madre_telefono_movil !~ ''\s'' AND char_length(madre_telefono_movil) BETWEEN 10 AND 15))'),
++      ('representantes','ck_representantes_padre_tel_fijo',
++         'CHECK (padre_telefono_fijo IS NULL OR (padre_telefono_fijo !~ ''\s'' AND char_length(padre_telefono_fijo) BETWEEN 10 AND 15))'),
++      ('representantes','ck_representantes_padre_tel_movil',
++         'CHECK (padre_telefono_movil IS NULL OR (padre_telefono_movil !~ ''\s'' AND char_length(padre_telefono_movil) BETWEEN 10 AND 15))')
++    ) AS c(tabla, nombre, definicion)
++  LOOP
++    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = r.nombre AND conrelid = to_regclass(r.tabla)) THEN
++      EXECUTE format('ALTER TABLE %I ADD CONSTRAINT %I %s', r.tabla, r.nombre, r.definicion);
++    END IF;
++  END LOOP;
++END
++$$;
++
++-- ───────────────────────── Documentación en el catálogo ─────────────────────────
++COMMENT ON COLUMN representantes.personas_autorizadas IS 'Arreglo JSON (máx. 2) de { nombre, telefono, parentesco } autorizados a retirar al menor. El formulario público NO puede reescribirlo si ya tiene datos.';
++COMMENT ON COLUMN estudiantes.bajo_tratamiento IS 'Planilla MPPE: ¿se encuentra o se ha encontrado bajo tratamiento médico? El detalle va en tratamiento_explicacion.';
+diff --git a/frontend/src/admisiones.ts b/frontend/src/admisiones.ts
+index c16b964..4be1953 100644
+--- a/frontend/src/admisiones.ts
++++ b/frontend/src/admisiones.ts
+@@ -9,15 +9,19 @@ import './styles/main.css';
+ import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
+ import { html, montar, raw, type HtmlSeguro } from './lib/html';
+ import { icono } from './lib/icons';
+-import { bs, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
++import { bs, edadEnAnios, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
+ import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
+ import { esConfigInvitacion } from './types/index';
+ import type {
+   CampoArchivoAdmision,
+   ConfigAdmisiones,
+   ConfigInvitacion,
++  CampoProgenitor,
+   CuentaPago,
+   MetodoPago,
++  NumeroAutorizada,
++  ProgenitorClave,
++  RepresentantePrincipal,
+   RespuestaAdmision,
+   SolicitudAdmisionTexto,
+   TipoSangre,
+@@ -105,11 +109,13 @@ const INFO_METODOS: Readonly<Record<MetodoPago, InfoMetodo>> = {
+ };
+ 
+ type NombreTexto = keyof SolicitudAdmisionTexto;
+-type TipoControl = 'text' | 'date' | 'email' | 'tel' | 'select';
++type TipoControl = 'text' | 'date' | 'email' | 'tel' | 'select' | 'number';
+ 
+ interface DefCampo {
+   readonly nombre: NombreTexto;
+   readonly etiqueta: string;
++  /** Texto del campo en los mensajes de error (p. ej. «Madre · Nombres»); por defecto, `etiqueta`. */
++  readonly resumen?: string;
+   readonly tipo: TipoControl;
+   readonly requerido: boolean;
+   readonly maximo?: number;
+@@ -119,58 +125,120 @@ interface DefCampo {
+   readonly porDefecto?: string;
+   /** Atributos HTML constantes del propio código (nunca datos del usuario). */
+   readonly atributos?: string;
++  /** Subtítulo (`<fieldset>`) bajo el que se agrupa el campo dentro de su sección. */
++  readonly grupo?: string;
++  /** El campo solo se muestra (y se envía) cuando otro campo vale exactamente esto. */
++  readonly visibleSi?: { readonly campo: NombreTexto; readonly valor: string };
++  /** Obligatorio únicamente cuando ese progenitor es el representante principal. */
++  readonly esencialDe?: ProgenitorClave;
+ }
+ 
+ interface DefSeccion {
+   readonly id: string;
+   readonly titulo: string;
++  readonly nota?: string;
+   readonly campos: readonly DefCampo[];
+ }
+ 
++const SI_NO_OPCIONES: readonly { readonly valor: string; readonly texto: string }[] = [
++  { valor: '', texto: 'Selecciona…' },
++  { valor: 'NO', texto: 'No' },
++  { valor: 'SI', texto: 'Sí' },
++];
++
++const CAMPOS_PROGENITOR: readonly CampoProgenitor[] = ['nombres', 'apellidos', 'cedula', 'edad', 'fecha_nacimiento', 'direccion', 'telefono_fijo', 'telefono_movil', 'email'];
++const PROGENITORES: readonly ProgenitorClave[] = ['madre', 'padre'];
++const NOMBRE_PROGENITOR: Readonly<Record<ProgenitorClave, string>> = { madre: 'Madre', padre: 'Padre' };
++const EDAD_MINIMA_PROGENITOR = 14;
++const EDAD_MAXIMA_PROGENITOR = 120;
++const NUMEROS_AUTORIZADA: readonly NumeroAutorizada[] = [1, 2];
++
++const nombreProgenitor = (p: ProgenitorClave, c: CampoProgenitor): NombreTexto => `${p}_${c}`;
++const nombreAutorizada = (n: NumeroAutorizada, c: 'nombre' | 'telefono' | 'parentesco'): NombreTexto => `autorizada_${n}_${c}`;
++
++/** Los 9 campos de un progenitor, tal como los pide la planilla del Ministerio. */
++function camposProgenitor(p: ProgenitorClave): readonly DefCampo[] {
++  const quien = NOMBRE_PROGENITOR[p];
++  const grupo = `Datos ${p === 'madre' ? 'de la madre' : 'del padre'}`;
++  const n = (c: CampoProgenitor): NombreTexto => nombreProgenitor(p, c);
++  const r = (texto: string): string => `${quien} · ${texto}`;
++  return [
++    { nombre: n('nombres'), etiqueta: 'Nombres', resumen: r('Nombres'), tipo: 'text', requerido: false, maximo: 100, grupo, esencialDe: p },
++    { nombre: n('apellidos'), etiqueta: 'Apellidos', resumen: r('Apellidos'), tipo: 'text', requerido: false, maximo: 100, grupo, esencialDe: p },
++    { nombre: n('cedula'), etiqueta: 'Cédula de identidad', resumen: r('Cédula'), tipo: 'text', requerido: false, maximo: 20, grupo, esencialDe: p, ayuda: 'Letras, números, puntos o guiones (4 a 20).' },
++    { nombre: n('fecha_nacimiento'), etiqueta: 'Fecha de nacimiento', resumen: r('Fecha de nacimiento'), tipo: 'date', requerido: false, grupo },
++    { nombre: n('edad'), etiqueta: 'Edad', resumen: r('Edad'), tipo: 'number', requerido: false, grupo, atributos: `min="${EDAD_MINIMA_PROGENITOR}" max="${EDAD_MAXIMA_PROGENITOR}" inputmode="numeric"`, ayuda: 'Se calcula sola con la fecha de nacimiento.' },
++    { nombre: n('direccion'), etiqueta: 'Dirección de habitación', resumen: r('Dirección'), tipo: 'text', requerido: false, maximo: 250, grupo, autocompletar: 'street-address' },
++    { nombre: n('telefono_fijo'), etiqueta: 'Teléfono fijo', resumen: r('Teléfono fijo'), tipo: 'tel', requerido: false, grupo, ayuda: 'Con código de área, p. ej. 0212 1234567.' },
++    { nombre: n('telefono_movil'), etiqueta: 'Teléfono móvil (WhatsApp)', resumen: r('Teléfono móvil'), tipo: 'tel', requerido: false, grupo, esencialDe: p, ayuda: 'P. ej. 0414 1234567 o +58 414 1234567. Si es el principal, recibe los avisos de cobro.' },
++    { nombre: n('email'), etiqueta: 'Correo electrónico', resumen: r('Correo'), tipo: 'email', requerido: false, maximo: 100, grupo, autocompletar: 'email' },
++  ];
++}
++
++/** Las 3 columnas de una fila de «Personas autorizadas para retirar al menor». */
++function camposAutorizada(n: NumeroAutorizada): readonly DefCampo[] {
++  const r = (texto: string): string => `Persona autorizada ${n} · ${texto}`;
++  return [
++    { nombre: nombreAutorizada(n, 'nombre'), etiqueta: 'Nombre y apellido', resumen: r('Nombre y apellido'), tipo: 'text', requerido: false, maximo: 150 },
++    { nombre: nombreAutorizada(n, 'telefono'), etiqueta: 'Teléfono', resumen: r('Teléfono'), tipo: 'tel', requerido: false, autocompletar: 'off' },
++    { nombre: nombreAutorizada(n, 'parentesco'), etiqueta: 'Parentesco', resumen: r('Parentesco'), tipo: 'text', requerido: false, maximo: 50 },
++  ];
++}
++
+ const SECCIONES: readonly DefSeccion[] = [
+   {
+     id: 'estudiante',
+     titulo: 'Datos del estudiante',
+     campos: [
+-      { nombre: 'alumno_nombres', etiqueta: 'Nombres', tipo: 'text', requerido: true, maximo: 100 },
+-      { nombre: 'alumno_apellidos', etiqueta: 'Apellidos', tipo: 'text', requerido: true, maximo: 100 },
+-      { nombre: 'alumno_fecha_nacimiento', etiqueta: 'Fecha de nacimiento', tipo: 'date', requerido: true, autocompletar: 'bday' },
+-      { nombre: 'alumno_cedula', etiqueta: 'Cédula del estudiante', tipo: 'text', requerido: false, maximo: 20, ayuda: 'Solo si tiene.' },
+-      { nombre: 'grado_solicitado', etiqueta: 'Grado a cursar', tipo: 'text', requerido: true, maximo: 60 },
+-      { nombre: 'colegio_procedencia', etiqueta: 'Colegio de procedencia', tipo: 'text', requerido: false, maximo: 150 },
+-      { nombre: 'ultimo_grado_aprobado', etiqueta: 'Último grado aprobado', tipo: 'text', requerido: false, maximo: 60 },
+-    ],
+-  },
+-  {
+-    id: 'medicos',
+-    titulo: 'Datos médicos y contacto de emergencia',
+-    campos: [
++      { nombre: 'alumno_nombres', etiqueta: 'Nombres', resumen: 'Estudiante · Nombres', tipo: 'text', requerido: true, maximo: 100, grupo: 'Identificación y estudios' },
++      { nombre: 'alumno_apellidos', etiqueta: 'Apellidos', resumen: 'Estudiante · Apellidos', tipo: 'text', requerido: true, maximo: 100, grupo: 'Identificación y estudios' },
++      { nombre: 'alumno_cedula', etiqueta: 'Cédula de identidad', resumen: 'Cédula del estudiante', tipo: 'text', requerido: false, maximo: 20, grupo: 'Identificación y estudios', ayuda: 'Solo si tiene.' },
++      { nombre: 'alumno_fecha_nacimiento', etiqueta: 'Fecha de nacimiento', resumen: 'Fecha de nacimiento', tipo: 'date', requerido: true, autocompletar: 'bday', grupo: 'Identificación y estudios', ayuda: 'Edad: se calcula con la fecha de nacimiento.' },
++      { nombre: 'alumno_lugar_nacimiento', etiqueta: 'Lugar de nacimiento', resumen: 'Lugar de nacimiento', tipo: 'text', requerido: false, maximo: 150, grupo: 'Identificación y estudios' },
++      { nombre: 'alumno_lugar_estudio', etiqueta: 'Lugar de estudio', resumen: 'Lugar de estudio', tipo: 'text', requerido: false, maximo: 150, grupo: 'Identificación y estudios', ayuda: 'Colegio o institución donde estudia actualmente.' },
++      { nombre: 'ultimo_grado_aprobado', etiqueta: 'Grado de estudio', resumen: 'Grado de estudio', tipo: 'text', requerido: false, maximo: 60, grupo: 'Identificación y estudios' },
++      { nombre: 'grado_solicitado', etiqueta: 'Nivel a cursar', resumen: 'Nivel a cursar', tipo: 'text', requerido: true, maximo: 60, grupo: 'Identificación y estudios' },
++      { nombre: 'horario_preferido', etiqueta: 'Horario', resumen: 'Horario', tipo: 'text', requerido: false, maximo: 50, grupo: 'Identificación y estudios', ayuda: 'Ej.: sábados 9:00 a. m.' },
++      { nombre: 'es_alergico', etiqueta: '¿Es alérgico?', resumen: '¿Es alérgico?', tipo: 'select', requerido: true, opciones: SI_NO_OPCIONES, grupo: 'Salud y emergencia' },
++      { nombre: 'alergias', etiqueta: 'Explique la alergia', resumen: 'Alergia (explicación)', tipo: 'text', requerido: false, maximo: 500, grupo: 'Salud y emergencia', visibleSi: { campo: 'es_alergico', valor: 'SI' } },
++      { nombre: 'bajo_tratamiento', etiqueta: '¿Se encuentra o se ha encontrado bajo tratamiento médico?', resumen: 'Tratamiento médico', tipo: 'select', requerido: true, opciones: SI_NO_OPCIONES, grupo: 'Salud y emergencia' },
++      { nombre: 'tratamiento_explicacion', etiqueta: 'Explique el tratamiento', resumen: 'Tratamiento (explicación)', tipo: 'text', requerido: false, maximo: 500, grupo: 'Salud y emergencia', visibleSi: { campo: 'bajo_tratamiento', valor: 'SI' } },
+       {
+         nombre: 'tipo_sangre',
+         etiqueta: 'Tipo de sangre',
++        resumen: 'Tipo de sangre',
+         tipo: 'select',
+         requerido: false,
++        grupo: 'Salud y emergencia',
+         opciones: [{ valor: '', texto: 'No sé / prefiero no indicarlo' }, ...TIPOS_SANGRE.map((t) => ({ valor: t, texto: t }))],
+       },
+-      { nombre: 'alergias', etiqueta: 'Alergias', tipo: 'text', requerido: false, maximo: 500 },
+-      { nombre: 'condiciones_medicas', etiqueta: 'Condiciones médicas', tipo: 'text', requerido: false, maximo: 500 },
+-      { nombre: 'medicamentos', etiqueta: 'Medicamentos', tipo: 'text', requerido: false, maximo: 500 },
+-      { nombre: 'emergencia_nombre', etiqueta: 'Contacto de emergencia', tipo: 'text', requerido: false, maximo: 150 },
+-      { nombre: 'emergencia_telefono', etiqueta: 'Teléfono de emergencia', tipo: 'tel', requerido: false, ayuda: 'Con código de país, p. ej. +58 414 1234567.' },
++      { nombre: 'emergencia_nombre', etiqueta: 'Contacto de emergencia', resumen: 'Contacto de emergencia', tipo: 'text', requerido: false, maximo: 150, grupo: 'Salud y emergencia' },
++      { nombre: 'emergencia_telefono', etiqueta: 'En caso de emergencia llamar al teléfono', resumen: 'Teléfono de emergencia', tipo: 'tel', requerido: false, grupo: 'Salud y emergencia', ayuda: 'Con código de país, p. ej. +58 414 1234567.' },
+     ],
+   },
+   {
+     id: 'representante',
+-    titulo: 'Datos del representante',
++    titulo: 'Datos del representante del estudiante',
++    nota: 'Completa los datos de la madre, del padre o de ambos. Elige quién será el representante principal: es quien paga la matrícula y recibe los avisos de cobro por WhatsApp.',
+     campos: [
+-      { nombre: 'representante_nombres', etiqueta: 'Nombres', tipo: 'text', requerido: true, maximo: 100, autocompletar: 'given-name' },
+-      { nombre: 'representante_apellidos', etiqueta: 'Apellidos', tipo: 'text', requerido: true, maximo: 100, autocompletar: 'family-name' },
+-      { nombre: 'representante_cedula', etiqueta: 'Cédula', tipo: 'text', requerido: true, maximo: 20, ayuda: 'Letras, números, puntos o guiones (4 a 20).' },
+-      { nombre: 'representante_email', etiqueta: 'Correo electrónico', tipo: 'email', requerido: false, maximo: 160, autocompletar: 'email' },
+-      { nombre: 'telefono_codigo', etiqueta: 'Código de país', tipo: 'tel', requerido: true, maximo: 6, porDefecto: '+58' },
+-      { nombre: 'telefono_numero', etiqueta: 'Teléfono (WhatsApp)', tipo: 'tel', requerido: true, maximo: 20, autocompletar: 'tel-national', ayuda: 'Recibirás los avisos de cobro por este número.' },
++      {
++        nombre: 'representante_principal',
++        etiqueta: 'Representante principal',
++        resumen: 'Representante principal',
++        tipo: 'select',
++        requerido: true,
++        grupo: 'Representante principal',
++        opciones: [{ valor: '', texto: 'Selecciona…' }, { valor: 'MADRE', texto: 'La madre' }, { valor: 'PADRE', texto: 'El padre' }],
++      },
++      ...PROGENITORES.flatMap(camposProgenitor),
+     ],
+   },
++  {
++    id: 'autorizadas',
++    titulo: 'Personas autorizadas para retirar al menor de edad',
++    nota: 'Opcional. Hasta 2 personas; si anotas una, completa su nombre, teléfono y parentesco.',
++    campos: NUMEROS_AUTORIZADA.flatMap(camposAutorizada),
++  },
+   {
+     id: 'pago',
+     titulo: 'Pago de la matrícula',
+@@ -188,6 +256,11 @@ const SECCIONES: readonly DefSeccion[] = [
+ ];
+ 
+ const CAMPOS: readonly DefCampo[] = SECCIONES.flatMap((s) => s.campos);
++const DEF_POR_NOMBRE: ReadonlyMap<NombreTexto, DefCampo> = new Map(CAMPOS.map((c) => [c.nombre, c]));
++const etiquetaError = (nombre: NombreTexto): string => {
++  const def = DEF_POR_NOMBRE.get(nombre);
++  return def?.resumen ?? def?.etiqueta ?? nombre;
++};
+ 
+ interface DefArchivo {
+   readonly campo: CampoArchivoAdmision;
+@@ -264,42 +337,98 @@ export function normalizarTelefono(...partes: readonly string[]): string | null
+   return d.length >= 10 && d.length <= 15 ? d : null;
+ }
+ 
+-function esFechaPasadaValida(valor: string, hoy: string): boolean {
++function esFechaPasadaValida(valor: string, hoy: string, minimo = '1990-01-01'): boolean {
+   if (!/^\d{4}-\d{2}-\d{2}$/.test(valor)) return false;
+   const [a, m, d] = valor.split('-').map(Number);
+   if (a === undefined || m === undefined || d === undefined) return false;
+   const fecha = new Date(Date.UTC(a, m - 1, d));
+   const coincide = fecha.getUTCFullYear() === a && fecha.getUTCMonth() === m - 1 && fecha.getUTCDate() === d;
+-  return coincide && valor >= '1990-01-01' && valor <= hoy;
++  return coincide && valor >= minimo && valor <= hoy;
+ }
+ 
++const NACIMIENTO_MINIMO_PROGENITOR = '1900-01-01';
++
++/**
++ * Valida los textos de la planilla (mismas reglas que el backend: controllers/admisiones.controller.js + utils/planilla.js):
++ *  · obligatorios y longitudes por campo; cédulas, correos, fechas y teléfonos con su formato;
++ *  · ¿alérgico? / ¿tratamiento? = «Sí» exigen su explicación;
++ *  · hay que elegir representante principal y ese progenitor debe traer nombres, apellidos, cédula y móvil (su WhatsApp);
++ *  · si se anota algún dato del otro progenitor, nombres y apellidos pasan a ser obligatorios;
++ *  · una persona autorizada a medias (sin nombre, teléfono o parentesco) es un error.
++ */
+ export function validarTextos(v: SolicitudAdmisionTexto, hoy: string = hoyCaracas()): readonly ErrorValidacion[] {
+   const errores: ErrorValidacion[] = [];
+-  const agregar = (campo: string, mensaje: string): void => {
++  const agregar = (campo: NombreTexto, mensaje: string): void => {
+     errores.push({ campo, mensaje });
+   };
++  const ya = (campo: string): boolean => errores.some((e) => e.campo === campo);
++  const faltante = (campo: NombreTexto, motivo = 'es obligatorio'): void => {
++    if (!ya(campo)) agregar(campo, `${etiquetaError(campo)}: ${motivo}.`);
++  };
++
+   for (const def of CAMPOS) {
+     const valor = v[def.nombre];
+     if (valor === '') {
+-      if (def.requerido) agregar(def.nombre, `${def.etiqueta}: es obligatorio.`);
++      if (def.requerido) agregar(def.nombre, `${etiquetaError(def.nombre)}: es obligatorio.`);
+       continue;
+     }
+-    if (def.maximo !== undefined && valor.length > def.maximo) agregar(def.nombre, `${def.etiqueta}: máximo ${def.maximo} caracteres.`);
++    if (def.maximo !== undefined && valor.length > def.maximo) agregar(def.nombre, `${etiquetaError(def.nombre)}: máximo ${def.maximo} caracteres.`);
+   }
+-  const ya = (campo: string): boolean => errores.some((e) => e.campo === campo);
+ 
++  // ── Estudiante ──
+   if (!ya('alumno_fecha_nacimiento') && !esFechaPasadaValida(v.alumno_fecha_nacimiento, hoy)) {
+     agregar('alumno_fecha_nacimiento', 'Fecha de nacimiento: indica una fecha válida (entre 1990 y hoy).');
+   }
+   if (v.alumno_cedula && !ya('alumno_cedula') && !RE_CEDULA.test(v.alumno_cedula)) agregar('alumno_cedula', 'Cédula del estudiante: solo letras, números, puntos y guiones (4 a 20).');
+-  if (!ya('representante_cedula') && !RE_CEDULA.test(v.representante_cedula)) agregar('representante_cedula', 'Cédula del representante: solo letras, números, puntos y guiones (4 a 20).');
+-  if (v.representante_email && !ya('representante_email') && !RE_EMAIL.test(v.representante_email)) agregar('representante_email', 'Correo electrónico: formato no válido.');
+-  if (!ya('telefono_numero') && !ya('telefono_codigo') && normalizarTelefono(v.telefono_codigo, v.telefono_numero) === null) {
+-    agregar('telefono_numero', 'Teléfono: debe tener entre 10 y 15 dígitos incluyendo el código de país.');
+-  }
++  if (v.es_alergico === 'SI' && v.alergias === '') faltante('alergias', 'explica a qué es alérgico');
++  if (v.bajo_tratamiento === 'SI' && v.tratamiento_explicacion === '') faltante('tratamiento_explicacion', 'explica el tratamiento médico');
+   if (v.emergencia_telefono && !ya('emergencia_telefono') && normalizarTelefono(v.emergencia_telefono) === null) {
+     agregar('emergencia_telefono', 'Teléfono de emergencia: debe tener entre 10 y 15 dígitos incluyendo el código de país.');
+   }
++
++  // ── Madre y Padre ──
++  if (v.representante_principal === '') agregar('representante_principal', 'Representante principal: elige si es la madre o el padre.');
++  for (const p of PROGENITORES) {
++    const nombre = (c: CampoProgenitor): NombreTexto => nombreProgenitor(p, c);
++    const valorDe = (c: CampoProgenitor): string => v[nombre(c)];
++    const esPrincipal = v.representante_principal === p.toUpperCase();
++    const algo = CAMPOS_PROGENITOR.some((c) => valorDe(c) !== '');
++    const motivoPrincipal = 'es obligatorio porque es el representante principal';
++    if (esPrincipal) {
++      for (const c of ['nombres', 'apellidos', 'cedula'] as const) if (valorDe(c) === '') faltante(nombre(c), motivoPrincipal);
++      if (valorDe('telefono_movil') === '') faltante(nombre('telefono_movil'), 'es obligatorio: por este WhatsApp llegan los avisos de cobro');
++    } else if (algo) {
++      for (const c of ['nombres', 'apellidos'] as const) if (valorDe(c) === '') faltante(nombre(c), `es obligatorio si registras ${p === 'madre' ? 'a la madre' : 'al padre'}`);
++    }
++    if (valorDe('cedula') && !ya(nombre('cedula')) && !RE_CEDULA.test(valorDe('cedula'))) agregar(nombre('cedula'), `${etiquetaError(nombre('cedula'))}: solo letras, números, puntos y guiones (4 a 20).`);
++    if (valorDe('email') && !ya(nombre('email')) && !RE_EMAIL.test(valorDe('email'))) agregar(nombre('email'), `${etiquetaError(nombre('email'))}: formato no válido.`);
++    const fecha = valorDe('fecha_nacimiento');
++    if (fecha !== '' && !ya(nombre('fecha_nacimiento'))) {
++      const edad = esFechaPasadaValida(fecha, hoy, NACIMIENTO_MINIMO_PROGENITOR) ? edadEnAnios(fecha, hoy) : null;
++      if (edad === null || edad < EDAD_MINIMA_PROGENITOR) agregar(nombre('fecha_nacimiento'), `${etiquetaError(nombre('fecha_nacimiento'))}: indica una fecha válida (edad mínima ${EDAD_MINIMA_PROGENITOR} años).`);
++    } else if (fecha === '' && valorDe('edad') !== '' && !ya(nombre('edad'))) {
++      const n = Number(valorDe('edad'));
++      if (!Number.isInteger(n) || n < EDAD_MINIMA_PROGENITOR || n > EDAD_MAXIMA_PROGENITOR) agregar(nombre('edad'), `${etiquetaError(nombre('edad'))}: debe ser un número entre ${EDAD_MINIMA_PROGENITOR} y ${EDAD_MAXIMA_PROGENITOR}.`);
++    }
++    for (const c of ['telefono_fijo', 'telefono_movil'] as const) {
++      if (valorDe(c) && !ya(nombre(c)) && normalizarTelefono(valorDe(c)) === null) agregar(nombre(c), `${etiquetaError(nombre(c))}: debe tener entre 10 y 15 dígitos incluyendo el código de área o de país.`);
++    }
++  }
++
++  // ── Personas autorizadas ──
++  for (const n of NUMEROS_AUTORIZADA) {
++    const nombre = v[nombreAutorizada(n, 'nombre')];
++    const tel = v[nombreAutorizada(n, 'telefono')];
++    const parentesco = v[nombreAutorizada(n, 'parentesco')];
++    if (nombre === '' && tel === '' && parentesco === '') continue;
++    if (nombre === '') faltante(nombreAutorizada(n, 'nombre'));
++    if (parentesco === '') faltante(nombreAutorizada(n, 'parentesco'));
++    if (tel === '') faltante(nombreAutorizada(n, 'telefono'));
++    else if (!ya(nombreAutorizada(n, 'telefono')) && normalizarTelefono(tel) === null) {
++      agregar(nombreAutorizada(n, 'telefono'), `${etiquetaError(nombreAutorizada(n, 'telefono'))}: debe tener entre 10 y 15 dígitos incluyendo el código de área o de país.`);
++    }
++  }
++
+   if (!ya('referencia_bancaria')) {
+     const problema = mensajeReferencia(v.referencia_bancaria);
+     if (problema) agregar('referencia_bancaria', problema);
+@@ -317,31 +446,61 @@ function leerTexto(formulario: HTMLFormElement, nombre: NombreTexto): string {
+ 
+ const esTipoSangre = (v: string): v is TipoSangre => (TIPOS_SANGRE as readonly string[]).includes(v);
+ const esMetodoPago = (v: string): v is MetodoPago => (METODOS as readonly string[]).includes(v);
++const esSiNo = (v: string): v is 'SI' | 'NO' => v === 'SI' || v === 'NO';
++const esPrincipal = (v: string): v is RepresentantePrincipal => v === 'MADRE' || v === 'PADRE';
+ 
+ export function leerTextos(formulario: HTMLFormElement): SolicitudAdmisionTexto {
+   const t = (n: NombreTexto): string => leerTexto(formulario, n);
+   const sangre = t('tipo_sangre');
+   const metodo = t('metodo_pago');
++  const alergico = t('es_alergico');
++  const tratamiento = t('bajo_tratamiento');
++  const principal = t('representante_principal');
++  const alergicoSi = alergico === 'SI';
++  const tratamientoSi = tratamiento === 'SI';
+   return {
+     alumno_nombres: t('alumno_nombres'),
+     alumno_apellidos: t('alumno_apellidos'),
+     alumno_cedula: t('alumno_cedula'),
+     alumno_fecha_nacimiento: t('alumno_fecha_nacimiento'),
+-    grado_solicitado: t('grado_solicitado'),
+-    colegio_procedencia: t('colegio_procedencia'),
++    alumno_lugar_nacimiento: t('alumno_lugar_nacimiento'),
++    alumno_lugar_estudio: t('alumno_lugar_estudio'),
+     ultimo_grado_aprobado: t('ultimo_grado_aprobado'),
++    grado_solicitado: t('grado_solicitado'),
++    horario_preferido: t('horario_preferido'),
++    es_alergico: esSiNo(alergico) ? alergico : '',
++    // Los campos de explicación solo cuentan con «Sí»: un texto escrito y luego oculto no se envía.
++    alergias: alergicoSi ? t('alergias') : '',
++    bajo_tratamiento: esSiNo(tratamiento) ? tratamiento : '',
++    tratamiento_explicacion: tratamientoSi ? t('tratamiento_explicacion') : '',
+     tipo_sangre: esTipoSangre(sangre) ? sangre : '',
+-    alergias: t('alergias'),
+-    condiciones_medicas: t('condiciones_medicas'),
+-    medicamentos: t('medicamentos'),
+     emergencia_nombre: t('emergencia_nombre'),
+     emergencia_telefono: t('emergencia_telefono'),
+-    representante_nombres: t('representante_nombres'),
+-    representante_apellidos: t('representante_apellidos'),
+-    representante_cedula: t('representante_cedula'),
+-    representante_email: t('representante_email'),
+-    telefono_codigo: t('telefono_codigo'),
+-    telefono_numero: t('telefono_numero'),
++    representante_principal: esPrincipal(principal) ? principal : '',
++    madre_nombres: t('madre_nombres'),
++    madre_apellidos: t('madre_apellidos'),
++    madre_cedula: t('madre_cedula'),
++    madre_edad: t('madre_edad'),
++    madre_fecha_nacimiento: t('madre_fecha_nacimiento'),
++    madre_direccion: t('madre_direccion'),
++    madre_telefono_fijo: t('madre_telefono_fijo'),
++    madre_telefono_movil: t('madre_telefono_movil'),
++    madre_email: t('madre_email'),
++    padre_nombres: t('padre_nombres'),
++    padre_apellidos: t('padre_apellidos'),
++    padre_cedula: t('padre_cedula'),
++    padre_edad: t('padre_edad'),
++    padre_fecha_nacimiento: t('padre_fecha_nacimiento'),
++    padre_direccion: t('padre_direccion'),
++    padre_telefono_fijo: t('padre_telefono_fijo'),
++    padre_telefono_movil: t('padre_telefono_movil'),
++    padre_email: t('padre_email'),
++    autorizada_1_nombre: t('autorizada_1_nombre'),
++    autorizada_1_telefono: t('autorizada_1_telefono'),
++    autorizada_1_parentesco: t('autorizada_1_parentesco'),
++    autorizada_2_nombre: t('autorizada_2_nombre'),
++    autorizada_2_telefono: t('autorizada_2_telefono'),
++    autorizada_2_parentesco: t('autorizada_2_parentesco'),
+     metodo_pago: esMetodoPago(metodo) ? metodo : 'ZELLE',
+     referencia_bancaria: sanearReferencia(t('referencia_bancaria')),
+   };
+@@ -389,15 +548,22 @@ function actualizar(parcial: Partial<EstadoPantalla>): void {
+ function controlHtml(def: DefCampo): HtmlSeguro {
+   const id = `f-${def.nombre}`;
+   const descrito = `${def.ayuda ? `a-${def.nombre} ` : ''}e-${def.nombre}`;
+-  const estrella = def.requerido ? html`<span class="text-red-800" aria-hidden="true"> *</span>` : null;
++  const estrella = def.requerido
++    ? html`<span class="text-red-800" aria-hidden="true"> *</span>`
++    : def.esencialDe !== undefined
++      ? html`<span class="text-red-800" aria-hidden="true" data-estrella hidden> *</span>`
++      : null;
+   let control: HtmlSeguro;
+   if (def.tipo === 'select') {
+     control = html`<select id="${id}" name="${def.nombre}" class="${CLS.input}" aria-describedby="${descrito}" ${def.requerido ? raw('required') : null}>${(def.opciones ?? []).map((o) => html`<option value="${o.valor}">${o.texto}</option>`)}</select>`;
+   } else {
+-    const extra = def.tipo === 'date' ? html` min="1990-01-01" max="${hoyCaracas()}"` : html`${def.maximo ? html` maxlength="${def.maximo}"` : null}`;
++    const extra = def.tipo === 'date' ? html` min="${def.nombre.startsWith('alumno_') ? '1990-01-01' : NACIMIENTO_MINIMO_PROGENITOR}" max="${hoyCaracas()}"` : html`${def.maximo ? html` maxlength="${def.maximo}"` : null}`;
+     control = html`<input id="${id}" name="${def.nombre}" type="${def.tipo}" class="${CLS.input}" value="${def.porDefecto ?? ''}" autocomplete="${def.autocompletar ?? 'off'}" aria-describedby="${descrito}"${extra} ${def.atributos ? raw(def.atributos) : null} ${def.requerido ? raw('required') : null}>`;
+   }
+-  return html`<div>
++  // `visibleSi`: el bloque nace oculto y `sincronizarFormulario` lo muestra según la respuesta; `esencialDe`: asterisco solo para el principal.
++  const condicion = def.visibleSi ? html` data-visible-si="${def.visibleSi.campo}" data-valor="${def.visibleSi.valor}" hidden` : null;
++  const esencial = def.esencialDe !== undefined ? html` data-esencial="${def.esencialDe}"` : null;
++  return html`<div${condicion}${esencial}>
+     <label for="${id}" class="${CLS.etiqueta}">${def.etiqueta}${estrella}</label>
+     ${control}
+     ${def.ayuda ? html`<p id="a-${def.nombre}" class="${CLS.ayuda}">${def.ayuda}</p>` : null}
+@@ -418,25 +584,58 @@ function archivoHtml(def: DefArchivo): HtmlSeguro {
+ 
+ /** Número de paso (1–5) en un círculo: guía el orden de la planilla sin depender del color. */
+ function encabezadoSeccion(id: string, numero: number, titulo: string): HtmlSeguro {
+-  return html`<h2 id="t-${id}" class="mb-4 flex items-center gap-3 text-base font-bold text-slate-900"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-bold text-white" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
++  return html`<h2 id="t-${id}" class="mb-4 flex items-center gap-3 text-base font-bold text-slate-900"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-bma-azul text-xs font-bold text-white" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
++}
++
++/** Agrupa campos consecutivos con el mismo `grupo` (un `<fieldset>` por grupo); los campos sin grupo van sueltos. */
++function camposAgrupadosHtml(campos: readonly DefCampo[]): HtmlSeguro {
++  const bloques: { grupo: string | null; campos: DefCampo[] }[] = [];
++  for (const c of campos) {
++    const grupo = c.grupo ?? null;
++    const ultimo = bloques[bloques.length - 1];
++    if (ultimo && ultimo.grupo === grupo) ultimo.campos.push(c);
++    else bloques.push({ grupo, campos: [c] });
++  }
++  return html`${bloques.map((b) => (b.grupo === null
++    ? html`${b.campos.map(controlHtml)}`
++    : html`<fieldset class="rounded-lg border border-slate-200 p-4 sm:col-span-2">
++        <legend class="px-2 text-sm font-semibold text-bma-purpura-oscuro">${b.grupo}</legend>
++        <div class="grid gap-4 sm:grid-cols-2">${b.campos.map(controlHtml)}</div>
++      </fieldset>`))}`;
++}
++
++/** Una fila de «Personas autorizadas»: la 1.ª siempre visible; las demás nacen ocultas y se añaden/quitan con los botones. */
++function filaAutorizadaHtml(n: NumeroAutorizada): HtmlSeguro {
++  const oculta = n > 1;
++  return html`<fieldset data-fila-autorizada="${n}" ${oculta ? raw('hidden') : null} class="rounded-lg border border-slate-200 p-4 sm:col-span-2">
++    <legend class="px-2 text-sm font-semibold text-slate-800">Persona autorizada ${n}</legend>
++    <div class="grid gap-4 sm:grid-cols-3">${camposAutorizada(n).map(controlHtml)}</div>
++    ${oculta ? html`<button type="button" data-quitar-autorizada="${n}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'mt-3')}">${icono('x', 'h-4 w-4')}<span>Quitar persona autorizada ${n}</span></button>` : null}
++  </fieldset>`;
+ }
+ 
+ function seccionHtml(s: DefSeccion, numero: number): HtmlSeguro {
+   // En el paso de pago las instrucciones de las cuentas van PRIMERO: se paga y luego se anota la referencia.
+   const bloqueCuentas = s.id === 'pago' ? html`<div class="sm:col-span-2" id="cuentas-pago" aria-live="polite"></div>` : null;
++  const cuerpo = s.id === 'autorizadas'
++    ? html`${NUMEROS_AUTORIZADA.map(filaAutorizadaHtml)}<div class="sm:col-span-2"><button type="button" id="anadir-autorizada" class="${boton(CLS.btnSecundario)}">Añadir otra persona autorizada</button></div>`
++    : camposAgrupadosHtml(s.campos);
+   return html`<section class="${CLS.tarjeta} p-6" aria-labelledby="t-${s.id}">
+     ${encabezadoSeccion(s.id, numero, s.titulo)}
+-    <div class="grid gap-4 sm:grid-cols-2">${bloqueCuentas}${s.campos.map(controlHtml)}</div>
++    ${s.nota ? html`<p class="mb-4 text-sm text-slate-600">${s.nota}</p>` : null}
++    <div class="grid gap-4 sm:grid-cols-2">${bloqueCuentas}${cuerpo}</div>
+   </section>`;
+ }
+ 
++const seccionPorId = (id: string): DefSeccion => SECCIONES.find((s) => s.id === id) ?? { id, titulo: id, campos: [] };
++
+ function esqueleto(): HtmlSeguro {
+   return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
+     <header class="flex items-center gap-4">
+-      <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-900 text-white">${icono('school', 'h-6 w-6')}</span>
++      <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-bma-azul text-white">${icono('school', 'h-6 w-6')}</span>
+       <div>
+         <h1 id="titulo-pagina" tabindex="-1" class="${CLS.titulo}">Inscripción de nuevos estudiantes</h1>
+-        <p class="${CLS.subtitulo}">Brilliant Minds Academy · Planilla de admisión</p>
++        <p class="${CLS.subtitulo}">Brilliant Minds Academy · Planilla de inscripción</p>
+       </div>
+     </header>
+ 
+@@ -447,12 +646,14 @@ function esqueleto(): HtmlSeguro {
+     <div id="resumen-errores" tabindex="-1"></div>
+ 
+     <form id="planilla" novalidate class="flex flex-col gap-6" aria-label="Planilla de inscripción">
+-      ${SECCIONES.slice(0, 3).map((s, i) => seccionHtml(s, i + 1))}
++      ${seccionHtml(seccionPorId('estudiante'), 1)}
++      ${seccionHtml(seccionPorId('representante'), 2)}
++      ${seccionHtml(seccionPorId('autorizadas'), 3)}
+       <section class="${CLS.tarjeta} p-6" aria-labelledby="t-documentos">
+         ${encabezadoSeccion('documentos', 4, 'Documentos obligatorios')}
+         <div class="grid gap-4 sm:grid-cols-2">${ARCHIVOS.map(archivoHtml)}</div>
+       </section>
+-      ${seccionHtml(SECCIONES[3] ?? { id: 'pago', titulo: 'Pago', campos: [] }, 5)}
++      ${seccionHtml(seccionPorId('pago'), 5)}
+       <button id="enviar" type="submit" class="${boton(CLS.btnPrimario, 'w-full py-3 text-base')}">${icono('upload', 'h-5 w-5')}<span>Enviar inscripción</span></button>
+       <p class="text-center text-xs text-slate-600">Los campos con <span aria-hidden="true">*</span><span class="sr-only">asterisco</span> son obligatorios.</p>
+     </form>
+@@ -668,7 +869,19 @@ async function refrescarConfig(silencioso: boolean): Promise<boolean> {
+ 
+ // ───────────────────────── Errores en pantalla ─────────────────────────
+ 
+-const ALIAS_CAMPO: Readonly<Record<string, string>> = { telefono: 'telefono_numero' };
++/** Errores del servidor con nombres del formulario clásico → el campo equivalente de la planilla (el principal es la madre o el padre). */
++function aliasCampo(campo: string): string {
++  const principal = buscar('#f-representante_principal', HTMLSelectElement)?.value.toLowerCase() ?? '';
++  if (principal !== 'madre' && principal !== 'padre') return campo;
++  switch (campo) {
++    case 'telefono': return `${principal}_telefono_movil`;
++    case 'representante_nombres': return `${principal}_nombres`;
++    case 'representante_apellidos': return `${principal}_apellidos`;
++    case 'representante_cedula': return `${principal}_cedula`;
++    case 'representante_email': return `${principal}_email`;
++    default: return campo;
++  }
++}
+ 
+ function limpiarErrores(): void {
+   montar(obtener('#resumen-errores', HTMLElement), html``);
+@@ -680,7 +893,7 @@ function limpiarErrores(): void {
+ }
+ 
+ function marcarCampo(campo: string, mensaje: string): boolean {
+-  const nombre = ALIAS_CAMPO[campo] ?? campo;
++  const nombre = aliasCampo(campo);
+   const texto = buscar(`#e-${CSS.escape(nombre)}`, HTMLElement);
+   const control = buscar(`#f-${CSS.escape(nombre)}`, HTMLElement);
+   if (!texto || !control) return false;
+@@ -694,7 +907,7 @@ function mostrarErrores(errores: readonly ErrorValidacion[], titulo = 'Revisa la
+   for (const e of errores) marcarCampo(e.campo, e.mensaje);
+   const zona = obtener('#resumen-errores', HTMLElement);
+   montar(zona, aviso('bad', html`<ul class="list-disc pl-4">${errores.map((e) => html`<li>${e.mensaje}</li>`)}</ul>`, titulo));
+-  const primero = errores.map((e) => buscar(`#f-${CSS.escape(ALIAS_CAMPO[e.campo] ?? e.campo)}`, HTMLElement)).find((c) => c !== null);
++  const primero = errores.map((e) => buscar(`#f-${CSS.escape(aliasCampo(e.campo))}`, HTMLElement)).find((c) => c !== null);
+   if (primero) primero.focus();
+   else zona.focus();
+   zona.scrollIntoView({ block: 'center', behavior: 'smooth' });
+@@ -812,6 +1025,107 @@ function mostrarArchivoElegido(control: HTMLInputElement): void {
+   }
+ }
+ 
++// ───────────────────────── Comportamiento dinámico de la planilla ─────────────────────────
++
++const TEXTO_EDAD_ALUMNO = 'Edad: se calcula con la fecha de nacimiento.';
++const CLASES_EDAD_AUTOMATICA = ['bg-slate-100', 'select-none'] as const;
++
++/** Muestra u oculta los campos que dependen de una respuesta «Sí» (alergia, tratamiento). */
++function sincronizarCondicionales(formulario: HTMLFormElement): void {
++  for (const bloque of todos('[data-visible-si]', HTMLElement, formulario)) {
++    const campo = bloque.dataset['visibleSi'] ?? '';
++    const control = formulario.elements.namedItem(campo);
++    const visible = (control instanceof HTMLSelectElement || control instanceof HTMLInputElement) && control.value === (bloque.dataset['valor'] ?? '');
++    bloque.hidden = !visible;
++  }
++}
++
++/** La edad del estudiante y la de cada progenitor salen de su fecha de nacimiento (el servidor vuelve a calcularla). */
++function sincronizarEdades(formulario: HTMLFormElement): void {
++  const hoy = hoyCaracas();
++  const fechaAlumno = leerTexto(formulario, 'alumno_fecha_nacimiento');
++  const ayuda = buscar('#a-alumno_fecha_nacimiento', HTMLElement);
++  if (ayuda) {
++    const edad = esFechaPasadaValida(fechaAlumno, hoy) ? edadEnAnios(fechaAlumno, hoy) : null;
++    ayuda.textContent = edad !== null ? `Edad: ${edad} ${edad === 1 ? 'año' : 'años'}` : TEXTO_EDAD_ALUMNO;
++  }
++  for (const p of PROGENITORES) {
++    const campoEdad = buscar(`#f-${nombreProgenitor(p, 'edad')}`, HTMLInputElement);
++    if (!campoEdad) continue;
++    const fecha = leerTexto(formulario, nombreProgenitor(p, 'fecha_nacimiento'));
++    const edad = esFechaPasadaValida(fecha, hoy, NACIMIENTO_MINIMO_PROGENITOR) ? edadEnAnios(fecha, hoy) : null;
++    if (edad !== null) {
++      campoEdad.value = String(edad);
++      campoEdad.readOnly = true;
++      campoEdad.classList.add(...CLASES_EDAD_AUTOMATICA);
++    } else if (campoEdad.readOnly) {
++      campoEdad.readOnly = false;
++      campoEdad.value = '';
++      campoEdad.classList.remove(...CLASES_EDAD_AUTOMATICA);
++    }
++  }
++}
++
++/** Marca como obligatorios (asterisco + aria-required) los datos esenciales del progenitor elegido como representante principal. */
++function sincronizarPrincipal(formulario: HTMLFormElement): void {
++  const principal = leerTexto(formulario, 'representante_principal').toLowerCase();
++  for (const bloque of todos('[data-esencial]', HTMLElement, formulario)) {
++    const esencial = bloque.dataset['esencial'] === principal;
++    const estrella = buscar('[data-estrella]', HTMLElement, bloque);
++    if (estrella) estrella.hidden = !esencial;
++    const control = buscar('input', HTMLInputElement, bloque);
++    if (control) {
++      if (esencial) control.setAttribute('aria-required', 'true');
++      else control.removeAttribute('aria-required');
++    }
++  }
++}
++
++function sincronizarFormulario(formulario: HTMLFormElement): void {
++  sincronizarCondicionales(formulario);
++  sincronizarEdades(formulario);
++  sincronizarPrincipal(formulario);
++}
++
++/** Grilla dinámica de personas autorizadas: «Añadir» muestra la siguiente fila (máx. 2) y «Quitar» la vacía y la oculta. */
++function iniciarAutorizadas(formulario: HTMLFormElement): void {
++  const filas = (): readonly HTMLElement[] => todos('[data-fila-autorizada]', HTMLElement, formulario);
++  const botonAnadir = buscar('#anadir-autorizada', HTMLButtonElement, formulario);
++  const refrescarBoton = (): void => {
++    if (botonAnadir) botonAnadir.hidden = filas().every((f) => !f.hidden);
++  };
++  formulario.addEventListener('click', (ev) => {
++    const origen = ev.target instanceof Element ? ev.target : null;
++    if (origen?.closest('#anadir-autorizada')) {
++      const siguiente = filas().find((f) => f.hidden);
++      if (siguiente) {
++        siguiente.hidden = false;
++        buscar('input', HTMLInputElement, siguiente)?.focus();
++      }
++      refrescarBoton();
++      return;
++    }
++    const quitar = origen?.closest('[data-quitar-autorizada]');
++    if (quitar instanceof HTMLElement) {
++      const fila = quitar.closest('[data-fila-autorizada]');
++      if (fila instanceof HTMLElement) {
++        for (const c of todos('input', HTMLInputElement, fila)) {
++          c.value = '';
++          c.removeAttribute('aria-invalid');
++        }
++        for (const e of todos('[id^="e-"]', HTMLElement, fila)) {
++          e.hidden = true;
++          e.textContent = '';
++        }
++        fila.hidden = true;
++      }
++      refrescarBoton();
++      botonAnadir?.focus();
++    }
++  });
++  refrescarBoton();
++}
++
+ function iniciar(): void {
+   const raiz = obtener('#app', HTMLElement);
+   document.body.className = 'text-slate-900';
+@@ -823,6 +1137,10 @@ function iniciar(): void {
+     ev.preventDefault();
+     void alEnviar(formulario);
+   });
++  formulario.addEventListener('input', () => sincronizarFormulario(formulario));
++  formulario.addEventListener('change', () => sincronizarFormulario(formulario));
++  sincronizarFormulario(formulario);
++  iniciarAutorizadas(formulario);
+   for (const control of todos('input[type="file"]', HTMLInputElement, formulario)) {
+     control.addEventListener('change', () => mostrarArchivoElegido(control));
+   }
+diff --git a/frontend/src/estudiantes-detalle.ts b/frontend/src/estudiantes-detalle.ts
+index 8270882..d0d97ca 100644
+--- a/frontend/src/estudiantes-detalle.ts
++++ b/frontend/src/estudiantes-detalle.ts
+@@ -1,7 +1,9 @@
+ /**
+  * Vista «Ficha del estudiante» — PARTE INTEGRAL DEL CORE BASE (US$ 750): sin candados premium.
+  *  - Consume el endpoint existente  GET  /api/estudiantes/:id   (estudiante + estado dinámico + representante + cuotas + documentos + pagos).
+- *  - Secciones: datos académicos, ficha médica, expediente digitalizado en Google Drive, representante.
++ *  - Secciones: datos académicos, ficha médica, expediente digitalizado en Google Drive, representante principal y, de la planilla oficial
++ *    del Ministerio, el bloque familiar (madre, padre y personas autorizadas a retirar al menor). Los expedientes anteriores a la planilla
++ *    muestran «Sin registrar» en lo que no tienen.
+  *  - Dos tablas simétricas (mismas 5 columnas, mismo estilo): histórico de cuotas y bandeja de pagos declarados por el representante.
+  *  - «Retirar Estudiante»  → modal con motivo OBLIGATORIO (1–300 caracteres) y fecha de retiro → POST /api/estudiantes/:id/retirar
+  *    «Reactivar Estudiante» → confirmación → POST /api/estudiantes/:id/reactivar
+@@ -12,14 +14,17 @@
+ import { bma, BmaSesionExpiradaError, mensajeDeError } from './api/bmaClient';
+ import { HtmlSeguro, html, montar, urlSegura } from './lib/html';
+ import { icono } from './lib/icons';
+-import { bs, esVencida, fechaCorta, fechaHora, hoyCaracas, nombreMetodo, usd } from './lib/format';
++import { bs, edadEnAnios, esVencida, fechaCorta, fechaHora, hoyCaracas, nombreMetodo, usd } from './lib/format';
+ import { CLS, abrirModal, aviso, boton, buscar, conBotonOcupado, etiqueta, etiquetaEstado, notificar, obtener, type Modal } from './lib/ui';
+ import type {
++  CampoProgenitor,
+   CuerpoRetiro,
+   CuotaEstudiante,
+   DetalleEstudiante,
+   DocumentoEstudiante,
+   PagoEstudiante,
++  PersonaAutorizada,
++  ProgenitorClave,
+   RespuestaCambioEstatus,
+   TipoDocumentoEstudiante,
+ } from './types/index';
+@@ -53,17 +58,7 @@ const NOMBRE_TIPO_CUOTA: Readonly<Record<CuotaEstudiante['tipo'], string>> = {
+ 
+ // ───────────────────────── Utilidades puras ─────────────────────────
+ 
+-/** Años cumplidos a la fecha `hoy` (ambas 'AAAA-MM-DD'); `null` si alguna no tiene el formato esperado. */
+-export function edadEnAnios(nacimiento: string, hoy: string): number | null {
+-  const n = /^(\d{4})-(\d{2})-(\d{2})$/.exec(nacimiento);
+-  const h = /^(\d{4})-(\d{2})-(\d{2})$/.exec(hoy);
+-  if (!n || !h) return null;
+-  const [, ny, nm, nd] = n.map(Number);
+-  const [, hy, hm, hd] = h.map(Number);
+-  if (ny === undefined || nm === undefined || nd === undefined || hy === undefined || hm === undefined || hd === undefined) return null;
+-  const edad = hy - ny - (hm < nm || (hm === nm && hd < nd) ? 1 : 0);
+-  return edad >= 0 ? edad : null;
+-}
++export { edadEnAnios };
+ 
+ export function tamanoLegible(bytes: number): string {
+   if (bytes < 1024) return `${bytes} B`;
+@@ -102,8 +97,11 @@ function seccionAcademica(d: DetalleEstudiante): HtmlSeguro {
+       ${dato('Grado', d.grado_solicitado)}
+       ${dato('Cédula de identidad', d.cedula_identidad)}
+       ${dato('Fecha de nacimiento', `${fechaCorta(d.fecha_nacimiento)}${edad !== null ? ` · ${edad} años` : ''}`)}
+-      ${dato('Colegio de procedencia', d.colegio_procedencia)}
+-      ${dato('Último grado aprobado', d.ultimo_grado_aprobado)}
++      ${dato('Lugar de nacimiento', d.lugar_nacimiento)}
++      ${dato('Lugar de estudio', d.lugar_estudio)}
++      ${dato('Grado de estudio', d.ultimo_grado_aprobado)}
++      ${dato('Horario', d.horario_preferido)}
++      ${d.colegio_procedencia !== null && d.colegio_procedencia.trim() !== '' ? dato('Colegio de procedencia', d.colegio_procedencia) : null}
+       ${dato('Inscrito', fechaHora(d.creado_en))}
+     </dl>
+   </section>`;
+@@ -117,6 +115,7 @@ function seccionMedica(d: DetalleEstudiante): HtmlSeguro {
+       ${dato('Tipo de sangre', d.tipo_sangre)}
+       ${dato('Alergias', alerta(d.alergias) ?? SIN_DATO)}
+       ${dato('Condiciones médicas', alerta(d.condiciones_medicas) ?? SIN_DATO)}
++      ${dato('Bajo tratamiento médico', d.bajo_tratamiento ? alerta(d.tratamiento_explicacion ?? 'Sí (sin explicación registrada)') : 'No')}
+       ${dato('Medicamentos', d.medicamentos)}
+       ${dato('Contacto de emergencia', d.emergencia_nombre)}
+       ${dato('Teléfono de emergencia', d.emergencia_telefono)}
+@@ -151,16 +150,83 @@ function seccionDrive(d: DetalleEstudiante): HtmlSeguro {
+ 
+ function seccionRepresentante(d: DetalleEstudiante): HtmlSeguro {
+   return html`<section class="${CLS.tarjeta} p-6" aria-labelledby="t-representante">
+-    ${tituloSeccion('t-representante', 'Representante', 'users')}
++    ${tituloSeccion('t-representante', 'Representante principal', 'users')}
+     <dl class="grid gap-4">
+       ${dato('Nombre', `${d.rep_nombres} ${d.rep_apellidos}`)}
+       ${dato('Cédula', d.rep_cedula)}
+       ${dato('Correo', d.rep_email)}
+-      ${dato('Teléfono', d.rep_telefono)}
++      ${dato('Teléfono (WhatsApp de cobro)', d.rep_telefono)}
+     </dl>
+   </section>`;
+ }
+ 
++const TITULO_PROGENITOR: Readonly<Record<ProgenitorClave, string>> = { madre: 'Madre', padre: 'Padre' };
++
++/** Lee `madre_*` / `padre_*` de la ficha sin perder el tipo estricto de cada columna. */
++function campoProgenitor(d: DetalleEstudiante, p: ProgenitorClave, c: CampoProgenitor): string | number | null {
++  return d[`${p}_${c}` as const];
++}
++
++const textoOVacio = (v: string | number | null): string | null => (v === null ? null : String(v).trim() === '' ? null : String(v));
++
++/** Cédulas iguales sin distinguir mayúsculas: marca quién de los dos progenitores es el representante principal. */
++function esRepresentantePrincipal(d: DetalleEstudiante, p: ProgenitorClave): boolean {
++  const cedula = campoProgenitor(d, p, 'cedula');
++  return typeof cedula === 'string' && cedula.trim() !== '' && cedula.trim().toUpperCase() === d.rep_cedula.trim().toUpperCase();
++}
++
++function tarjetaProgenitor(d: DetalleEstudiante, p: ProgenitorClave): HtmlSeguro {
++  const v = (c: CampoProgenitor): string | null => textoOVacio(campoProgenitor(d, p, c));
++  const registrado = (['nombres', 'apellidos', 'cedula', 'edad', 'fecha_nacimiento', 'direccion', 'telefono_fijo', 'telefono_movil', 'email'] as const).some((c) => v(c) !== null);
++  const nombre = [v('nombres'), v('apellidos')].filter((x): x is string => x !== null).join(' ');
++  const fecha = v('fecha_nacimiento');
++  const edadFecha = fecha !== null ? edadEnAnios(fecha, hoyCaracas()) : null;
++  const nacimiento = fecha !== null
++    ? `${fechaCorta(fecha)}${edadFecha !== null ? ` · ${edadFecha} años` : ''}`
++    : v('edad') !== null ? `${v('edad')} años` : null;
++  return html`<article class="min-w-0 rounded-lg border border-slate-200 p-4" aria-label="${TITULO_PROGENITOR[p]}">
++    <h3 class="mb-3 flex flex-wrap items-center gap-2 text-sm font-bold text-slate-900">${TITULO_PROGENITOR[p]}${esRepresentantePrincipal(d, p) ? etiqueta('Representante principal', 'info') : null}</h3>
++    ${registrado
++      ? html`<dl class="grid gap-3">
++          ${dato('Nombre', nombre)}
++          ${dato('Cédula', v('cedula'))}
++          ${dato('Nacimiento', nacimiento)}
++          ${dato('Dirección de habitación', v('direccion'))}
++          ${dato('Teléfono fijo', v('telefono_fijo'))}
++          ${dato('Teléfono móvil', v('telefono_movil'))}
++          ${dato('Correo', v('email'))}
++        </dl>`
++      : html`<p class="text-sm text-slate-600">No se registró en la planilla.</p>`}
++  </article>`;
++}
++
++function filaAutorizada(a: PersonaAutorizada): HtmlSeguro {
++  return html`<li class="border-b border-slate-100 py-2 last:border-0">
++    <span class="block text-sm font-medium text-slate-900">${a.nombre}</span>
++    <span class="block text-xs text-slate-600">${a.parentesco} · ${a.telefono !== '' ? `+${a.telefono}` : SIN_DATO}</span>
++  </li>`;
++}
++
++function tarjetaAutorizadas(d: DetalleEstudiante): HtmlSeguro {
++  return html`<article class="min-w-0 rounded-lg border border-slate-200 p-4" aria-label="Personas autorizadas para retirar al menor">
++    <h3 class="mb-3 text-sm font-bold text-slate-900">Personas autorizadas para retirar al menor</h3>
++    ${d.personas_autorizadas.length > 0
++      ? html`<ul>${d.personas_autorizadas.map(filaAutorizada)}</ul>`
++      : html`<p class="text-sm text-slate-600">Sin personas autorizadas registradas.</p>`}
++  </article>`;
++}
++
++function seccionFamilia(d: DetalleEstudiante): HtmlSeguro {
++  return html`<section class="${CLS.tarjeta} p-6 lg:col-span-3" aria-labelledby="t-familia">
++    ${tituloSeccion('t-familia', 'Familia y autorizados (planilla oficial)', 'users')}
++    <div class="grid gap-4 md:grid-cols-3">
++      ${tarjetaProgenitor(d, 'madre')}
++      ${tarjetaProgenitor(d, 'padre')}
++      ${tarjetaAutorizadas(d)}
++    </div>
++  </section>`;
++}
++
+ // ───────────────────────── Tablas simétricas (5 columnas cada una) ─────────────────────────
+ 
+ function filaCuota(c: CuotaEstudiante): HtmlSeguro {
+@@ -250,6 +316,7 @@ function fichaHtml(d: DetalleEstudiante): HtmlSeguro {
+       ${seccionRepresentante(d)}
+       ${seccionMedica(d)}
+       ${seccionDrive(d)}
++      ${seccionFamilia(d)}
+     </div>
+     <div class="mt-6 grid gap-6 xl:grid-cols-2">
+       ${tablaCuotas(d)}
+diff --git a/frontend/src/lib/candado.ts b/frontend/src/lib/candado.ts
+index 3d15111..ea5e3d3 100644
+--- a/frontend/src/lib/candado.ts
++++ b/frontend/src/lib/candado.ts
+@@ -37,7 +37,7 @@ export function vistaFantasma(): HtmlSeguro {
+ export function capaCandado(d: DatosCandado): HtmlSeguro {
+   return html`<div data-candado class="absolute inset-0 z-10 flex items-center justify-center bg-white/80 p-6 backdrop-blur-md">
+     <div role="region" aria-label="${AVISO_PREMIUM}" class="${CLS.tarjetaCristal} w-full max-w-md p-8 text-center">
+-      <span class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 text-white">${icono('lock', 'h-6 w-6')}</span>
++      <span class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-bma-purpura text-white">${icono('lock', 'h-6 w-6')}</span>
+       <h2 class="mt-4 text-lg font-bold text-slate-900">${AVISO_PREMIUM}</h2>
+       <p class="mt-1 text-sm font-semibold text-slate-800">${d.nombre}</p>
+       <p class="mt-2 text-sm text-slate-700">${d.descripcion}</p>
+diff --git a/frontend/src/lib/format.ts b/frontend/src/lib/format.ts
+index 57e5a13..fd3895d 100644
+--- a/frontend/src/lib/format.ts
++++ b/frontend/src/lib/format.ts
+@@ -53,3 +53,15 @@ export const NOMBRE_METODO: Readonly<Record<string, string>> = {
+ };
+ 
+ export const nombreMetodo = (m: string): string => NOMBRE_METODO[m] ?? m;
++
++/** Años cumplidos a la fecha `hoy` (ambas 'AAAA-MM-DD'); `null` si alguna no tiene el formato esperado. */
++export function edadEnAnios(nacimiento: string, hoy: string): number | null {
++  const n = /^(\d{4})-(\d{2})-(\d{2})$/.exec(nacimiento);
++  const h = /^(\d{4})-(\d{2})-(\d{2})$/.exec(hoy);
++  if (!n || !h) return null;
++  const [, ny, nm, nd] = n.map(Number);
++  const [, hy, hm, hd] = h.map(Number);
++  if (ny === undefined || nm === undefined || nd === undefined || hy === undefined || hm === undefined || hd === undefined) return null;
++  const edad = hy - ny - (hm < nm || (hm === nm && hd < nd) ? 1 : 0);
++  return edad >= 0 ? edad : null;
++}
+diff --git a/frontend/src/lib/ui.ts b/frontend/src/lib/ui.ts
+index 849a5f2..ba77263 100644
+--- a/frontend/src/lib/ui.ts
++++ b/frontend/src/lib/ui.ts
+@@ -19,15 +19,15 @@ export const CLS = {
+   ayuda: 'mt-1 text-xs text-slate-600',
+   errorCampo: 'mt-1 text-xs font-medium text-red-800',
+   btn: 'inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+-  btnPrimario: 'bg-slate-900 text-white hover:bg-slate-700',
++  btnPrimario: 'bg-bma-azul text-white hover:bg-bma-azul-oscuro',
+   btnSecundario: 'border border-slate-300 bg-white text-slate-800 hover:bg-slate-50',
+-  btnPeligro: 'bg-red-700 text-white hover:bg-red-800',
+-  btnOk: 'bg-emerald-700 text-white hover:bg-emerald-800',
++  btnPeligro: 'bg-bma-coral-oscuro text-white hover:bg-red-900',
++  btnOk: 'bg-bma-verde-oscuro text-white hover:bg-emerald-900',
+   btnPeq: '!px-3 !py-1 text-xs',
+   titulo: 'text-2xl font-bold tracking-tight text-slate-900',
+   subtitulo: 'mt-1 text-sm text-slate-600',
+   tabla: 'w-full min-w-[40rem] text-left text-sm',
+-  th: 'whitespace-nowrap border-b border-slate-200 bg-slate-50 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-600',
++  th: 'whitespace-nowrap border-b border-bma-purpura-oscuro bg-bma-purpura px-4 py-3 text-xs font-semibold uppercase tracking-wide text-white',
+   td: 'border-b border-slate-100 px-4 py-3 align-top text-slate-800',
+ } as const;
+ 
+@@ -36,18 +36,18 @@ export const boton = (...extra: readonly string[]): string => [CLS.btn, ...extra
+ export type Tono = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
+ 
+ const CLASE_ETIQUETA: Readonly<Record<Tono, string>> = {
+-  ok: 'bg-emerald-50 text-emerald-900 ring-emerald-700/30',
+-  warn: 'bg-amber-50 text-amber-900 ring-amber-700/30',
+-  bad: 'bg-red-50 text-red-900 ring-red-700/30',
+-  info: 'bg-sky-50 text-sky-900 ring-sky-700/30',
++  ok: 'bg-bma-verde-suave text-bma-verde-oscuro ring-bma-verde/50',
++  warn: 'bg-bma-amarillo-suave text-bma-amarillo-oscuro ring-bma-amarillo/70',
++  bad: 'bg-bma-coral-suave text-bma-coral-oscuro ring-bma-coral/50',
++  info: 'bg-bma-azul-suave text-bma-azul-oscuro ring-bma-azul/30',
+   neutral: 'bg-slate-100 text-slate-800 ring-slate-500/30',
+ };
+ 
+ const CLASE_AVISO: Readonly<Record<Tono, string>> = {
+-  ok: 'border-emerald-700/30 bg-emerald-50 text-emerald-900',
+-  warn: 'border-amber-700/30 bg-amber-50 text-amber-900',
+-  bad: 'border-red-700/30 bg-red-50 text-red-900',
+-  info: 'border-sky-700/30 bg-sky-50 text-sky-900',
++  ok: 'border-bma-verde/50 bg-bma-verde-suave text-bma-verde-oscuro',
++  warn: 'border-bma-amarillo/70 bg-bma-amarillo-suave text-bma-amarillo-oscuro',
++  bad: 'border-bma-coral/50 bg-bma-coral-suave text-bma-coral-oscuro',
++  info: 'border-bma-azul/30 bg-bma-azul-suave text-bma-azul-oscuro',
+   neutral: 'border-slate-300 bg-slate-50 text-slate-800',
+ };
+ 
+diff --git a/frontend/src/styles/main.css b/frontend/src/styles/main.css
+index fc4671c..0b3db9b 100644
+--- a/frontend/src/styles/main.css
++++ b/frontend/src/styles/main.css
+@@ -13,7 +13,7 @@
+ 
+   /* Foco visible para teclado en TODO control interactivo (contraste 3:1 mínimo sobre fondos claros). */
+   :focus-visible {
+-    @apply outline-none ring-2 ring-slate-900 ring-offset-2 ring-offset-white;
++    @apply outline-none ring-2 ring-bma-azul ring-offset-2 ring-offset-white;
+   }
+ 
+   @media (prefers-reduced-motion: reduce) {
+@@ -32,12 +32,12 @@
+     @apply rounded-lg border p-4 text-sm font-medium;
+   }
+   .msg.okk {
+-    @apply border-emerald-700/30 bg-emerald-50 text-emerald-900;
++    @apply border-bma-verde/50 bg-bma-verde-suave text-bma-verde-oscuro;
+   }
+   .msg.inf {
+-    @apply border-sky-700/30 bg-sky-50 text-sky-900;
++    @apply border-bma-azul/30 bg-bma-azul-suave text-bma-azul-oscuro;
+   }
+   .msg.err {
+-    @apply border-red-700/30 bg-red-50 text-red-900;
++    @apply border-bma-coral/50 bg-bma-coral-suave text-bma-coral-oscuro;
+   }
+ }
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 7691595..5fdbe7d 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -168,31 +168,69 @@ export function esConfigInvitacion(c: ConfigAdmisiones | null): c is ConfigInvit
+ 
+ export type TipoSangre = 'A+' | 'A-' | 'B+' | 'B-' | 'AB+' | 'AB-' | 'O+' | 'O-';
+ 
+-/** Campos de texto del formulario `POST /api/public/admisiones` (multipart). */
+-export interface SolicitudAdmisionTexto {
++/** Respuesta a una pregunta de sí/no de la planilla; `''` = sin responder. */
++export type RespuestaSiNo = 'SI' | 'NO' | '';
++
++/** Quién de los dos progenitores es el representante principal: paga y recibe los avisos de cobro por WhatsApp. */
++export type RepresentantePrincipal = 'MADRE' | 'PADRE';
++
++export type ProgenitorClave = 'madre' | 'padre';
++
++/** Campos de UN progenitor tal como los pide la planilla del Ministerio. Todos viajan como texto en el multipart. */
++export type CampoProgenitor = 'nombres' | 'apellidos' | 'cedula' | 'edad' | 'fecha_nacimiento' | 'direccion' | 'telefono_fijo' | 'telefono_movil' | 'email';
++
++/** `madre_nombres`, `madre_cedula`, … (o `padre_*`) generados a partir de `CampoProgenitor`: una sola fuente de verdad. */
++export type ProgenitorTexto<P extends ProgenitorClave> = { readonly [K in CampoProgenitor as `${P}_${K}`]: string };
++
++/** Fila de «Personas autorizadas para retirar al menor» (la planilla admite 2). */
++export type NumeroAutorizada = 1 | 2;
++export type AutorizadaTexto<N extends NumeroAutorizada> = { readonly [K in 'nombre' | 'telefono' | 'parentesco' as `autorizada_${N}_${K}`]: string };
++
++/** Persona autorizada tal como se guarda en `representantes.personas_autorizadas` (JSONB). */
++export interface PersonaAutorizada {
++  readonly nombre: string;
++  readonly telefono: string;
++  readonly parentesco: string;
++}
++
++/** Datos propios del estudiante y de su ficha médica en la planilla pública (secciones 1 y 2 del formulario). */
++export interface SolicitudEstudianteTexto {
+   readonly alumno_nombres: string;
+   readonly alumno_apellidos: string;
+   readonly alumno_cedula: string;
+   readonly alumno_fecha_nacimiento: string;
+-  readonly grado_solicitado: string;
+-  readonly colegio_procedencia: string;
++  readonly alumno_lugar_nacimiento: string;
++  readonly alumno_lugar_estudio: string;
++  /** «Grado de Estudio» de la planilla (el que cursa hoy en su colegio). */
+   readonly ultimo_grado_aprobado: string;
+-  readonly tipo_sangre: TipoSangre | '';
++  /** «Nivel a Cursar» en la academia; con invitación lo impone el servidor. */
++  readonly grado_solicitado: string;
++  readonly horario_preferido: string;
++  readonly es_alergico: RespuestaSiNo;
+   readonly alergias: string;
+-  readonly condiciones_medicas: string;
+-  readonly medicamentos: string;
++  readonly bajo_tratamiento: RespuestaSiNo;
++  readonly tratamiento_explicacion: string;
++  readonly tipo_sangre: TipoSangre | '';
+   readonly emergencia_nombre: string;
+   readonly emergencia_telefono: string;
+-  readonly representante_nombres: string;
+-  readonly representante_apellidos: string;
+-  readonly representante_cedula: string;
+-  readonly representante_email: string;
+-  readonly telefono_codigo: string;
+-  readonly telefono_numero: string;
++}
++
++/** Representante principal + pago de la matrícula. */
++export interface SolicitudPagoTexto {
++  /** `''` = aún sin elegir (la validación lo exige). */
++  readonly representante_principal: RepresentantePrincipal | '';
+   readonly metodo_pago: MetodoPago;
+   readonly referencia_bancaria: string;
+ }
+ 
++/** Campos de texto del formulario `POST /api/public/admisiones` (multipart). */
++export type SolicitudAdmisionTexto = SolicitudEstudianteTexto &
++  SolicitudPagoTexto &
++  ProgenitorTexto<'madre'> &
++  ProgenitorTexto<'padre'> &
++  AutorizadaTexto<1> &
++  AutorizadaTexto<2>;
++
+ export type CampoArchivoAdmision = 'foto_carnet' | 'cedula_identidad' | 'acta_nacimiento';
+ 
+ export interface RespuestaAdmision {
+@@ -496,8 +534,11 @@ export interface PagoEstudiante {
+   readonly declarado_en: string;
+ }
+ 
++/** Progenitor tal como lo devuelve `GET /api/estudiantes/:id`: la edad es numérica y todo puede ser nulo (expedientes anteriores a la planilla oficial). */
++export type ProgenitorDetalle<P extends ProgenitorClave> = { readonly [K in CampoProgenitor as `${P}_${K}`]: K extends 'edad' ? number | null : string | null };
++
+ /** `GET /api/estudiantes/:id` — estudiante + vista de estado + representante + cuotas, documentos y pagos. */
+-export interface DetalleEstudiante {
++export interface DetalleEstudiante extends ProgenitorDetalle<'madre'>, ProgenitorDetalle<'padre'> {
+   readonly id: number;
+   readonly representante_id: number;
+   readonly sede_id: number | null;
+@@ -514,6 +555,11 @@ export interface DetalleEstudiante {
+   readonly medicamentos: string | null;
+   readonly emergencia_nombre: string | null;
+   readonly emergencia_telefono: string | null;
++  readonly lugar_nacimiento: string | null;
++  readonly lugar_estudio: string | null;
++  readonly horario_preferido: string | null;
++  readonly bajo_tratamiento: boolean;
++  readonly tratamiento_explicacion: string | null;
+   readonly estatus_academico: EstatusAcademico;
+   readonly fecha_retiro: string | null;
+   readonly motivo_retiro: string | null;
+@@ -529,6 +575,8 @@ export interface DetalleEstudiante {
+   readonly rep_cedula: string;
+   readonly rep_email: string | null;
+   readonly rep_telefono: string | null;
++  /** Madre y Padre (`madre_*`, `padre_*`) y personas autorizadas, de la planilla oficial. Todo opcional: los expedientes anteriores no lo tienen. */
++  readonly personas_autorizadas: readonly PersonaAutorizada[];
+   readonly cuotas: readonly CuotaEstudiante[];
+   readonly documentos: readonly DocumentoEstudiante[];
+   readonly pagos: readonly PagoEstudiante[];
+diff --git a/frontend/tailwind.config.js b/frontend/tailwind.config.js
+index cdc65f7..3ca4ae1 100644
+--- a/frontend/tailwind.config.js
++++ b/frontend/tailwind.config.js
+@@ -2,7 +2,26 @@
+ export default {
+   content: ["./index.html", "./src/**/*.{ts,js}"],
+   theme: {
+-    extend: {},
++    extend: {
++      // Identidad visual de Brilliant Minds Academy (logotipo oficial + paleta corporativa).
++      // Uso: bg-bma-azul, text-bma-purpura, border-bma-coral, ring-bma-azul, etc.
++      // Cada color expone además `suave` (fondo tenue para estados) y `oscuro` (texto/hover con contraste AA sobre blanco):
++      //   · #0073BB (azul) y #8C59A4 (púrpura) admiten texto blanco encima (≥ 4.5:1).
++      //   · #4BB387 (verde), #F37365 (coral) y #F9D03D (amarillo) NO alcanzan 4.5:1 con texto blanco: úsalos como
++      //     fondo/acento con texto oscuro (`text-bma-*-oscuro` o `text-slate-900`), nunca como fondo de texto blanco.
++      colors: {
++        // Acento principal: botones, focos y enlaces.
++        'bma-azul': { DEFAULT: '#0073BB', suave: '#E6F2FA', oscuro: '#005A92' },
++        // Éxito y estados «Activo».
++        'bma-verde': { DEFAULT: '#4BB387', suave: '#E8F6F0', oscuro: '#1F6B4B' },
++        // Alertas de cobro y estados «Moroso».
++        'bma-coral': { DEFAULT: '#F37365', suave: '#FEECEA', oscuro: '#B3362A' },
++        // Destellos y avisos de contingencia.
++        'bma-amarillo': { DEFAULT: '#F9D03D', suave: '#FEF7DC', oscuro: '#7A5B00' },
++        // Módulos premium y cabeceras de tablas.
++        'bma-purpura': { DEFAULT: '#8C59A4', suave: '#F3ECF7', oscuro: '#6B3F82' },
++      },
++    },
+   },
+   plugins: [],
+ };
+diff --git a/services/admisiones.service.js b/services/admisiones.service.js
+index 2aaf842..dc953c4 100644
+--- a/services/admisiones.service.js
++++ b/services/admisiones.service.js
+@@ -9,6 +9,15 @@ const parametros = require('./parametros.service');
+ const pagos = require('./pagos.service');
+ const invitaciones = require('./invitaciones.service');
+ 
++/** Las 9 columnas de un progenitor (madre_* o padre_*), en el orden del INSERT. Cédula en mayúsculas; fecha como 'AAAA-MM-DD'. */
++function columnasProgenitor(x) {
++  const p = x || {};
++  return [
++    p.nombres ?? null, p.apellidos ?? null, p.cedula ? p.cedula.toUpperCase() : null, p.edad ?? null,
++    p.fecha_nacimiento ? aFechaSql(p.fecha_nacimiento) : null, p.direccion ?? null, p.telefono_fijo ?? null, p.telefono_movil ?? null, p.email ?? null,
++  ];
++}
++
+ /** Datos que necesita el formulario público: costo en USD y Bs. a la tasa BCV del día + cuentas de la academia. */
+ async function configPublica({ bcvSvc = bcv } = {}) {
+   const [matricula, tasa, cuentas] = await Promise.all([parametros.matriculaUsd(), bcvSvc.obtenerTasa(), parametros.cuentasActivas()]);
+@@ -69,19 +78,47 @@ async function registrarInscripcion({ datos, archivos, invitacion = null }, { bc
+       // Blindaje anti-suplantación (H2): el formulario es PÚBLICO, así que si la cédula ya existe NO puede reescribir sus datos de
+       // contacto. El correo guardado manda (solo se rellena si estaba vacío) y un teléfono distinto NO se aplica: queda en
+       // `telefono_pendiente` hasta que la administración lo apruebe, porque a `telefono` llegan los enlaces privados del portal.
++      // Madre/Padre y personas autorizadas siguen la MISMA regla: el formulario público solo RELLENA lo que está vacío, nunca reescribe.
++      // Quien conozca una cédula no puede cambiar a quién se autoriza para retirar al menor (por eso `personas_autorizadas` solo se
++      // asigna si el arreglo guardado es []), ni los teléfonos/correos de los progenitores ya registrados.
+       const rep = await ejecutar(
+-        `INSERT INTO representantes (nombres, apellidos, cedula, email, telefono)
+-         VALUES ($1, $2, $3, $4, $5)
++        `INSERT INTO representantes
++           (nombres, apellidos, cedula, email, telefono,
++            madre_nombres, madre_apellidos, madre_cedula, madre_edad, madre_fecha_nacimiento, madre_direccion, madre_telefono_fijo, madre_telefono_movil, madre_email,
++            padre_nombres, padre_apellidos, padre_cedula, padre_edad, padre_fecha_nacimiento, padre_direccion, padre_telefono_fijo, padre_telefono_movil, padre_email,
++            personas_autorizadas)
++         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb)
+          ON CONFLICT (cedula) DO UPDATE
+             SET nombres = EXCLUDED.nombres, apellidos = EXCLUDED.apellidos,
+                 email = COALESCE(representantes.email, EXCLUDED.email),
+                 telefono_pendiente = CASE WHEN representantes.telefono IS DISTINCT FROM EXCLUDED.telefono
+                                           THEN EXCLUDED.telefono ELSE representantes.telefono_pendiente END,
+                 telefono_pendiente_en = CASE WHEN representantes.telefono IS DISTINCT FROM EXCLUDED.telefono
+-                                             THEN NOW() ELSE representantes.telefono_pendiente_en END
++                                             THEN NOW() ELSE representantes.telefono_pendiente_en END,
++                madre_nombres = COALESCE(representantes.madre_nombres, EXCLUDED.madre_nombres),
++                madre_apellidos = COALESCE(representantes.madre_apellidos, EXCLUDED.madre_apellidos),
++                madre_cedula = COALESCE(representantes.madre_cedula, EXCLUDED.madre_cedula),
++                madre_edad = COALESCE(representantes.madre_edad, EXCLUDED.madre_edad),
++                madre_fecha_nacimiento = COALESCE(representantes.madre_fecha_nacimiento, EXCLUDED.madre_fecha_nacimiento),
++                madre_direccion = COALESCE(representantes.madre_direccion, EXCLUDED.madre_direccion),
++                madre_telefono_fijo = COALESCE(representantes.madre_telefono_fijo, EXCLUDED.madre_telefono_fijo),
++                madre_telefono_movil = COALESCE(representantes.madre_telefono_movil, EXCLUDED.madre_telefono_movil),
++                madre_email = COALESCE(representantes.madre_email, EXCLUDED.madre_email),
++                padre_nombres = COALESCE(representantes.padre_nombres, EXCLUDED.padre_nombres),
++                padre_apellidos = COALESCE(representantes.padre_apellidos, EXCLUDED.padre_apellidos),
++                padre_cedula = COALESCE(representantes.padre_cedula, EXCLUDED.padre_cedula),
++                padre_edad = COALESCE(representantes.padre_edad, EXCLUDED.padre_edad),
++                padre_fecha_nacimiento = COALESCE(representantes.padre_fecha_nacimiento, EXCLUDED.padre_fecha_nacimiento),
++                padre_direccion = COALESCE(representantes.padre_direccion, EXCLUDED.padre_direccion),
++                padre_telefono_fijo = COALESCE(representantes.padre_telefono_fijo, EXCLUDED.padre_telefono_fijo),
++                padre_telefono_movil = COALESCE(representantes.padre_telefono_movil, EXCLUDED.padre_telefono_movil),
++                padre_email = COALESCE(representantes.padre_email, EXCLUDED.padre_email),
++                personas_autorizadas = CASE WHEN representantes.personas_autorizadas = '[]'::jsonb
++                                            THEN EXCLUDED.personas_autorizadas ELSE representantes.personas_autorizadas END
+          RETURNING id, (telefono_pendiente IS NOT NULL) AS telefono_en_revision`,
+         // La cédula se guarda en mayúsculas: PostgreSQL distingue "v-123" de "V-123" y duplicaría al representante.
+-        [datos.representante_nombres, datos.representante_apellidos, datos.representante_cedula.toUpperCase(), datos.representante_email, datos.telefono],
++        [datos.representante_nombres, datos.representante_apellidos, datos.representante_cedula.toUpperCase(), datos.representante_email, datos.telefono,
++          ...columnasProgenitor(datos.madre), ...columnasProgenitor(datos.padre), JSON.stringify(datos.personas_autorizadas ?? [])],
+         tx);
+       const representanteId = rep.rows[0].id;
+       if (rep.rows[0].telefono_en_revision === true) representanteConTelefonoEnRevision = representanteId;
+@@ -89,12 +126,15 @@ async function registrarInscripcion({ datos, archivos, invitacion = null }, { bc
+       const est = await ejecutar(
+         `INSERT INTO estudiantes
+            (representante_id, nombres, apellidos, cedula_identidad, fecha_nacimiento, grado_solicitado, colegio_procedencia, ultimo_grado_aprobado,
++            lugar_nacimiento, lugar_estudio, horario_preferido, bajo_tratamiento, tratamiento_explicacion,
+             tipo_sangre, alergias, condiciones_medicas, medicamentos, emergencia_nombre, emergencia_telefono, sede_id)
+-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
++         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+          RETURNING id`,
+         [
+           representanteId, datos.alumno_nombres, datos.alumno_apellidos, datos.alumno_cedula ? datos.alumno_cedula.toUpperCase() : null,
+           aFechaSql(datos.alumno_fecha_nacimiento), gradoSolicitado, datos.colegio_procedencia, datos.ultimo_grado_aprobado,
++          datos.lugar_nacimiento ?? null, datos.lugar_estudio ?? null, datos.horario_preferido ?? null,
++          datos.bajo_tratamiento === true, datos.bajo_tratamiento === true ? (datos.tratamiento_explicacion ?? null) : null,
+           datos.tipo_sangre, datos.alergias, datos.condiciones_medicas, datos.medicamentos, datos.emergencia_nombre, datos.emergencia_telefono,
+           sedeId,
+         ], tx);
+diff --git a/services/crm.service.js b/services/crm.service.js
+index a102326..5fbb495 100644
+--- a/services/crm.service.js
++++ b/services/crm.service.js
+@@ -47,7 +47,12 @@ async function detalle(id, sedeId = null) {
+   const [est, cuotas, docs, pagos] = await Promise.all([
+     ejecutar(
+       `SELECT e.*, v.estado_dinamico, v.estatus_pago, v.deuda_vencida_usd,
+-              r.nombres AS rep_nombres, r.apellidos AS rep_apellidos, r.cedula AS rep_cedula, r.email AS rep_email, r.telefono AS rep_telefono
++              r.nombres AS rep_nombres, r.apellidos AS rep_apellidos, r.cedula AS rep_cedula, r.email AS rep_email, r.telefono AS rep_telefono,
++              r.madre_nombres, r.madre_apellidos, r.madre_cedula, r.madre_edad, r.madre_fecha_nacimiento, r.madre_direccion,
++              r.madre_telefono_fijo, r.madre_telefono_movil, r.madre_email,
++              r.padre_nombres, r.padre_apellidos, r.padre_cedula, r.padre_edad, r.padre_fecha_nacimiento, r.padre_direccion,
++              r.padre_telefono_fijo, r.padre_telefono_movil, r.padre_email,
++              r.personas_autorizadas
+        FROM estudiantes e
+        JOIN vw_estudiantes_estado v ON v.id = e.id
+        JOIN representantes r ON r.id = e.representante_id
+diff --git a/tests/admisiones.test.js b/tests/admisiones.test.js
+index 8eee082..c651caf 100644
+--- a/tests/admisiones.test.js
++++ b/tests/admisiones.test.js
+@@ -87,7 +87,11 @@ test('H2: el upsert por cédula NO sobrescribe el contacto: el correo guardado m
+   assert.match(up.texto, /telefono_pendiente = CASE WHEN representantes\.telefono IS DISTINCT FROM EXCLUDED\.telefono\s+THEN EXCLUDED\.telefono ELSE representantes\.telefono_pendiente END/);
+   assert.match(up.texto, /telefono_pendiente_en = CASE WHEN representantes\.telefono IS DISTINCT FROM EXCLUDED\.telefono\s+THEN NOW\(\) ELSE representantes\.telefono_pendiente_en END/);
+   assert.match(up.texto, /RETURNING id, \(telefono_pendiente IS NOT NULL\) AS telefono_en_revision/);
+-  assert.deepEqual(up.params, ['Ana', 'Pérez', 'V-12345678', null, '584141234567'], 'parámetros posicionales $1..$5, cédula en mayúsculas');
++  assert.deepEqual(up.params.slice(0, 5), ['Ana', 'Pérez', 'V-12345678', null, '584141234567'], 'parámetros posicionales $1..$5, cédula en mayúsculas');
++  // $6..$23 = madre_* y padre_* (9 + 9, nulos si no vienen) y $24 = personas_autorizadas serializado para ::jsonb.
++  assert.equal(up.params.length, 24);
++  assert.deepEqual(up.params.slice(5, 23), Array(18).fill(null));
++  assert.equal(up.params[23], '[]');
+ });
+ 
+ test('H2: con un teléfono retenido se avisa SOLO tras el COMMIT, en el log del servidor y sin teléfonos; la respuesta pública no revela que la cédula ya existía', async () => {
+diff --git a/tests/integracion.pg.test.js b/tests/integracion.pg.test.js
+index 2637aab..668df61 100644
+--- a/tests/integracion.pg.test.js
++++ b/tests/integracion.pg.test.js
+@@ -1188,6 +1188,70 @@ t('admisiones H2: el correo guardado manda (solo se rellena si estaba vacío); m
+   await assert.rejects(db.ejecutar(`UPDATE representantes SET telefono_pendiente = '58 414 200' WHERE cedula = 'V-7770001'`, []), (e) => e.code === '23514');
+ });
+ 
++// ── Planilla oficial (migración 010): madre/padre, ficha médica y personas autorizadas ───────────
++t('planilla 010: se guardan madre, padre, ficha médica y autorizados; el formulario público solo RELLENA vacíos y jamás cambia a los autorizados', async () => {
++  const madre = { nombres: 'Ana', apellidos: 'Pérez', cedula: 'v-12345678', edad: 38, fecha_nacimiento: '1988-04-02', direccion: 'Av. Principal', telefono_fijo: '582121234567', telefono_movil: '584141234567', email: 'ana@example.com' };
++  const padre = { nombres: 'Luis', apellidos: 'Gómez', cedula: 'V-8765432', edad: null, fecha_nacimiento: null, direccion: null, telefono_fijo: null, telefono_movil: null, email: null };
++  const autorizados = [{ nombre: 'Rosa Pérez', telefono: '584121112222', parentesco: 'Tía' }];
++  const inscribir = (ov) => svc.admisiones.registrarInscripcion({ datos: inscripcion(ov), archivos }, { bcvSvc: bcvFalso, driveSvc: driveFalso() });
++  const rep = (ced) => uno(`SELECT madre_nombres, madre_cedula, madre_edad, madre_fecha_nacimiento, madre_telefono_movil, padre_nombres, padre_edad, personas_autorizadas FROM representantes WHERE cedula = $1`, [ced]);
++
++  const r = await inscribir({
++    representante_cedula: 'V-8800001', alumno_nombres: 'Planilla1', referencia_bancaria: 'REF-PL-1', lugar_nacimiento: 'Caracas', lugar_estudio: 'U.E. Bolívar',
++    horario_preferido: 'Sábados 9:00', bajo_tratamiento: true, tratamiento_explicacion: 'Asma', madre, padre, personas_autorizadas: autorizados,
++  });
++  assert.deepEqual(await uno('SELECT lugar_nacimiento, lugar_estudio, horario_preferido, bajo_tratamiento, tratamiento_explicacion FROM estudiantes WHERE id = $1', [r.estudiante_id]),
++    { lugar_nacimiento: 'Caracas', lugar_estudio: 'U.E. Bolívar', horario_preferido: 'Sábados 9:00', bajo_tratamiento: true, tratamiento_explicacion: 'Asma' });
++  assert.deepEqual(await rep('V-8800001'), {
++    madre_nombres: 'Ana', madre_cedula: 'V-12345678', madre_edad: 38, madre_fecha_nacimiento: '1988-04-02', madre_telefono_movil: '584141234567',
++    padre_nombres: 'Luis', padre_edad: null, personas_autorizadas: autorizados,
++  });
++  const ficha = await svc.crm.detalle(r.estudiante_id);
++  assert.deepEqual([ficha.madre_nombres, ficha.padre_cedula, ficha.bajo_tratamiento, ficha.personas_autorizadas], ['Ana', 'V-8765432', true, autorizados]);
++
++  // Reenvío con la misma cédula: lo ya guardado NO se pisa (ni madre ni autorizados); solo se rellena lo que estaba vacío (padre_edad).
++  await inscribir({
++    representante_cedula: 'V-8800001', alumno_nombres: 'Planilla2', referencia_bancaria: 'REF-PL-2',
++    madre: { ...madre, nombres: 'Suplantadora', telefono_movil: '584149999999' }, padre: { ...padre, nombres: 'Otro', edad: 40 },
++    personas_autorizadas: [{ nombre: 'Intruso', telefono: '584120000000', parentesco: 'Nadie' }],
++  });
++  const tras = await rep('V-8800001');
++  assert.deepEqual([tras.madre_nombres, tras.madre_telefono_movil, tras.padre_nombres, tras.padre_edad], ['Ana', '584141234567', 'Luis', 40]);
++  assert.deepEqual(tras.personas_autorizadas, autorizados, 'quien conozca una cédula no puede cambiar a quién se autoriza para retirar al menor');
++
++  // Un representante SIN autorizados sí puede registrarlos la primera vez que los informa.
++  await inscribir({ representante_cedula: 'V-8800002', alumno_nombres: 'Planilla3', referencia_bancaria: 'REF-PL-3', personas_autorizadas: [] });
++  assert.deepEqual((await rep('V-8800002')).personas_autorizadas, []);
++  await inscribir({ representante_cedula: 'V-8800002', alumno_nombres: 'Planilla4', referencia_bancaria: 'REF-PL-4', personas_autorizadas: autorizados });
++  assert.deepEqual((await rep('V-8800002')).personas_autorizadas, autorizados);
++
++  // Datos clásicos (sin los campos nuevos): las columnas nuevas toman sus valores por defecto.
++  const clasica = await inscribir({ representante_cedula: 'V-8800003', alumno_nombres: 'Planilla5', referencia_bancaria: 'REF-PL-5' });
++  assert.deepEqual(await uno('SELECT bajo_tratamiento, tratamiento_explicacion, lugar_estudio FROM estudiantes WHERE id = $1', [clasica.estudiante_id]), { bajo_tratamiento: false, tratamiento_explicacion: null, lugar_estudio: null });
++  assert.deepEqual((await rep('V-8800003')).personas_autorizadas, []);
++
++  // Última defensa en la base: máx. 2 autorizados, JSON de tipo arreglo, edades y teléfonos sanos.
++  const viola = (sql) => assert.rejects(db.ejecutar(sql, []), (e) => e.code === '23514', sql);
++  await viola(`UPDATE representantes SET personas_autorizadas = '[1,2,3]'::jsonb WHERE cedula = 'V-8800001'`);
++  await viola(`UPDATE representantes SET personas_autorizadas = '{"a":1}'::jsonb WHERE cedula = 'V-8800001'`);
++  await viola(`UPDATE representantes SET madre_edad = 5 WHERE cedula = 'V-8800001'`);
++  await viola(`UPDATE representantes SET padre_telefono_movil = '58 414 200' WHERE cedula = 'V-8800001'`);
++  await viola(`UPDATE estudiantes SET tratamiento_explicacion = repeat('x', 501) WHERE id = ${r.estudiante_id}`);
++});
++
++t('migración 010: es idempotente (reaplicarla no falla ni duplica restricciones) y registra 8 CHECK nuevos', async () => {
++  const sql = fs.readFileSync(path.join(RAIZ, 'database', 'migrations', '010_ampliacion_planilla.sql'), 'utf8');
++  const contar = async () => (await uno(`SELECT count(*)::int AS n FROM pg_constraint WHERE conname IN (
++      'ck_estudiantes_tratamiento_len', 'ck_representantes_personas_autorizadas', 'ck_representantes_madre_edad', 'ck_representantes_padre_edad',
++      'ck_representantes_madre_tel_fijo', 'ck_representantes_madre_tel_movil', 'ck_representantes_padre_tel_fijo', 'ck_representantes_padre_tel_movil')`)).n;
++  assert.equal(await contar(), 8);
++  await db.ejecutarScript(sql);
++  await db.ejecutarScript(sql);
++  assert.equal(await contar(), 8);
++  const columnas = await filas(`SELECT column_name FROM information_schema.columns WHERE table_name = 'representantes' AND (column_name LIKE 'madre\_%' OR column_name LIKE 'padre\_%')`);
++  assert.equal(columnas.length, 18);
++});
++
+ // ── Bot de WhatsApp: de-duplicación con GENERADA «en vuelo» (H4) y enfriamiento por FALLIDA (H1), con el SQL real ──
+ t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo», la del panel no; y 3 FALLIDA del mismo tipo en 7 días enfrían al estudiante', async () => {
+   const { candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
+diff --git a/tests/planilla.test.js b/tests/planilla.test.js
+new file mode 100644
+index 0000000..51ca1d7
+--- /dev/null
++++ b/tests/planilla.test.js
+@@ -0,0 +1,114 @@
++'use strict';
++/**
++ * Planilla oficial (MPPE): ficha médica, madre/padre con representante principal y personas autorizadas.
++ * Sin base de datos: `normalizarPlanilla` es puro y `prepararInscripcion` solo valida. El SQL real se prueba en integracion.pg.test.js.
++ */
++require('./helpers/entorno'); // instala los dobles de multer/pg/googleapis antes de cargar el controlador
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const { normalizarPlanilla } = require('../utils/planilla');
++const { prepararInscripcion } = require('../controllers/admisiones.controller');
++
++const HOY = '2026-11-03';
++const campos = (r) => r.detalles.map((d) => d.campo).sort();
++
++const madreCompleta = {
++  madre_nombres: 'Ana', madre_apellidos: 'Pérez', madre_cedula: 'v-12345678', madre_fecha_nacimiento: '1988-04-02',
++  madre_direccion: 'Av. Principal, Caracas', madre_telefono_fijo: '0212 123 4567', madre_telefono_movil: '0414 123 4567', madre_email: 'ANA@Example.com',
++};
++
++test('planilla: con la madre como principal, sus datos alimentan al representante y la edad se DEDUCE de la fecha (nunca de la edad enviada)', () => {
++  const { valores, detalles } = normalizarPlanilla({ representante_principal: 'MADRE', ...madreCompleta, madre_edad: '99' }, { hoy: HOY });
++  assert.deepEqual(detalles, []);
++  assert.equal(valores.madre.edad, 38); // 1988-04-02 → 2026-11-03
++  assert.equal(valores.madre.telefono_movil, '584141234567');
++  assert.equal(valores.madre.telefono_fijo, '582121234567');
++  assert.equal(valores.madre.email, 'ana@example.com');
++  assert.deepEqual(valores.principal, { nombres: 'Ana', apellidos: 'Pérez', cedula: 'v-12345678', email: 'ana@example.com', telefono: '584141234567' });
++  assert.equal(valores.padre.nombres, null);
++});
++
++test('planilla: el principal exige nombres, apellidos, cédula y móvil; el otro progenitor, nada si está vacío', () => {
++  const r = normalizarPlanilla({ representante_principal: 'PADRE', padre_nombres: 'Luis' }, { hoy: HOY });
++  assert.deepEqual(campos(r), ['padre_apellidos', 'padre_cedula', 'padre_telefono_movil']);
++});
++
++test('planilla: si se anota cualquier dato del otro progenitor, su nombre y apellido pasan a ser obligatorios', () => {
++  const r = normalizarPlanilla({ representante_principal: 'MADRE', ...madreCompleta, padre_email: 'luis@example.com' }, { hoy: HOY });
++  assert.deepEqual(campos(r), ['padre_apellidos', 'padre_nombres']);
++});
++
++test('planilla: edad fuera de rango, fecha futura o progenitor menor de 14 años y teléfonos inválidos se rechazan', () => {
++  const r = normalizarPlanilla({
++    representante_principal: 'MADRE', ...madreCompleta, madre_fecha_nacimiento: '2020-01-01', madre_telefono_fijo: '123',
++    padre_nombres: 'Luis', padre_apellidos: 'Gómez', padre_edad: '5', padre_telefono_movil: 'abc',
++  }, { hoy: HOY });
++  assert.deepEqual(campos(r), ['madre_fecha_nacimiento', 'madre_telefono_fijo', 'padre_edad', 'padre_telefono_movil']);
++});
++
++test('planilla: «Sí» a alergia o tratamiento exige explicación; «No» limpia el texto y el booleano queda en false', () => {
++  assert.deepEqual(campos(normalizarPlanilla({ es_alergico: 'SI', bajo_tratamiento: 'SI' }, { hoy: HOY })), ['alergias', 'tratamiento_explicacion']);
++  const no = normalizarPlanilla({ es_alergico: 'NO', bajo_tratamiento: 'NO', tratamiento_explicacion: 'texto residual' }, { hoy: HOY });
++  assert.deepEqual(no.detalles, []);
++  assert.equal(no.valores.bajo_tratamiento, false);
++  assert.equal(no.valores.tratamiento_explicacion, null);
++  const si = normalizarPlanilla({ bajo_tratamiento: 'SI', tratamiento_explicacion: 'Asma' }, { hoy: HOY });
++  assert.deepEqual([si.valores.bajo_tratamiento, si.valores.tratamiento_explicacion], [true, 'Asma']);
++  assert.deepEqual(campos(normalizarPlanilla({ es_alergico: 'TAL VEZ' }, { hoy: HOY })), ['es_alergico']);
++});
++
++test('planilla: personas autorizadas — filas vacías no cuentan, una a medias falla campo por campo y la tercera se rechaza', () => {
++  const ok = normalizarPlanilla({ autorizada_1_nombre: 'Rosa Pérez', autorizada_1_telefono: '0412 111 2222', autorizada_1_parentesco: 'Tía' }, { hoy: HOY });
++  assert.deepEqual(ok.detalles, []);
++  assert.deepEqual(ok.valores.personas_autorizadas, [{ nombre: 'Rosa Pérez', telefono: '584121112222', parentesco: 'Tía' }]);
++  assert.deepEqual(normalizarPlanilla({}, { hoy: HOY }).valores.personas_autorizadas, []);
++
++  const medias = normalizarPlanilla({ autorizada_2_nombre: 'Pedro', autorizada_3_nombre: 'Intruso' }, { hoy: HOY });
++  assert.deepEqual(campos(medias), ['autorizada_2_parentesco', 'autorizada_2_telefono', 'autorizada_3_nombre']);
++});
++
++// ── Integración con el controlador ──────────────────────────────────────────────────────────────
++const JPG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0]);
++const PDF = Buffer.from('%PDF-1.4 contenido');
++const files = () => ({ foto_carnet: [{ buffer: JPG }], cedula_identidad: [{ buffer: PDF }], acta_nacimiento: [{ buffer: JPG }] });
++const base = {
++  alumno_nombres: 'Luis', alumno_apellidos: 'Pérez', alumno_fecha_nacimiento: '2015-03-02', grado_solicitado: '3er grado',
++  referencia_bancaria: 'REF-998877', metodo_pago: 'ZELLE', es_alergico: 'NO', bajo_tratamiento: 'NO',
++};
++
++test('controlador: SIN teléfono ni representante «clásico», el principal sale de la planilla y todo llega normalizado al servicio', () => {
++  const { datos } = prepararInscripcion({
++    ...base, representante_principal: 'MADRE', ...madreCompleta, alergias: 'residuo', alumno_lugar_nacimiento: 'Caracas', horario_preferido: 'Sábados',
++    autorizada_1_nombre: 'Rosa', autorizada_1_telefono: '0412 111 2222', autorizada_1_parentesco: 'Tía',
++  }, files());
++  assert.equal(datos.representante_nombres, 'Ana');
++  assert.equal(datos.representante_cedula, 'v-12345678');
++  assert.equal(datos.telefono, '584141234567');
++  assert.equal(datos.alergias, null, '«No» a ¿Es alérgico? vacía el texto');
++  assert.equal(datos.lugar_nacimiento, 'Caracas');
++  assert.equal(datos.bajo_tratamiento, false);
++  assert.equal(datos.madre.nombres, 'Ana');
++  assert.equal(typeof datos.madre.edad, 'number');
++  assert.deepEqual(datos.personas_autorizadas, [{ nombre: 'Rosa', telefono: '584121112222', parentesco: 'Tía' }]);
++});
++
++test('controlador: sin principal ni representante clásico se exigen sus campos; con errores de la planilla se devuelven todos en UN 422', () => {
++  try {
++    prepararInscripcion({ ...base, es_alergico: 'SI', autorizada_1_nombre: 'Rosa' }, files());
++    assert.fail('debía lanzar');
++  } catch (err) {
++    assert.equal(err.status, 422);
++    assert.deepEqual(campos({ detalles: err.detalles }), [
++      'alergias', 'autorizada_1_parentesco', 'autorizada_1_telefono', 'representante_apellidos', 'representante_cedula', 'representante_nombres', 'telefono',
++    ]);
++  }
++});
++
++test('controlador: el formulario clásico (representante único + teléfono) sigue funcionando sin cambios', () => {
++  const { datos } = prepararInscripcion({
++    ...base, representante_nombres: 'Ana', representante_apellidos: 'Pérez', representante_cedula: 'V-12345678', telefono_codigo: '+58', telefono_numero: '414 123 4567',
++  }, files());
++  assert.equal(datos.telefono, '584141234567');
++  assert.deepEqual(datos.personas_autorizadas, []);
++  assert.equal(datos.madre.nombres, null);
++});
+diff --git a/tests/schema-consistencia.test.js b/tests/schema-consistencia.test.js
+index ea3602b..9fc2a5f 100644
+--- a/tests/schema-consistencia.test.js
++++ b/tests/schema-consistencia.test.js
+@@ -30,7 +30,7 @@ const codigo = FUENTES.map((f) => [f, sinComentariosJs(leer(f))]);
+ const sinComentariosSql = (t) => t.replace(/--[^\n]*/g, '');
+ 
+ // ── Esquema ─────────────────────────────────────────────────────────────────────────────────────
+-const TIPOS = 'SERIAL|BIGSERIAL|INTEGER|SMALLINT|BIGINT|VARCHAR|CHAR|TEXT|DATE|TIMESTAMPTZ|NUMERIC|BOOLEAN';
++const TIPOS = 'SERIAL|BIGSERIAL|INTEGER|SMALLINT|BIGINT|VARCHAR|CHAR|TEXT|DATE|TIMESTAMPTZ|NUMERIC|BOOLEAN|JSONB';
+ const tablas = {};
+ const unicos = {}; // tabla → Set de 'col1,col2'
+ for (const m of sqlTodo.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?)\n\);/g)) {
+diff --git a/utils/planilla.js b/utils/planilla.js
+new file mode 100644
+index 0000000..9fbd3f1
+--- /dev/null
++++ b/utils/planilla.js
+@@ -0,0 +1,162 @@
++'use strict';
++/**
++ * Planilla de Inscripción oficial (MPPE) — validación y normalización de lo que NO es un campo suelto:
++ *   · ficha médica del estudiante (¿alérgico?, ¿bajo tratamiento? + explicación),
++ *   · estructura DUAL de representantes (Madre / Padre) con un representante PRINCIPAL (contacto de cobro y de WhatsApp),
++ *   · personas autorizadas para retirar al menor (máximo 2).
++ *
++ * Interfaz pequeña a propósito: `normalizarPlanilla(body)` devuelve `{ valores, detalles }`. NUNCA lanza por datos inválidos (acumula
++ * `detalles: [{campo, mensaje}]` para que el controlador devuelva UN solo 422 con todo) y NUNCA toca la base de datos.
++ */
++const { validar } = require('./validar');
++const { AppError } = require('../errors/AppError');
++const { sanitizarTelefono } = require('./telefono');
++const { hoyCaracas } = require('./fechas');
++
++const CEDULA = { patron: /^[A-Za-z0-9.-]{4,20}$/, mensajePatron: 'Solo letras, números, puntos y guiones (4 a 20).' };
++const MAX_PERSONAS_AUTORIZADAS = 2;
++const PROGENITORES = ['madre', 'padre'];
++const ETIQUETA = { madre: 'la madre', padre: 'el padre' };
++const SI_NO = { tipo: 'enum', valores: ['SI', 'NO'] };
++
++/** Reglas declarativas (mismo validador que el resto del formulario) de los campos de texto de la planilla. */
++const REGLAS_PLANILLA = {
++  alumno_lugar_nacimiento: { max: 150 },
++  alumno_lugar_estudio: { max: 150 },
++  horario_preferido: { max: 50 },
++  es_alergico: SI_NO,
++  bajo_tratamiento: SI_NO,
++  tratamiento_explicacion: { max: 500 },
++  representante_principal: { tipo: 'enum', valores: ['MADRE', 'PADRE'] },
++  ...Object.fromEntries(PROGENITORES.flatMap((p) => [
++    [`${p}_nombres`, { max: 100 }],
++    [`${p}_apellidos`, { max: 100 }],
++    [`${p}_cedula`, { max: 20, ...CEDULA }],
++    [`${p}_edad`, { tipo: 'entero', min: 14, max: 120 }],
++    [`${p}_fecha_nacimiento`, { tipo: 'fechaPasada', min: '1900-01-01' }],
++    [`${p}_direccion`, { max: 250 }],
++    [`${p}_email`, { tipo: 'email', max: 100 }],
++  ])),
++};
++
++const REGLAS_AUTORIZADA = { nombre: { max: 150 }, parentesco: { max: 50 } };
++
++/** Años cumplidos a `hoy` ('AAAA-MM-DD' ambas). */
++function edadEnAnios(nacimiento, hoy) {
++  const [ny, nm, nd] = nacimiento.split('-').map(Number);
++  const [hy, hm, hd] = hoy.split('-').map(Number);
++  return hy - ny - (hm < nm || (hm === nm && hd < nd) ? 1 : 0);
++}
++
++const lleno = (v) => v !== undefined && v !== null && String(v).trim() !== '';
++
++/**
++ * @param {Record<string, unknown>} body  Cuerpo crudo (multipart ya parseado).
++ * @param {{ hoy?: string }} [opciones]
++ * @returns {{ valores: object, detalles: {campo: string, mensaje: string}[] }}
++ *   `valores` trae SOLO claves nuevas de la planilla; el controlador las mezcla con las del formulario clásico.
++ */
++function normalizarPlanilla(body, { hoy = hoyCaracas() } = {}) {
++  const src = body && typeof body === 'object' ? body : {};
++  const detalles = [];
++  // Campo por campo: `validar` lanza al primer lote de errores y dejaría TODO vacío, lo que inventaría faltantes en cascada
++  // (p. ej. «madre_nombres es obligatorio» cuando solo falló la edad del padre).
++  const v = {};
++  for (const [campo, regla] of Object.entries(REGLAS_PLANILLA)) {
++    try {
++      Object.assign(v, validar({ [campo]: src[campo] }, { [campo]: regla }));
++    } catch (e) {
++      if (e instanceof AppError) detalles.push(...e.detalles); else throw e;
++    }
++  }
++  const yaFallo = (campo) => detalles.some((d) => d.campo === campo);
++  const err = (campo, mensaje) => { if (!yaFallo(campo)) detalles.push({ campo, mensaje }); };
++  const telefono = (campo, ...partes) => {
++    try { return sanitizarTelefono(...partes); } catch (e) {
++      err(campo, e.detalles?.[0]?.mensaje || 'Teléfono inválido.');
++      return null;
++    }
++  };
++
++  // ── Ficha médica ─────────────────────────────────────────────────────────────────────────────
++  const valores = {};
++  const alergias = lleno(src.alergias) ? String(src.alergias).trim() : null;
++  if (v.es_alergico === 'SI' && !alergias) err('alergias', 'Explica a qué es alérgico.');
++  // «NO» manda sobre cualquier texto residual en `alergias`: lo aplica el controlador con este valor.
++  valores.es_alergico = v.es_alergico ?? null;
++
++  valores.bajo_tratamiento = v.bajo_tratamiento === 'SI';
++  if (v.bajo_tratamiento === 'SI' && !v.tratamiento_explicacion) err('tratamiento_explicacion', 'Explica el tratamiento médico.');
++  valores.tratamiento_explicacion = v.bajo_tratamiento === 'SI' ? (v.tratamiento_explicacion ?? null) : null;
++
++  valores.lugar_nacimiento = v.alumno_lugar_nacimiento ?? null;
++  valores.lugar_estudio = v.alumno_lugar_estudio ?? null;
++  valores.horario_preferido = v.horario_preferido ?? null;
++
++  // ── Madre y Padre ────────────────────────────────────────────────────────────────────────────
++  const progenitor = {};
++  for (const p of PROGENITORES) {
++    const campos = ['nombres', 'apellidos', 'cedula', 'edad', 'fecha_nacimiento', 'direccion', 'email'];
++    const f = Object.fromEntries(campos.map((c) => [c, v[`${p}_${c}`] ?? null]));
++    const fijoCrudo = src[`${p}_telefono_fijo`];
++    const movilCrudo = src[`${p}_telefono_movil`];
++    f.telefono_fijo = lleno(fijoCrudo) ? telefono(`${p}_telefono_fijo`, fijoCrudo) : null;
++    f.telefono_movil = lleno(movilCrudo) ? telefono(`${p}_telefono_movil`, movilCrudo) : null;
++    // La edad se DEDUCE de la fecha de nacimiento cuando viene (una edad enviada a mano nunca contradice a la fecha).
++    if (f.fecha_nacimiento) {
++      const e = edadEnAnios(f.fecha_nacimiento, hoy);
++      if (e < 14) err(`${p}_fecha_nacimiento`, `La fecha de nacimiento de ${ETIQUETA[p]} no es coherente (edad calculada: ${e}).`);
++      else f.edad = e;
++    }
++    const algo = Object.values(f).some((x) => x !== null);
++    progenitor[p] = { datos: f, presente: algo };
++    if (algo) {
++      if (!f.nombres) err(`${p}_nombres`, `Es obligatorio si se registra ${ETIQUETA[p]}.`);
++      if (!f.apellidos) err(`${p}_apellidos`, `Es obligatorio si se registra ${ETIQUETA[p]}.`);
++    }
++  }
++
++  // ── Representante principal (quien paga y recibe WhatsApp) ───────────────────────────────────
++  const principal = v.representante_principal ?? null; // 'MADRE' | 'PADRE' | null (formulario clásico)
++  if (principal !== null) {
++    const clave = principal.toLowerCase();
++    const f = progenitor[clave].datos;
++    if (!f.nombres) err(`${clave}_nombres`, `Es obligatorio: ${ETIQUETA[clave]} es el representante principal.`);
++    if (!f.apellidos) err(`${clave}_apellidos`, `Es obligatorio: ${ETIQUETA[clave]} es el representante principal.`);
++    if (!f.cedula) err(`${clave}_cedula`, `Es obligatorio: ${ETIQUETA[clave]} es el representante principal.`);
++    if (!f.telefono_movil) err(`${clave}_telefono_movil`, `Es obligatorio: por este WhatsApp llegan los avisos de cobro (${ETIQUETA[clave]} es el representante principal).`);
++    valores.principal = {
++      nombres: f.nombres, apellidos: f.apellidos, cedula: f.cedula, email: f.email, telefono: f.telefono_movil,
++    };
++  } else {
++    valores.principal = null;
++  }
++  valores.madre = progenitor.madre.datos;
++  valores.padre = progenitor.padre.datos;
++
++  // ── Personas autorizadas a retirar al menor (hasta 2) ────────────────────────────────────────
++  const personas = [];
++  for (let i = 1; i <= MAX_PERSONAS_AUTORIZADAS; i += 1) {
++    const crudo = { nombre: src[`autorizada_${i}_nombre`], telefono: src[`autorizada_${i}_telefono`], parentesco: src[`autorizada_${i}_parentesco`] };
++    if (!Object.values(crudo).some(lleno)) continue; // fila vacía: no cuenta
++    let limpio = {};
++    try {
++      limpio = validar({ nombre: crudo.nombre, parentesco: crudo.parentesco }, REGLAS_AUTORIZADA);
++    } catch (e) {
++      if (!(e instanceof AppError)) throw e;
++      for (const d of e.detalles) err(`autorizada_${i}_${d.campo}`, d.mensaje);
++    }
++    if (!lleno(crudo.nombre)) err(`autorizada_${i}_nombre`, 'Nombre y apellido: es obligatorio.');
++    if (!lleno(crudo.parentesco)) err(`autorizada_${i}_parentesco`, 'Parentesco: es obligatorio.');
++    const tel = lleno(crudo.telefono) ? telefono(`autorizada_${i}_telefono`, crudo.telefono) : (err(`autorizada_${i}_telefono`, 'Teléfono: es obligatorio.'), null);
++    personas.push({ nombre: limpio.nombre ?? null, telefono: tel, parentesco: limpio.parentesco ?? null });
++  }
++  if (lleno(src[`autorizada_${MAX_PERSONAS_AUTORIZADAS + 1}_nombre`])) {
++    err(`autorizada_${MAX_PERSONAS_AUTORIZADAS + 1}_nombre`, `Solo se admiten ${MAX_PERSONAS_AUTORIZADAS} personas autorizadas.`);
++  }
++  valores.personas_autorizadas = personas;
++
++  return { valores, detalles };
++}
++
++module.exports = { normalizarPlanilla, edadEnAnios, CEDULA, MAX_PERSONAS_AUTORIZADAS };
+-- 
+2.43.0
+

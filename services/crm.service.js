@@ -47,7 +47,12 @@ async function detalle(id, sedeId = null) {
   const [est, cuotas, docs, pagos] = await Promise.all([
     ejecutar(
       `SELECT e.*, v.estado_dinamico, v.estatus_pago, v.deuda_vencida_usd,
-              r.nombres AS rep_nombres, r.apellidos AS rep_apellidos, r.cedula AS rep_cedula, r.email AS rep_email, r.telefono AS rep_telefono
+              r.nombres AS rep_nombres, r.apellidos AS rep_apellidos, r.cedula AS rep_cedula, r.email AS rep_email, r.telefono AS rep_telefono,
+              r.madre_nombres, r.madre_apellidos, r.madre_cedula, r.madre_edad, r.madre_fecha_nacimiento, r.madre_direccion,
+              r.madre_telefono_fijo, r.madre_telefono_movil, r.madre_email,
+              r.padre_nombres, r.padre_apellidos, r.padre_cedula, r.padre_edad, r.padre_fecha_nacimiento, r.padre_direccion,
+              r.padre_telefono_fijo, r.padre_telefono_movil, r.padre_email,
+              r.personas_autorizadas
        FROM estudiantes e
        JOIN vw_estudiantes_estado v ON v.id = e.id
        JOIN representantes r ON r.id = e.representante_id

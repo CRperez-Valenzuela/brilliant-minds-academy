@@ -37,7 +37,7 @@ export function vistaFantasma(): HtmlSeguro {
 export function capaCandado(d: DatosCandado): HtmlSeguro {
   return html`<div data-candado class="absolute inset-0 z-10 flex items-center justify-center bg-white/80 p-6 backdrop-blur-md">
     <div role="region" aria-label="${AVISO_PREMIUM}" class="${CLS.tarjetaCristal} w-full max-w-md p-8 text-center">
-      <span class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-slate-900 text-white">${icono('lock', 'h-6 w-6')}</span>
+      <span class="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-bma-purpura text-white">${icono('lock', 'h-6 w-6')}</span>
       <h2 class="mt-4 text-lg font-bold text-slate-900">${AVISO_PREMIUM}</h2>
       <p class="mt-1 text-sm font-semibold text-slate-800">${d.nombre}</p>
       <p class="mt-2 text-sm text-slate-700">${d.descripcion}</p>

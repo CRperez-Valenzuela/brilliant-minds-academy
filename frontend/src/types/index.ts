@@ -168,30 +168,68 @@ export function esConfigInvitacion(c: ConfigAdmisiones | null): c is ConfigInvit
 
 export type TipoSangre = 'A+' | 'A-' | 'B+' | 'B-' | 'AB+' | 'AB-' | 'O+' | 'O-';
 
-/** Campos de texto del formulario `POST /api/public/admisiones` (multipart). */
-export interface SolicitudAdmisionTexto {
+/** Respuesta a una pregunta de sí/no de la planilla; `''` = sin responder. */
+export type RespuestaSiNo = 'SI' | 'NO' | '';
+
+/** Quién de los dos progenitores es el representante principal: paga y recibe los avisos de cobro por WhatsApp. */
+export type RepresentantePrincipal = 'MADRE' | 'PADRE';
+
+export type ProgenitorClave = 'madre' | 'padre';
+
+/** Campos de UN progenitor tal como los pide la planilla del Ministerio. Todos viajan como texto en el multipart. */
+export type CampoProgenitor = 'nombres' | 'apellidos' | 'cedula' | 'edad' | 'fecha_nacimiento' | 'direccion' | 'telefono_fijo' | 'telefono_movil' | 'email';
+
+/** `madre_nombres`, `madre_cedula`, … (o `padre_*`) generados a partir de `CampoProgenitor`: una sola fuente de verdad. */
+export type ProgenitorTexto<P extends ProgenitorClave> = { readonly [K in CampoProgenitor as `${P}_${K}`]: string };
+
+/** Fila de «Personas autorizadas para retirar al menor» (la planilla admite 2). */
+export type NumeroAutorizada = 1 | 2;
+export type AutorizadaTexto<N extends NumeroAutorizada> = { readonly [K in 'nombre' | 'telefono' | 'parentesco' as `autorizada_${N}_${K}`]: string };
+
+/** Persona autorizada tal como se guarda en `representantes.personas_autorizadas` (JSONB). */
+export interface PersonaAutorizada {
+  readonly nombre: string;
+  readonly telefono: string;
+  readonly parentesco: string;
+}
+
+/** Datos propios del estudiante y de su ficha médica en la planilla pública (secciones 1 y 2 del formulario). */
+export interface SolicitudEstudianteTexto {
   readonly alumno_nombres: string;
   readonly alumno_apellidos: string;
   readonly alumno_cedula: string;
   readonly alumno_fecha_nacimiento: string;
-  readonly grado_solicitado: string;
-  readonly colegio_procedencia: string;
+  readonly alumno_lugar_nacimiento: string;
+  readonly alumno_lugar_estudio: string;
+  /** «Grado de Estudio» de la planilla (el que cursa hoy en su colegio). */
   readonly ultimo_grado_aprobado: string;
-  readonly tipo_sangre: TipoSangre | '';
+  /** «Nivel a Cursar» en la academia; con invitación lo impone el servidor. */
+  readonly grado_solicitado: string;
+  readonly horario_preferido: string;
+  readonly es_alergico: RespuestaSiNo;
   readonly alergias: string;
-  readonly condiciones_medicas: string;
-  readonly medicamentos: string;
+  readonly bajo_tratamiento: RespuestaSiNo;
+  readonly tratamiento_explicacion: string;
+  readonly tipo_sangre: TipoSangre | '';
   readonly emergencia_nombre: string;
   readonly emergencia_telefono: string;
-  readonly representante_nombres: string;
-  readonly representante_apellidos: string;
-  readonly representante_cedula: string;
-  readonly representante_email: string;
-  readonly telefono_codigo: string;
-  readonly telefono_numero: string;
+}
+
+/** Representante principal + pago de la matrícula. */
+export interface SolicitudPagoTexto {
+  /** `''` = aún sin elegir (la validación lo exige). */
+  readonly representante_principal: RepresentantePrincipal | '';
   readonly metodo_pago: MetodoPago;
   readonly referencia_bancaria: string;
 }
+
+/** Campos de texto del formulario `POST /api/public/admisiones` (multipart). */
+export type SolicitudAdmisionTexto = SolicitudEstudianteTexto &
+  SolicitudPagoTexto &
+  ProgenitorTexto<'madre'> &
+  ProgenitorTexto<'padre'> &
+  AutorizadaTexto<1> &
+  AutorizadaTexto<2>;
 
 export type CampoArchivoAdmision = 'foto_carnet' | 'cedula_identidad' | 'acta_nacimiento';
 
@@ -496,8 +534,11 @@ export interface PagoEstudiante {
   readonly declarado_en: string;
 }
 
+/** Progenitor tal como lo devuelve `GET /api/estudiantes/:id`: la edad es numérica y todo puede ser nulo (expedientes anteriores a la planilla oficial). */
+export type ProgenitorDetalle<P extends ProgenitorClave> = { readonly [K in CampoProgenitor as `${P}_${K}`]: K extends 'edad' ? number | null : string | null };
+
 /** `GET /api/estudiantes/:id` — estudiante + vista de estado + representante + cuotas, documentos y pagos. */
-export interface DetalleEstudiante {
+export interface DetalleEstudiante extends ProgenitorDetalle<'madre'>, ProgenitorDetalle<'padre'> {
   readonly id: number;
   readonly representante_id: number;
   readonly sede_id: number | null;
@@ -514,6 +555,11 @@ export interface DetalleEstudiante {
   readonly medicamentos: string | null;
   readonly emergencia_nombre: string | null;
   readonly emergencia_telefono: string | null;
+  readonly lugar_nacimiento: string | null;
+  readonly lugar_estudio: string | null;
+  readonly horario_preferido: string | null;
+  readonly bajo_tratamiento: boolean;
+  readonly tratamiento_explicacion: string | null;
   readonly estatus_academico: EstatusAcademico;
   readonly fecha_retiro: string | null;
   readonly motivo_retiro: string | null;
@@ -529,6 +575,8 @@ export interface DetalleEstudiante {
   readonly rep_cedula: string;
   readonly rep_email: string | null;
   readonly rep_telefono: string | null;
+  /** Madre y Padre (`madre_*`, `padre_*`) y personas autorizadas, de la planilla oficial. Todo opcional: los expedientes anteriores no lo tienen. */
+  readonly personas_autorizadas: readonly PersonaAutorizada[];
   readonly cuotas: readonly CuotaEstudiante[];
   readonly documentos: readonly DocumentoEstudiante[];
   readonly pagos: readonly PagoEstudiante[];

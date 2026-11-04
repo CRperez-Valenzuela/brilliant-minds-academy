@@ -19,15 +19,15 @@ export const CLS = {
   ayuda: 'mt-1 text-xs text-slate-600',
   errorCampo: 'mt-1 text-xs font-medium text-red-800',
   btn: 'inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60',
-  btnPrimario: 'bg-slate-900 text-white hover:bg-slate-700',
+  btnPrimario: 'bg-bma-azul text-white hover:bg-bma-azul-oscuro',
   btnSecundario: 'border border-slate-300 bg-white text-slate-800 hover:bg-slate-50',
-  btnPeligro: 'bg-red-700 text-white hover:bg-red-800',
-  btnOk: 'bg-emerald-700 text-white hover:bg-emerald-800',
+  btnPeligro: 'bg-bma-coral-oscuro text-white hover:bg-red-900',
+  btnOk: 'bg-bma-verde-oscuro text-white hover:bg-emerald-900',
   btnPeq: '!px-3 !py-1 text-xs',
   titulo: 'text-2xl font-bold tracking-tight text-slate-900',
   subtitulo: 'mt-1 text-sm text-slate-600',
   tabla: 'w-full min-w-[40rem] text-left text-sm',
-  th: 'whitespace-nowrap border-b border-slate-200 bg-slate-50 px-4 py-3 text-xs font-semibold uppercase tracking-wide text-slate-600',
+  th: 'whitespace-nowrap border-b border-bma-purpura-oscuro bg-bma-purpura px-4 py-3 text-xs font-semibold uppercase tracking-wide text-white',
   td: 'border-b border-slate-100 px-4 py-3 align-top text-slate-800',
 } as const;
 
@@ -36,18 +36,18 @@ export const boton = (...extra: readonly string[]): string => [CLS.btn, ...extra
 export type Tono = 'ok' | 'warn' | 'bad' | 'info' | 'neutral';
 
 const CLASE_ETIQUETA: Readonly<Record<Tono, string>> = {
-  ok: 'bg-emerald-50 text-emerald-900 ring-emerald-700/30',
-  warn: 'bg-amber-50 text-amber-900 ring-amber-700/30',
-  bad: 'bg-red-50 text-red-900 ring-red-700/30',
-  info: 'bg-sky-50 text-sky-900 ring-sky-700/30',
+  ok: 'bg-bma-verde-suave text-bma-verde-oscuro ring-bma-verde/50',
+  warn: 'bg-bma-amarillo-suave text-bma-amarillo-oscuro ring-bma-amarillo/70',
+  bad: 'bg-bma-coral-suave text-bma-coral-oscuro ring-bma-coral/50',
+  info: 'bg-bma-azul-suave text-bma-azul-oscuro ring-bma-azul/30',
   neutral: 'bg-slate-100 text-slate-800 ring-slate-500/30',
 };
 
 const CLASE_AVISO: Readonly<Record<Tono, string>> = {
-  ok: 'border-emerald-700/30 bg-emerald-50 text-emerald-900',
-  warn: 'border-amber-700/30 bg-amber-50 text-amber-900',
-  bad: 'border-red-700/30 bg-red-50 text-red-900',
-  info: 'border-sky-700/30 bg-sky-50 text-sky-900',
+  ok: 'border-bma-verde/50 bg-bma-verde-suave text-bma-verde-oscuro',
+  warn: 'border-bma-amarillo/70 bg-bma-amarillo-suave text-bma-amarillo-oscuro',
+  bad: 'border-bma-coral/50 bg-bma-coral-suave text-bma-coral-oscuro',
+  info: 'border-bma-azul/30 bg-bma-azul-suave text-bma-azul-oscuro',
   neutral: 'border-slate-300 bg-slate-50 text-slate-800',
 };
 

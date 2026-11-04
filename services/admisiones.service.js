@@ -9,6 +9,15 @@ const parametros = require('./parametros.service');
 const pagos = require('./pagos.service');
 const invitaciones = require('./invitaciones.service');
 
+/** Las 9 columnas de un progenitor (madre_* o padre_*), en el orden del INSERT. Cédula en mayúsculas; fecha como 'AAAA-MM-DD'. */
+function columnasProgenitor(x) {
+  const p = x || {};
+  return [
+    p.nombres ?? null, p.apellidos ?? null, p.cedula ? p.cedula.toUpperCase() : null, p.edad ?? null,
+    p.fecha_nacimiento ? aFechaSql(p.fecha_nacimiento) : null, p.direccion ?? null, p.telefono_fijo ?? null, p.telefono_movil ?? null, p.email ?? null,
+  ];
+}
+
 /** Datos que necesita el formulario público: costo en USD y Bs. a la tasa BCV del día + cuentas de la academia. */
 async function configPublica({ bcvSvc = bcv } = {}) {
   const [matricula, tasa, cuentas] = await Promise.all([parametros.matriculaUsd(), bcvSvc.obtenerTasa(), parametros.cuentasActivas()]);
@@ -69,19 +78,47 @@ async function registrarInscripcion({ datos, archivos, invitacion = null }, { bc
       // Blindaje anti-suplantación (H2): el formulario es PÚBLICO, así que si la cédula ya existe NO puede reescribir sus datos de
       // contacto. El correo guardado manda (solo se rellena si estaba vacío) y un teléfono distinto NO se aplica: queda en
       // `telefono_pendiente` hasta que la administración lo apruebe, porque a `telefono` llegan los enlaces privados del portal.
+      // Madre/Padre y personas autorizadas siguen la MISMA regla: el formulario público solo RELLENA lo que está vacío, nunca reescribe.
+      // Quien conozca una cédula no puede cambiar a quién se autoriza para retirar al menor (por eso `personas_autorizadas` solo se
+      // asigna si el arreglo guardado es []), ni los teléfonos/correos de los progenitores ya registrados.
       const rep = await ejecutar(
-        `INSERT INTO representantes (nombres, apellidos, cedula, email, telefono)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO representantes
+           (nombres, apellidos, cedula, email, telefono,
+            madre_nombres, madre_apellidos, madre_cedula, madre_edad, madre_fecha_nacimiento, madre_direccion, madre_telefono_fijo, madre_telefono_movil, madre_email,
+            padre_nombres, padre_apellidos, padre_cedula, padre_edad, padre_fecha_nacimiento, padre_direccion, padre_telefono_fijo, padre_telefono_movil, padre_email,
+            personas_autorizadas)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24::jsonb)
          ON CONFLICT (cedula) DO UPDATE
             SET nombres = EXCLUDED.nombres, apellidos = EXCLUDED.apellidos,
                 email = COALESCE(representantes.email, EXCLUDED.email),
                 telefono_pendiente = CASE WHEN representantes.telefono IS DISTINCT FROM EXCLUDED.telefono
                                           THEN EXCLUDED.telefono ELSE representantes.telefono_pendiente END,
                 telefono_pendiente_en = CASE WHEN representantes.telefono IS DISTINCT FROM EXCLUDED.telefono
-                                             THEN NOW() ELSE representantes.telefono_pendiente_en END
+                                             THEN NOW() ELSE representantes.telefono_pendiente_en END,
+                madre_nombres = COALESCE(representantes.madre_nombres, EXCLUDED.madre_nombres),
+                madre_apellidos = COALESCE(representantes.madre_apellidos, EXCLUDED.madre_apellidos),
+                madre_cedula = COALESCE(representantes.madre_cedula, EXCLUDED.madre_cedula),
+                madre_edad = COALESCE(representantes.madre_edad, EXCLUDED.madre_edad),
+                madre_fecha_nacimiento = COALESCE(representantes.madre_fecha_nacimiento, EXCLUDED.madre_fecha_nacimiento),
+                madre_direccion = COALESCE(representantes.madre_direccion, EXCLUDED.madre_direccion),
+                madre_telefono_fijo = COALESCE(representantes.madre_telefono_fijo, EXCLUDED.madre_telefono_fijo),
+                madre_telefono_movil = COALESCE(representantes.madre_telefono_movil, EXCLUDED.madre_telefono_movil),
+                madre_email = COALESCE(representantes.madre_email, EXCLUDED.madre_email),
+                padre_nombres = COALESCE(representantes.padre_nombres, EXCLUDED.padre_nombres),
+                padre_apellidos = COALESCE(representantes.padre_apellidos, EXCLUDED.padre_apellidos),
+                padre_cedula = COALESCE(representantes.padre_cedula, EXCLUDED.padre_cedula),
+                padre_edad = COALESCE(representantes.padre_edad, EXCLUDED.padre_edad),
+                padre_fecha_nacimiento = COALESCE(representantes.padre_fecha_nacimiento, EXCLUDED.padre_fecha_nacimiento),
+                padre_direccion = COALESCE(representantes.padre_direccion, EXCLUDED.padre_direccion),
+                padre_telefono_fijo = COALESCE(representantes.padre_telefono_fijo, EXCLUDED.padre_telefono_fijo),
+                padre_telefono_movil = COALESCE(representantes.padre_telefono_movil, EXCLUDED.padre_telefono_movil),
+                padre_email = COALESCE(representantes.padre_email, EXCLUDED.padre_email),
+                personas_autorizadas = CASE WHEN representantes.personas_autorizadas = '[]'::jsonb
+                                            THEN EXCLUDED.personas_autorizadas ELSE representantes.personas_autorizadas END
          RETURNING id, (telefono_pendiente IS NOT NULL) AS telefono_en_revision`,
         // La cédula se guarda en mayúsculas: PostgreSQL distingue "v-123" de "V-123" y duplicaría al representante.
-        [datos.representante_nombres, datos.representante_apellidos, datos.representante_cedula.toUpperCase(), datos.representante_email, datos.telefono],
+        [datos.representante_nombres, datos.representante_apellidos, datos.representante_cedula.toUpperCase(), datos.representante_email, datos.telefono,
+          ...columnasProgenitor(datos.madre), ...columnasProgenitor(datos.padre), JSON.stringify(datos.personas_autorizadas ?? [])],
         tx);
       const representanteId = rep.rows[0].id;
       if (rep.rows[0].telefono_en_revision === true) representanteConTelefonoEnRevision = representanteId;
@@ -89,12 +126,15 @@ async function registrarInscripcion({ datos, archivos, invitacion = null }, { bc
       const est = await ejecutar(
         `INSERT INTO estudiantes
            (representante_id, nombres, apellidos, cedula_identidad, fecha_nacimiento, grado_solicitado, colegio_procedencia, ultimo_grado_aprobado,
+            lugar_nacimiento, lugar_estudio, horario_preferido, bajo_tratamiento, tratamiento_explicacion,
             tipo_sangre, alergias, condiciones_medicas, medicamentos, emergencia_nombre, emergencia_telefono, sede_id)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
          RETURNING id`,
         [
           representanteId, datos.alumno_nombres, datos.alumno_apellidos, datos.alumno_cedula ? datos.alumno_cedula.toUpperCase() : null,
           aFechaSql(datos.alumno_fecha_nacimiento), gradoSolicitado, datos.colegio_procedencia, datos.ultimo_grado_aprobado,
+          datos.lugar_nacimiento ?? null, datos.lugar_estudio ?? null, datos.horario_preferido ?? null,
+          datos.bajo_tratamiento === true, datos.bajo_tratamiento === true ? (datos.tratamiento_explicacion ?? null) : null,
           datos.tipo_sangre, datos.alergias, datos.condiciones_medicas, datos.medicamentos, datos.emergencia_nombre, datos.emergencia_telefono,
           sedeId,
         ], tx);

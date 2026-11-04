@@ -53,3 +53,15 @@ export const NOMBRE_METODO: Readonly<Record<string, string>> = {
 };
 
 export const nombreMetodo = (m: string): string => NOMBRE_METODO[m] ?? m;
+
+/** Años cumplidos a la fecha `hoy` (ambas 'AAAA-MM-DD'); `null` si alguna no tiene el formato esperado. */
+export function edadEnAnios(nacimiento: string, hoy: string): number | null {
+  const n = /^(\d{4})-(\d{2})-(\d{2})$/.exec(nacimiento);
+  const h = /^(\d{4})-(\d{2})-(\d{2})$/.exec(hoy);
+  if (!n || !h) return null;
+  const [, ny, nm, nd] = n.map(Number);
+  const [, hy, hm, hd] = h.map(Number);
+  if (ny === undefined || nm === undefined || nd === undefined || hy === undefined || hm === undefined || hd === undefined) return null;
+  const edad = hy - ny - (hm < nm || (hm === nm && hd < nd) ? 1 : 0);
+  return edad >= 0 ? edad : null;
+}

@@ -1188,6 +1188,70 @@ t('admisiones H2: el correo guardado manda (solo se rellena si estaba vacío); m
   await assert.rejects(db.ejecutar(`UPDATE representantes SET telefono_pendiente = '58 414 200' WHERE cedula = 'V-7770001'`, []), (e) => e.code === '23514');
 });
 
+// ── Planilla oficial (migración 010): madre/padre, ficha médica y personas autorizadas ───────────
+t('planilla 010: se guardan madre, padre, ficha médica y autorizados; el formulario público solo RELLENA vacíos y jamás cambia a los autorizados', async () => {
+  const madre = { nombres: 'Ana', apellidos: 'Pérez', cedula: 'v-12345678', edad: 38, fecha_nacimiento: '1988-04-02', direccion: 'Av. Principal', telefono_fijo: '582121234567', telefono_movil: '584141234567', email: 'ana@example.com' };
+  const padre = { nombres: 'Luis', apellidos: 'Gómez', cedula: 'V-8765432', edad: null, fecha_nacimiento: null, direccion: null, telefono_fijo: null, telefono_movil: null, email: null };
+  const autorizados = [{ nombre: 'Rosa Pérez', telefono: '584121112222', parentesco: 'Tía' }];
+  const inscribir = (ov) => svc.admisiones.registrarInscripcion({ datos: inscripcion(ov), archivos }, { bcvSvc: bcvFalso, driveSvc: driveFalso() });
+  const rep = (ced) => uno(`SELECT madre_nombres, madre_cedula, madre_edad, madre_fecha_nacimiento, madre_telefono_movil, padre_nombres, padre_edad, personas_autorizadas FROM representantes WHERE cedula = $1`, [ced]);
+
+  const r = await inscribir({
+    representante_cedula: 'V-8800001', alumno_nombres: 'Planilla1', referencia_bancaria: 'REF-PL-1', lugar_nacimiento: 'Caracas', lugar_estudio: 'U.E. Bolívar',
+    horario_preferido: 'Sábados 9:00', bajo_tratamiento: true, tratamiento_explicacion: 'Asma', madre, padre, personas_autorizadas: autorizados,
+  });
+  assert.deepEqual(await uno('SELECT lugar_nacimiento, lugar_estudio, horario_preferido, bajo_tratamiento, tratamiento_explicacion FROM estudiantes WHERE id = $1', [r.estudiante_id]),
+    { lugar_nacimiento: 'Caracas', lugar_estudio: 'U.E. Bolívar', horario_preferido: 'Sábados 9:00', bajo_tratamiento: true, tratamiento_explicacion: 'Asma' });
+  assert.deepEqual(await rep('V-8800001'), {
+    madre_nombres: 'Ana', madre_cedula: 'V-12345678', madre_edad: 38, madre_fecha_nacimiento: '1988-04-02', madre_telefono_movil: '584141234567',
+    padre_nombres: 'Luis', padre_edad: null, personas_autorizadas: autorizados,
+  });
+  const ficha = await svc.crm.detalle(r.estudiante_id);
+  assert.deepEqual([ficha.madre_nombres, ficha.padre_cedula, ficha.bajo_tratamiento, ficha.personas_autorizadas], ['Ana', 'V-8765432', true, autorizados]);
+
+  // Reenvío con la misma cédula: lo ya guardado NO se pisa (ni madre ni autorizados); solo se rellena lo que estaba vacío (padre_edad).
+  await inscribir({
+    representante_cedula: 'V-8800001', alumno_nombres: 'Planilla2', referencia_bancaria: 'REF-PL-2',
+    madre: { ...madre, nombres: 'Suplantadora', telefono_movil: '584149999999' }, padre: { ...padre, nombres: 'Otro', edad: 40 },
+    personas_autorizadas: [{ nombre: 'Intruso', telefono: '584120000000', parentesco: 'Nadie' }],
+  });
+  const tras = await rep('V-8800001');
+  assert.deepEqual([tras.madre_nombres, tras.madre_telefono_movil, tras.padre_nombres, tras.padre_edad], ['Ana', '584141234567', 'Luis', 40]);
+  assert.deepEqual(tras.personas_autorizadas, autorizados, 'quien conozca una cédula no puede cambiar a quién se autoriza para retirar al menor');
+
+  // Un representante SIN autorizados sí puede registrarlos la primera vez que los informa.
+  await inscribir({ representante_cedula: 'V-8800002', alumno_nombres: 'Planilla3', referencia_bancaria: 'REF-PL-3', personas_autorizadas: [] });
+  assert.deepEqual((await rep('V-8800002')).personas_autorizadas, []);
+  await inscribir({ representante_cedula: 'V-8800002', alumno_nombres: 'Planilla4', referencia_bancaria: 'REF-PL-4', personas_autorizadas: autorizados });
+  assert.deepEqual((await rep('V-8800002')).personas_autorizadas, autorizados);
+
+  // Datos clásicos (sin los campos nuevos): las columnas nuevas toman sus valores por defecto.
+  const clasica = await inscribir({ representante_cedula: 'V-8800003', alumno_nombres: 'Planilla5', referencia_bancaria: 'REF-PL-5' });
+  assert.deepEqual(await uno('SELECT bajo_tratamiento, tratamiento_explicacion, lugar_estudio FROM estudiantes WHERE id = $1', [clasica.estudiante_id]), { bajo_tratamiento: false, tratamiento_explicacion: null, lugar_estudio: null });
+  assert.deepEqual((await rep('V-8800003')).personas_autorizadas, []);
+
+  // Última defensa en la base: máx. 2 autorizados, JSON de tipo arreglo, edades y teléfonos sanos.
+  const viola = (sql) => assert.rejects(db.ejecutar(sql, []), (e) => e.code === '23514', sql);
+  await viola(`UPDATE representantes SET personas_autorizadas = '[1,2,3]'::jsonb WHERE cedula = 'V-8800001'`);
+  await viola(`UPDATE representantes SET personas_autorizadas = '{"a":1}'::jsonb WHERE cedula = 'V-8800001'`);
+  await viola(`UPDATE representantes SET madre_edad = 5 WHERE cedula = 'V-8800001'`);
+  await viola(`UPDATE representantes SET padre_telefono_movil = '58 414 200' WHERE cedula = 'V-8800001'`);
+  await viola(`UPDATE estudiantes SET tratamiento_explicacion = repeat('x', 501) WHERE id = ${r.estudiante_id}`);
+});
+
+t('migración 010: es idempotente (reaplicarla no falla ni duplica restricciones) y registra 8 CHECK nuevos', async () => {
+  const sql = fs.readFileSync(path.join(RAIZ, 'database', 'migrations', '010_ampliacion_planilla.sql'), 'utf8');
+  const contar = async () => (await uno(`SELECT count(*)::int AS n FROM pg_constraint WHERE conname IN (
+      'ck_estudiantes_tratamiento_len', 'ck_representantes_personas_autorizadas', 'ck_representantes_madre_edad', 'ck_representantes_padre_edad',
+      'ck_representantes_madre_tel_fijo', 'ck_representantes_madre_tel_movil', 'ck_representantes_padre_tel_fijo', 'ck_representantes_padre_tel_movil')`)).n;
+  assert.equal(await contar(), 8);
+  await db.ejecutarScript(sql);
+  await db.ejecutarScript(sql);
+  assert.equal(await contar(), 8);
+  const columnas = await filas(`SELECT column_name FROM information_schema.columns WHERE table_name = 'representantes' AND (column_name LIKE 'madre\_%' OR column_name LIKE 'padre\_%')`);
+  assert.equal(columnas.length, 18);
+});
+
 // ── Bot de WhatsApp: de-duplicación con GENERADA «en vuelo» (H4) y enfriamiento por FALLIDA (H1), con el SQL real ──
 t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo», la del panel no; y 3 FALLIDA del mismo tipo en 7 días enfrían al estudiante', async () => {
   const { candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');

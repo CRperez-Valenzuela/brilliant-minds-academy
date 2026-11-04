@@ -87,7 +87,11 @@ test('H2: el upsert por cédula NO sobrescribe el contacto: el correo guardado m
   assert.match(up.texto, /telefono_pendiente = CASE WHEN representantes\.telefono IS DISTINCT FROM EXCLUDED\.telefono\s+THEN EXCLUDED\.telefono ELSE representantes\.telefono_pendiente END/);
   assert.match(up.texto, /telefono_pendiente_en = CASE WHEN representantes\.telefono IS DISTINCT FROM EXCLUDED\.telefono\s+THEN NOW\(\) ELSE representantes\.telefono_pendiente_en END/);
   assert.match(up.texto, /RETURNING id, \(telefono_pendiente IS NOT NULL\) AS telefono_en_revision/);
-  assert.deepEqual(up.params, ['Ana', 'Pérez', 'V-12345678', null, '584141234567'], 'parámetros posicionales $1..$5, cédula en mayúsculas');
+  assert.deepEqual(up.params.slice(0, 5), ['Ana', 'Pérez', 'V-12345678', null, '584141234567'], 'parámetros posicionales $1..$5, cédula en mayúsculas');
+  // $6..$23 = madre_* y padre_* (9 + 9, nulos si no vienen) y $24 = personas_autorizadas serializado para ::jsonb.
+  assert.equal(up.params.length, 24);
+  assert.deepEqual(up.params.slice(5, 23), Array(18).fill(null));
+  assert.equal(up.params[23], '[]');
 });
 
 test('H2: con un teléfono retenido se avisa SOLO tras el COMMIT, en el log del servidor y sin teléfonos; la respuesta pública no revela que la cédula ya existía', async () => {

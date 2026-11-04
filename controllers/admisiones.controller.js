@@ -4,6 +4,7 @@ const cfg = require('../config/env');
 const { AppError, e } = require('../errors/AppError');
 const { validar } = require('../utils/validar');
 const { sanitizarTelefono } = require('../utils/telefono');
+const { normalizarPlanilla, CEDULA } = require('../utils/planilla');
 const { detectarTipo } = require('../utils/archivos');
 const { Semaforo } = require('../utils/semaforo');
 const { asyncHandler, ok } = require('../utils/http');
@@ -11,7 +12,6 @@ const admisiones = require('../services/admisiones.service');
 const invitaciones = require('../services/invitaciones.service');
 
 const METODOS = ['ZELLE', 'BINANCE', 'PAYPAL', 'PAGO_MOVIL'];
-const CEDULA = { patron: /^[A-Za-z0-9.-]{4,20}$/, mensajePatron: 'Solo letras, números, puntos y guiones (4 a 20).' };
 
 const REGLAS = {
   alumno_nombres: { requerido: true, max: 100 },
@@ -28,9 +28,11 @@ const REGLAS = {
   condiciones_medicas: { max: 500 },
   medicamentos: { max: 500 },
   emergencia_nombre: { max: 150 },
-  representante_nombres: { requerido: true, max: 100 },
-  representante_apellidos: { requerido: true, max: 100 },
-  representante_cedula: { requerido: true, ...CEDULA },
+  // Representante «clásico» (un solo adulto). Con la planilla oficial el representante PRINCIPAL se toma de la Madre o del Padre
+  // (`representante_principal`, ver utils/planilla.js) y estos tres campos pasan a derivarse de ahí: su obligatoriedad se evalúa en prepararInscripcion.
+  representante_nombres: { max: 100 },
+  representante_apellidos: { max: 100 },
+  representante_cedula: { max: 20, ...CEDULA },
   representante_email: { tipo: 'email', max: 160 },
   referencia_bancaria: { requerido: true, patron: /^[A-Za-z0-9-]{4,40}$/, mensajePatron: 'La referencia debe tener de 4 a 40 caracteres (letras, números o guiones, sin espacios).' },
   metodo_pago: { tipo: 'enum', valores: METODOS, requerido: true },
@@ -42,7 +44,7 @@ const DOCUMENTOS = [
   { campo: 'acta_nacimiento', tipo: 'ACTA_NACIMIENTO', permitidos: ['image/jpeg', 'image/png', 'application/pdf'] },
 ];
 
-/** Valida campos + teléfonos (unificados sin espacios) + 3 documentos. Acumula TODOS los errores en un solo 422. */
+/** Valida campos + planilla oficial (ficha médica, madre/padre, autorizados) + teléfonos (sin espacios) + 3 documentos. Acumula TODOS los errores en un solo 422. */
 function prepararInscripcion(body, files) {
   const detalles = [];
   let datos = {};
@@ -55,6 +57,10 @@ function prepararInscripcion(body, files) {
   // Sin invitación el nivel lo elige la familia (obligatorio). Se lee del cuerpo crudo: si `validar` falló, `datos` está vacío y no debe duplicar errores.
   if (!body.invitacion && !String(body.grado_solicitado ?? '').trim()) detalles.push({ campo: 'grado_solicitado', mensaje: 'Es obligatorio.' });
 
+  // Planilla oficial: nunca lanza; sus errores se suman a los del formulario base.
+  const { valores: planilla, detalles: detallesPlanilla } = normalizarPlanilla(body);
+  detalles.push(...detallesPlanilla);
+
   const unir = (campo, ...partes) => {
     try {
       return sanitizarTelefono(...partes);
@@ -63,11 +69,37 @@ function prepararInscripcion(body, files) {
       return null;
     }
   };
-  // Se aceptan fragmentos (código + número) o un solo campo; en ambos casos se guarda UNA cadena sin espacios.
-  datos.telefono = body.telefono || body.telefono_numero
-    ? unir('telefono', body.telefono_codigo || '', body.telefono || body.telefono_numero)
-    : (detalles.push({ campo: 'telefono', mensaje: 'Es obligatorio.' }), null);
+  if (planilla.principal) {
+    // El representante principal sale de la Madre o del Padre: nombres, cédula, correo y el MÓVIL (WhatsApp de cobro).
+    datos.representante_nombres = planilla.principal.nombres;
+    datos.representante_apellidos = planilla.principal.apellidos;
+    datos.representante_cedula = planilla.principal.cedula;
+    datos.representante_email = planilla.principal.email;
+    datos.telefono = planilla.principal.telefono;
+  } else {
+    // Formulario clásico: representante único obligatorio. Se aceptan fragmentos (código + número) o un solo campo; se guarda UNA cadena sin espacios.
+    for (const campo of ['representante_nombres', 'representante_apellidos', 'representante_cedula']) {
+      // Se lee del cuerpo crudo: si `validar` falló, `datos` está vacío y no debe inventar faltantes (igual que con el grado).
+      if (!String(body[campo] ?? '').trim() && !detalles.some((d) => d.campo === campo)) detalles.push({ campo, mensaje: 'Es obligatorio.' });
+    }
+    datos.telefono = body.telefono || body.telefono_numero
+      ? unir('telefono', body.telefono_codigo || '', body.telefono || body.telefono_numero)
+      : (detalles.push({ campo: 'telefono', mensaje: 'Es obligatorio.' }), null);
+  }
   datos.emergencia_telefono = body.emergencia_telefono ? unir('emergencia_telefono', body.emergencia_telefono_codigo || '', body.emergencia_telefono) : null;
+
+  // Ficha médica y datos de la planilla oficial (el «NO» a ¿Es alérgico? vacía `alergias`).
+  if (planilla.es_alergico === 'NO') datos.alergias = null;
+  Object.assign(datos, {
+    lugar_nacimiento: planilla.lugar_nacimiento,
+    lugar_estudio: planilla.lugar_estudio,
+    horario_preferido: planilla.horario_preferido,
+    bajo_tratamiento: planilla.bajo_tratamiento,
+    tratamiento_explicacion: planilla.tratamiento_explicacion,
+    madre: planilla.madre,
+    padre: planilla.padre,
+    personas_autorizadas: planilla.personas_autorizadas,
+  });
 
   const archivos = [];
   for (const d of DOCUMENTOS) {

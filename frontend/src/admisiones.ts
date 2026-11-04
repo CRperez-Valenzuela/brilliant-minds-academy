@@ -9,15 +9,19 @@ import './styles/main.css';
 import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
 import { html, montar, raw, type HtmlSeguro } from './lib/html';
 import { icono } from './lib/icons';
-import { bs, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
+import { bs, edadEnAnios, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
 import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
 import { esConfigInvitacion } from './types/index';
 import type {
   CampoArchivoAdmision,
   ConfigAdmisiones,
   ConfigInvitacion,
+  CampoProgenitor,
   CuentaPago,
   MetodoPago,
+  NumeroAutorizada,
+  ProgenitorClave,
+  RepresentantePrincipal,
   RespuestaAdmision,
   SolicitudAdmisionTexto,
   TipoSangre,
@@ -105,11 +109,13 @@ const INFO_METODOS: Readonly<Record<MetodoPago, InfoMetodo>> = {
 };
 
 type NombreTexto = keyof SolicitudAdmisionTexto;
-type TipoControl = 'text' | 'date' | 'email' | 'tel' | 'select';
+type TipoControl = 'text' | 'date' | 'email' | 'tel' | 'select' | 'number';
 
 interface DefCampo {
   readonly nombre: NombreTexto;
   readonly etiqueta: string;
+  /** Texto del campo en los mensajes de error (p. ej. «Madre · Nombres»); por defecto, `etiqueta`. */
+  readonly resumen?: string;
   readonly tipo: TipoControl;
   readonly requerido: boolean;
   readonly maximo?: number;
@@ -119,12 +125,64 @@ interface DefCampo {
   readonly porDefecto?: string;
   /** Atributos HTML constantes del propio código (nunca datos del usuario). */
   readonly atributos?: string;
+  /** Subtítulo (`<fieldset>`) bajo el que se agrupa el campo dentro de su sección. */
+  readonly grupo?: string;
+  /** El campo solo se muestra (y se envía) cuando otro campo vale exactamente esto. */
+  readonly visibleSi?: { readonly campo: NombreTexto; readonly valor: string };
+  /** Obligatorio únicamente cuando ese progenitor es el representante principal. */
+  readonly esencialDe?: ProgenitorClave;
 }
 
 interface DefSeccion {
   readonly id: string;
   readonly titulo: string;
+  readonly nota?: string;
   readonly campos: readonly DefCampo[];
+}
+
+const SI_NO_OPCIONES: readonly { readonly valor: string; readonly texto: string }[] = [
+  { valor: '', texto: 'Selecciona…' },
+  { valor: 'NO', texto: 'No' },
+  { valor: 'SI', texto: 'Sí' },
+];
+
+const CAMPOS_PROGENITOR: readonly CampoProgenitor[] = ['nombres', 'apellidos', 'cedula', 'edad', 'fecha_nacimiento', 'direccion', 'telefono_fijo', 'telefono_movil', 'email'];
+const PROGENITORES: readonly ProgenitorClave[] = ['madre', 'padre'];
+const NOMBRE_PROGENITOR: Readonly<Record<ProgenitorClave, string>> = { madre: 'Madre', padre: 'Padre' };
+const EDAD_MINIMA_PROGENITOR = 14;
+const EDAD_MAXIMA_PROGENITOR = 120;
+const NUMEROS_AUTORIZADA: readonly NumeroAutorizada[] = [1, 2];
+
+const nombreProgenitor = (p: ProgenitorClave, c: CampoProgenitor): NombreTexto => `${p}_${c}`;
+const nombreAutorizada = (n: NumeroAutorizada, c: 'nombre' | 'telefono' | 'parentesco'): NombreTexto => `autorizada_${n}_${c}`;
+
+/** Los 9 campos de un progenitor, tal como los pide la planilla del Ministerio. */
+function camposProgenitor(p: ProgenitorClave): readonly DefCampo[] {
+  const quien = NOMBRE_PROGENITOR[p];
+  const grupo = `Datos ${p === 'madre' ? 'de la madre' : 'del padre'}`;
+  const n = (c: CampoProgenitor): NombreTexto => nombreProgenitor(p, c);
+  const r = (texto: string): string => `${quien} · ${texto}`;
+  return [
+    { nombre: n('nombres'), etiqueta: 'Nombres', resumen: r('Nombres'), tipo: 'text', requerido: false, maximo: 100, grupo, esencialDe: p },
+    { nombre: n('apellidos'), etiqueta: 'Apellidos', resumen: r('Apellidos'), tipo: 'text', requerido: false, maximo: 100, grupo, esencialDe: p },
+    { nombre: n('cedula'), etiqueta: 'Cédula de identidad', resumen: r('Cédula'), tipo: 'text', requerido: false, maximo: 20, grupo, esencialDe: p, ayuda: 'Letras, números, puntos o guiones (4 a 20).' },
+    { nombre: n('fecha_nacimiento'), etiqueta: 'Fecha de nacimiento', resumen: r('Fecha de nacimiento'), tipo: 'date', requerido: false, grupo },
+    { nombre: n('edad'), etiqueta: 'Edad', resumen: r('Edad'), tipo: 'number', requerido: false, grupo, atributos: `min="${EDAD_MINIMA_PROGENITOR}" max="${EDAD_MAXIMA_PROGENITOR}" inputmode="numeric"`, ayuda: 'Se calcula sola con la fecha de nacimiento.' },
+    { nombre: n('direccion'), etiqueta: 'Dirección de habitación', resumen: r('Dirección'), tipo: 'text', requerido: false, maximo: 250, grupo, autocompletar: 'street-address' },
+    { nombre: n('telefono_fijo'), etiqueta: 'Teléfono fijo', resumen: r('Teléfono fijo'), tipo: 'tel', requerido: false, grupo, ayuda: 'Con código de área, p. ej. 0212 1234567.' },
+    { nombre: n('telefono_movil'), etiqueta: 'Teléfono móvil (WhatsApp)', resumen: r('Teléfono móvil'), tipo: 'tel', requerido: false, grupo, esencialDe: p, ayuda: 'P. ej. 0414 1234567 o +58 414 1234567. Si es el principal, recibe los avisos de cobro.' },
+    { nombre: n('email'), etiqueta: 'Correo electrónico', resumen: r('Correo'), tipo: 'email', requerido: false, maximo: 100, grupo, autocompletar: 'email' },
+  ];
+}
+
+/** Las 3 columnas de una fila de «Personas autorizadas para retirar al menor». */
+function camposAutorizada(n: NumeroAutorizada): readonly DefCampo[] {
+  const r = (texto: string): string => `Persona autorizada ${n} · ${texto}`;
+  return [
+    { nombre: nombreAutorizada(n, 'nombre'), etiqueta: 'Nombre y apellido', resumen: r('Nombre y apellido'), tipo: 'text', requerido: false, maximo: 150 },
+    { nombre: nombreAutorizada(n, 'telefono'), etiqueta: 'Teléfono', resumen: r('Teléfono'), tipo: 'tel', requerido: false, autocompletar: 'off' },
+    { nombre: nombreAutorizada(n, 'parentesco'), etiqueta: 'Parentesco', resumen: r('Parentesco'), tipo: 'text', requerido: false, maximo: 50 },
+  ];
 }
 
 const SECCIONES: readonly DefSeccion[] = [
@@ -132,44 +190,54 @@ const SECCIONES: readonly DefSeccion[] = [
     id: 'estudiante',
     titulo: 'Datos del estudiante',
     campos: [
-      { nombre: 'alumno_nombres', etiqueta: 'Nombres', tipo: 'text', requerido: true, maximo: 100 },
-      { nombre: 'alumno_apellidos', etiqueta: 'Apellidos', tipo: 'text', requerido: true, maximo: 100 },
-      { nombre: 'alumno_fecha_nacimiento', etiqueta: 'Fecha de nacimiento', tipo: 'date', requerido: true, autocompletar: 'bday' },
-      { nombre: 'alumno_cedula', etiqueta: 'Cédula del estudiante', tipo: 'text', requerido: false, maximo: 20, ayuda: 'Solo si tiene.' },
-      { nombre: 'grado_solicitado', etiqueta: 'Grado a cursar', tipo: 'text', requerido: true, maximo: 60 },
-      { nombre: 'colegio_procedencia', etiqueta: 'Colegio de procedencia', tipo: 'text', requerido: false, maximo: 150 },
-      { nombre: 'ultimo_grado_aprobado', etiqueta: 'Último grado aprobado', tipo: 'text', requerido: false, maximo: 60 },
-    ],
-  },
-  {
-    id: 'medicos',
-    titulo: 'Datos médicos y contacto de emergencia',
-    campos: [
+      { nombre: 'alumno_nombres', etiqueta: 'Nombres', resumen: 'Estudiante · Nombres', tipo: 'text', requerido: true, maximo: 100, grupo: 'Identificación y estudios' },
+      { nombre: 'alumno_apellidos', etiqueta: 'Apellidos', resumen: 'Estudiante · Apellidos', tipo: 'text', requerido: true, maximo: 100, grupo: 'Identificación y estudios' },
+      { nombre: 'alumno_cedula', etiqueta: 'Cédula de identidad', resumen: 'Cédula del estudiante', tipo: 'text', requerido: false, maximo: 20, grupo: 'Identificación y estudios', ayuda: 'Solo si tiene.' },
+      { nombre: 'alumno_fecha_nacimiento', etiqueta: 'Fecha de nacimiento', resumen: 'Fecha de nacimiento', tipo: 'date', requerido: true, autocompletar: 'bday', grupo: 'Identificación y estudios', ayuda: 'Edad: se calcula con la fecha de nacimiento.' },
+      { nombre: 'alumno_lugar_nacimiento', etiqueta: 'Lugar de nacimiento', resumen: 'Lugar de nacimiento', tipo: 'text', requerido: false, maximo: 150, grupo: 'Identificación y estudios' },
+      { nombre: 'alumno_lugar_estudio', etiqueta: 'Lugar de estudio', resumen: 'Lugar de estudio', tipo: 'text', requerido: false, maximo: 150, grupo: 'Identificación y estudios', ayuda: 'Colegio o institución donde estudia actualmente.' },
+      { nombre: 'ultimo_grado_aprobado', etiqueta: 'Grado de estudio', resumen: 'Grado de estudio', tipo: 'text', requerido: false, maximo: 60, grupo: 'Identificación y estudios' },
+      { nombre: 'grado_solicitado', etiqueta: 'Nivel a cursar', resumen: 'Nivel a cursar', tipo: 'text', requerido: true, maximo: 60, grupo: 'Identificación y estudios' },
+      { nombre: 'horario_preferido', etiqueta: 'Horario', resumen: 'Horario', tipo: 'text', requerido: false, maximo: 50, grupo: 'Identificación y estudios', ayuda: 'Ej.: sábados 9:00 a. m.' },
+      { nombre: 'es_alergico', etiqueta: '¿Es alérgico?', resumen: '¿Es alérgico?', tipo: 'select', requerido: true, opciones: SI_NO_OPCIONES, grupo: 'Salud y emergencia' },
+      { nombre: 'alergias', etiqueta: 'Explique la alergia', resumen: 'Alergia (explicación)', tipo: 'text', requerido: false, maximo: 500, grupo: 'Salud y emergencia', visibleSi: { campo: 'es_alergico', valor: 'SI' } },
+      { nombre: 'bajo_tratamiento', etiqueta: '¿Se encuentra o se ha encontrado bajo tratamiento médico?', resumen: 'Tratamiento médico', tipo: 'select', requerido: true, opciones: SI_NO_OPCIONES, grupo: 'Salud y emergencia' },
+      { nombre: 'tratamiento_explicacion', etiqueta: 'Explique el tratamiento', resumen: 'Tratamiento (explicación)', tipo: 'text', requerido: false, maximo: 500, grupo: 'Salud y emergencia', visibleSi: { campo: 'bajo_tratamiento', valor: 'SI' } },
       {
         nombre: 'tipo_sangre',
         etiqueta: 'Tipo de sangre',
+        resumen: 'Tipo de sangre',
         tipo: 'select',
         requerido: false,
+        grupo: 'Salud y emergencia',
         opciones: [{ valor: '', texto: 'No sé / prefiero no indicarlo' }, ...TIPOS_SANGRE.map((t) => ({ valor: t, texto: t }))],
       },
-      { nombre: 'alergias', etiqueta: 'Alergias', tipo: 'text', requerido: false, maximo: 500 },
-      { nombre: 'condiciones_medicas', etiqueta: 'Condiciones médicas', tipo: 'text', requerido: false, maximo: 500 },
-      { nombre: 'medicamentos', etiqueta: 'Medicamentos', tipo: 'text', requerido: false, maximo: 500 },
-      { nombre: 'emergencia_nombre', etiqueta: 'Contacto de emergencia', tipo: 'text', requerido: false, maximo: 150 },
-      { nombre: 'emergencia_telefono', etiqueta: 'Teléfono de emergencia', tipo: 'tel', requerido: false, ayuda: 'Con código de país, p. ej. +58 414 1234567.' },
+      { nombre: 'emergencia_nombre', etiqueta: 'Contacto de emergencia', resumen: 'Contacto de emergencia', tipo: 'text', requerido: false, maximo: 150, grupo: 'Salud y emergencia' },
+      { nombre: 'emergencia_telefono', etiqueta: 'En caso de emergencia llamar al teléfono', resumen: 'Teléfono de emergencia', tipo: 'tel', requerido: false, grupo: 'Salud y emergencia', ayuda: 'Con código de país, p. ej. +58 414 1234567.' },
     ],
   },
   {
     id: 'representante',
-    titulo: 'Datos del representante',
+    titulo: 'Datos del representante del estudiante',
+    nota: 'Completa los datos de la madre, del padre o de ambos. Elige quién será el representante principal: es quien paga la matrícula y recibe los avisos de cobro por WhatsApp.',
     campos: [
-      { nombre: 'representante_nombres', etiqueta: 'Nombres', tipo: 'text', requerido: true, maximo: 100, autocompletar: 'given-name' },
-      { nombre: 'representante_apellidos', etiqueta: 'Apellidos', tipo: 'text', requerido: true, maximo: 100, autocompletar: 'family-name' },
-      { nombre: 'representante_cedula', etiqueta: 'Cédula', tipo: 'text', requerido: true, maximo: 20, ayuda: 'Letras, números, puntos o guiones (4 a 20).' },
-      { nombre: 'representante_email', etiqueta: 'Correo electrónico', tipo: 'email', requerido: false, maximo: 160, autocompletar: 'email' },
-      { nombre: 'telefono_codigo', etiqueta: 'Código de país', tipo: 'tel', requerido: true, maximo: 6, porDefecto: '+58' },
-      { nombre: 'telefono_numero', etiqueta: 'Teléfono (WhatsApp)', tipo: 'tel', requerido: true, maximo: 20, autocompletar: 'tel-national', ayuda: 'Recibirás los avisos de cobro por este número.' },
+      {
+        nombre: 'representante_principal',
+        etiqueta: 'Representante principal',
+        resumen: 'Representante principal',
+        tipo: 'select',
+        requerido: true,
+        grupo: 'Representante principal',
+        opciones: [{ valor: '', texto: 'Selecciona…' }, { valor: 'MADRE', texto: 'La madre' }, { valor: 'PADRE', texto: 'El padre' }],
+      },
+      ...PROGENITORES.flatMap(camposProgenitor),
     ],
+  },
+  {
+    id: 'autorizadas',
+    titulo: 'Personas autorizadas para retirar al menor de edad',
+    nota: 'Opcional. Hasta 2 personas; si anotas una, completa su nombre, teléfono y parentesco.',
+    campos: NUMEROS_AUTORIZADA.flatMap(camposAutorizada),
   },
   {
     id: 'pago',
@@ -188,6 +256,11 @@ const SECCIONES: readonly DefSeccion[] = [
 ];
 
 const CAMPOS: readonly DefCampo[] = SECCIONES.flatMap((s) => s.campos);
+const DEF_POR_NOMBRE: ReadonlyMap<NombreTexto, DefCampo> = new Map(CAMPOS.map((c) => [c.nombre, c]));
+const etiquetaError = (nombre: NombreTexto): string => {
+  const def = DEF_POR_NOMBRE.get(nombre);
+  return def?.resumen ?? def?.etiqueta ?? nombre;
+};
 
 interface DefArchivo {
   readonly campo: CampoArchivoAdmision;
@@ -264,42 +337,98 @@ export function normalizarTelefono(...partes: readonly string[]): string | null 
   return d.length >= 10 && d.length <= 15 ? d : null;
 }
 
-function esFechaPasadaValida(valor: string, hoy: string): boolean {
+function esFechaPasadaValida(valor: string, hoy: string, minimo = '1990-01-01'): boolean {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(valor)) return false;
   const [a, m, d] = valor.split('-').map(Number);
   if (a === undefined || m === undefined || d === undefined) return false;
   const fecha = new Date(Date.UTC(a, m - 1, d));
   const coincide = fecha.getUTCFullYear() === a && fecha.getUTCMonth() === m - 1 && fecha.getUTCDate() === d;
-  return coincide && valor >= '1990-01-01' && valor <= hoy;
+  return coincide && valor >= minimo && valor <= hoy;
 }
 
+const NACIMIENTO_MINIMO_PROGENITOR = '1900-01-01';
+
+/**
+ * Valida los textos de la planilla (mismas reglas que el backend: controllers/admisiones.controller.js + utils/planilla.js):
+ *  · obligatorios y longitudes por campo; cédulas, correos, fechas y teléfonos con su formato;
+ *  · ¿alérgico? / ¿tratamiento? = «Sí» exigen su explicación;
+ *  · hay que elegir representante principal y ese progenitor debe traer nombres, apellidos, cédula y móvil (su WhatsApp);
+ *  · si se anota algún dato del otro progenitor, nombres y apellidos pasan a ser obligatorios;
+ *  · una persona autorizada a medias (sin nombre, teléfono o parentesco) es un error.
+ */
 export function validarTextos(v: SolicitudAdmisionTexto, hoy: string = hoyCaracas()): readonly ErrorValidacion[] {
   const errores: ErrorValidacion[] = [];
-  const agregar = (campo: string, mensaje: string): void => {
+  const agregar = (campo: NombreTexto, mensaje: string): void => {
     errores.push({ campo, mensaje });
   };
+  const ya = (campo: string): boolean => errores.some((e) => e.campo === campo);
+  const faltante = (campo: NombreTexto, motivo = 'es obligatorio'): void => {
+    if (!ya(campo)) agregar(campo, `${etiquetaError(campo)}: ${motivo}.`);
+  };
+
   for (const def of CAMPOS) {
     const valor = v[def.nombre];
     if (valor === '') {
-      if (def.requerido) agregar(def.nombre, `${def.etiqueta}: es obligatorio.`);
+      if (def.requerido) agregar(def.nombre, `${etiquetaError(def.nombre)}: es obligatorio.`);
       continue;
     }
-    if (def.maximo !== undefined && valor.length > def.maximo) agregar(def.nombre, `${def.etiqueta}: máximo ${def.maximo} caracteres.`);
+    if (def.maximo !== undefined && valor.length > def.maximo) agregar(def.nombre, `${etiquetaError(def.nombre)}: máximo ${def.maximo} caracteres.`);
   }
-  const ya = (campo: string): boolean => errores.some((e) => e.campo === campo);
 
+  // ── Estudiante ──
   if (!ya('alumno_fecha_nacimiento') && !esFechaPasadaValida(v.alumno_fecha_nacimiento, hoy)) {
     agregar('alumno_fecha_nacimiento', 'Fecha de nacimiento: indica una fecha válida (entre 1990 y hoy).');
   }
   if (v.alumno_cedula && !ya('alumno_cedula') && !RE_CEDULA.test(v.alumno_cedula)) agregar('alumno_cedula', 'Cédula del estudiante: solo letras, números, puntos y guiones (4 a 20).');
-  if (!ya('representante_cedula') && !RE_CEDULA.test(v.representante_cedula)) agregar('representante_cedula', 'Cédula del representante: solo letras, números, puntos y guiones (4 a 20).');
-  if (v.representante_email && !ya('representante_email') && !RE_EMAIL.test(v.representante_email)) agregar('representante_email', 'Correo electrónico: formato no válido.');
-  if (!ya('telefono_numero') && !ya('telefono_codigo') && normalizarTelefono(v.telefono_codigo, v.telefono_numero) === null) {
-    agregar('telefono_numero', 'Teléfono: debe tener entre 10 y 15 dígitos incluyendo el código de país.');
-  }
+  if (v.es_alergico === 'SI' && v.alergias === '') faltante('alergias', 'explica a qué es alérgico');
+  if (v.bajo_tratamiento === 'SI' && v.tratamiento_explicacion === '') faltante('tratamiento_explicacion', 'explica el tratamiento médico');
   if (v.emergencia_telefono && !ya('emergencia_telefono') && normalizarTelefono(v.emergencia_telefono) === null) {
     agregar('emergencia_telefono', 'Teléfono de emergencia: debe tener entre 10 y 15 dígitos incluyendo el código de país.');
   }
+
+  // ── Madre y Padre ──
+  if (v.representante_principal === '') agregar('representante_principal', 'Representante principal: elige si es la madre o el padre.');
+  for (const p of PROGENITORES) {
+    const nombre = (c: CampoProgenitor): NombreTexto => nombreProgenitor(p, c);
+    const valorDe = (c: CampoProgenitor): string => v[nombre(c)];
+    const esPrincipal = v.representante_principal === p.toUpperCase();
+    const algo = CAMPOS_PROGENITOR.some((c) => valorDe(c) !== '');
+    const motivoPrincipal = 'es obligatorio porque es el representante principal';
+    if (esPrincipal) {
+      for (const c of ['nombres', 'apellidos', 'cedula'] as const) if (valorDe(c) === '') faltante(nombre(c), motivoPrincipal);
+      if (valorDe('telefono_movil') === '') faltante(nombre('telefono_movil'), 'es obligatorio: por este WhatsApp llegan los avisos de cobro');
+    } else if (algo) {
+      for (const c of ['nombres', 'apellidos'] as const) if (valorDe(c) === '') faltante(nombre(c), `es obligatorio si registras ${p === 'madre' ? 'a la madre' : 'al padre'}`);
+    }
+    if (valorDe('cedula') && !ya(nombre('cedula')) && !RE_CEDULA.test(valorDe('cedula'))) agregar(nombre('cedula'), `${etiquetaError(nombre('cedula'))}: solo letras, números, puntos y guiones (4 a 20).`);
+    if (valorDe('email') && !ya(nombre('email')) && !RE_EMAIL.test(valorDe('email'))) agregar(nombre('email'), `${etiquetaError(nombre('email'))}: formato no válido.`);
+    const fecha = valorDe('fecha_nacimiento');
+    if (fecha !== '' && !ya(nombre('fecha_nacimiento'))) {
+      const edad = esFechaPasadaValida(fecha, hoy, NACIMIENTO_MINIMO_PROGENITOR) ? edadEnAnios(fecha, hoy) : null;
+      if (edad === null || edad < EDAD_MINIMA_PROGENITOR) agregar(nombre('fecha_nacimiento'), `${etiquetaError(nombre('fecha_nacimiento'))}: indica una fecha válida (edad mínima ${EDAD_MINIMA_PROGENITOR} años).`);
+    } else if (fecha === '' && valorDe('edad') !== '' && !ya(nombre('edad'))) {
+      const n = Number(valorDe('edad'));
+      if (!Number.isInteger(n) || n < EDAD_MINIMA_PROGENITOR || n > EDAD_MAXIMA_PROGENITOR) agregar(nombre('edad'), `${etiquetaError(nombre('edad'))}: debe ser un número entre ${EDAD_MINIMA_PROGENITOR} y ${EDAD_MAXIMA_PROGENITOR}.`);
+    }
+    for (const c of ['telefono_fijo', 'telefono_movil'] as const) {
+      if (valorDe(c) && !ya(nombre(c)) && normalizarTelefono(valorDe(c)) === null) agregar(nombre(c), `${etiquetaError(nombre(c))}: debe tener entre 10 y 15 dígitos incluyendo el código de área o de país.`);
+    }
+  }
+
+  // ── Personas autorizadas ──
+  for (const n of NUMEROS_AUTORIZADA) {
+    const nombre = v[nombreAutorizada(n, 'nombre')];
+    const tel = v[nombreAutorizada(n, 'telefono')];
+    const parentesco = v[nombreAutorizada(n, 'parentesco')];
+    if (nombre === '' && tel === '' && parentesco === '') continue;
+    if (nombre === '') faltante(nombreAutorizada(n, 'nombre'));
+    if (parentesco === '') faltante(nombreAutorizada(n, 'parentesco'));
+    if (tel === '') faltante(nombreAutorizada(n, 'telefono'));
+    else if (!ya(nombreAutorizada(n, 'telefono')) && normalizarTelefono(tel) === null) {
+      agregar(nombreAutorizada(n, 'telefono'), `${etiquetaError(nombreAutorizada(n, 'telefono'))}: debe tener entre 10 y 15 dígitos incluyendo el código de área o de país.`);
+    }
+  }
+
   if (!ya('referencia_bancaria')) {
     const problema = mensajeReferencia(v.referencia_bancaria);
     if (problema) agregar('referencia_bancaria', problema);
@@ -317,31 +446,61 @@ function leerTexto(formulario: HTMLFormElement, nombre: NombreTexto): string {
 
 const esTipoSangre = (v: string): v is TipoSangre => (TIPOS_SANGRE as readonly string[]).includes(v);
 const esMetodoPago = (v: string): v is MetodoPago => (METODOS as readonly string[]).includes(v);
+const esSiNo = (v: string): v is 'SI' | 'NO' => v === 'SI' || v === 'NO';
+const esPrincipal = (v: string): v is RepresentantePrincipal => v === 'MADRE' || v === 'PADRE';
 
 export function leerTextos(formulario: HTMLFormElement): SolicitudAdmisionTexto {
   const t = (n: NombreTexto): string => leerTexto(formulario, n);
   const sangre = t('tipo_sangre');
   const metodo = t('metodo_pago');
+  const alergico = t('es_alergico');
+  const tratamiento = t('bajo_tratamiento');
+  const principal = t('representante_principal');
+  const alergicoSi = alergico === 'SI';
+  const tratamientoSi = tratamiento === 'SI';
   return {
     alumno_nombres: t('alumno_nombres'),
     alumno_apellidos: t('alumno_apellidos'),
     alumno_cedula: t('alumno_cedula'),
     alumno_fecha_nacimiento: t('alumno_fecha_nacimiento'),
-    grado_solicitado: t('grado_solicitado'),
-    colegio_procedencia: t('colegio_procedencia'),
+    alumno_lugar_nacimiento: t('alumno_lugar_nacimiento'),
+    alumno_lugar_estudio: t('alumno_lugar_estudio'),
     ultimo_grado_aprobado: t('ultimo_grado_aprobado'),
+    grado_solicitado: t('grado_solicitado'),
+    horario_preferido: t('horario_preferido'),
+    es_alergico: esSiNo(alergico) ? alergico : '',
+    // Los campos de explicación solo cuentan con «Sí»: un texto escrito y luego oculto no se envía.
+    alergias: alergicoSi ? t('alergias') : '',
+    bajo_tratamiento: esSiNo(tratamiento) ? tratamiento : '',
+    tratamiento_explicacion: tratamientoSi ? t('tratamiento_explicacion') : '',
     tipo_sangre: esTipoSangre(sangre) ? sangre : '',
-    alergias: t('alergias'),
-    condiciones_medicas: t('condiciones_medicas'),
-    medicamentos: t('medicamentos'),
     emergencia_nombre: t('emergencia_nombre'),
     emergencia_telefono: t('emergencia_telefono'),
-    representante_nombres: t('representante_nombres'),
-    representante_apellidos: t('representante_apellidos'),
-    representante_cedula: t('representante_cedula'),
-    representante_email: t('representante_email'),
-    telefono_codigo: t('telefono_codigo'),
-    telefono_numero: t('telefono_numero'),
+    representante_principal: esPrincipal(principal) ? principal : '',
+    madre_nombres: t('madre_nombres'),
+    madre_apellidos: t('madre_apellidos'),
+    madre_cedula: t('madre_cedula'),
+    madre_edad: t('madre_edad'),
+    madre_fecha_nacimiento: t('madre_fecha_nacimiento'),
+    madre_direccion: t('madre_direccion'),
+    madre_telefono_fijo: t('madre_telefono_fijo'),
+    madre_telefono_movil: t('madre_telefono_movil'),
+    madre_email: t('madre_email'),
+    padre_nombres: t('padre_nombres'),
+    padre_apellidos: t('padre_apellidos'),
+    padre_cedula: t('padre_cedula'),
+    padre_edad: t('padre_edad'),
+    padre_fecha_nacimiento: t('padre_fecha_nacimiento'),
+    padre_direccion: t('padre_direccion'),
+    padre_telefono_fijo: t('padre_telefono_fijo'),
+    padre_telefono_movil: t('padre_telefono_movil'),
+    padre_email: t('padre_email'),
+    autorizada_1_nombre: t('autorizada_1_nombre'),
+    autorizada_1_telefono: t('autorizada_1_telefono'),
+    autorizada_1_parentesco: t('autorizada_1_parentesco'),
+    autorizada_2_nombre: t('autorizada_2_nombre'),
+    autorizada_2_telefono: t('autorizada_2_telefono'),
+    autorizada_2_parentesco: t('autorizada_2_parentesco'),
     metodo_pago: esMetodoPago(metodo) ? metodo : 'ZELLE',
     referencia_bancaria: sanearReferencia(t('referencia_bancaria')),
   };
@@ -389,15 +548,22 @@ function actualizar(parcial: Partial<EstadoPantalla>): void {
 function controlHtml(def: DefCampo): HtmlSeguro {
   const id = `f-${def.nombre}`;
   const descrito = `${def.ayuda ? `a-${def.nombre} ` : ''}e-${def.nombre}`;
-  const estrella = def.requerido ? html`<span class="text-red-800" aria-hidden="true"> *</span>` : null;
+  const estrella = def.requerido
+    ? html`<span class="text-red-800" aria-hidden="true"> *</span>`
+    : def.esencialDe !== undefined
+      ? html`<span class="text-red-800" aria-hidden="true" data-estrella hidden> *</span>`
+      : null;
   let control: HtmlSeguro;
   if (def.tipo === 'select') {
     control = html`<select id="${id}" name="${def.nombre}" class="${CLS.input}" aria-describedby="${descrito}" ${def.requerido ? raw('required') : null}>${(def.opciones ?? []).map((o) => html`<option value="${o.valor}">${o.texto}</option>`)}</select>`;
   } else {
-    const extra = def.tipo === 'date' ? html` min="1990-01-01" max="${hoyCaracas()}"` : html`${def.maximo ? html` maxlength="${def.maximo}"` : null}`;
+    const extra = def.tipo === 'date' ? html` min="${def.nombre.startsWith('alumno_') ? '1990-01-01' : NACIMIENTO_MINIMO_PROGENITOR}" max="${hoyCaracas()}"` : html`${def.maximo ? html` maxlength="${def.maximo}"` : null}`;
     control = html`<input id="${id}" name="${def.nombre}" type="${def.tipo}" class="${CLS.input}" value="${def.porDefecto ?? ''}" autocomplete="${def.autocompletar ?? 'off'}" aria-describedby="${descrito}"${extra} ${def.atributos ? raw(def.atributos) : null} ${def.requerido ? raw('required') : null}>`;
   }
-  return html`<div>
+  // `visibleSi`: el bloque nace oculto y `sincronizarFormulario` lo muestra según la respuesta; `esencialDe`: asterisco solo para el principal.
+  const condicion = def.visibleSi ? html` data-visible-si="${def.visibleSi.campo}" data-valor="${def.visibleSi.valor}" hidden` : null;
+  const esencial = def.esencialDe !== undefined ? html` data-esencial="${def.esencialDe}"` : null;
+  return html`<div${condicion}${esencial}>
     <label for="${id}" class="${CLS.etiqueta}">${def.etiqueta}${estrella}</label>
     ${control}
     ${def.ayuda ? html`<p id="a-${def.nombre}" class="${CLS.ayuda}">${def.ayuda}</p>` : null}
@@ -418,25 +584,58 @@ function archivoHtml(def: DefArchivo): HtmlSeguro {
 
 /** Número de paso (1–5) en un círculo: guía el orden de la planilla sin depender del color. */
 function encabezadoSeccion(id: string, numero: number, titulo: string): HtmlSeguro {
-  return html`<h2 id="t-${id}" class="mb-4 flex items-center gap-3 text-base font-bold text-slate-900"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-slate-900 text-xs font-bold text-white" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
+  return html`<h2 id="t-${id}" class="mb-4 flex items-center gap-3 text-base font-bold text-slate-900"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-bma-azul text-xs font-bold text-white" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
+}
+
+/** Agrupa campos consecutivos con el mismo `grupo` (un `<fieldset>` por grupo); los campos sin grupo van sueltos. */
+function camposAgrupadosHtml(campos: readonly DefCampo[]): HtmlSeguro {
+  const bloques: { grupo: string | null; campos: DefCampo[] }[] = [];
+  for (const c of campos) {
+    const grupo = c.grupo ?? null;
+    const ultimo = bloques[bloques.length - 1];
+    if (ultimo && ultimo.grupo === grupo) ultimo.campos.push(c);
+    else bloques.push({ grupo, campos: [c] });
+  }
+  return html`${bloques.map((b) => (b.grupo === null
+    ? html`${b.campos.map(controlHtml)}`
+    : html`<fieldset class="rounded-lg border border-slate-200 p-4 sm:col-span-2">
+        <legend class="px-2 text-sm font-semibold text-bma-purpura-oscuro">${b.grupo}</legend>
+        <div class="grid gap-4 sm:grid-cols-2">${b.campos.map(controlHtml)}</div>
+      </fieldset>`))}`;
+}
+
+/** Una fila de «Personas autorizadas»: la 1.ª siempre visible; las demás nacen ocultas y se añaden/quitan con los botones. */
+function filaAutorizadaHtml(n: NumeroAutorizada): HtmlSeguro {
+  const oculta = n > 1;
+  return html`<fieldset data-fila-autorizada="${n}" ${oculta ? raw('hidden') : null} class="rounded-lg border border-slate-200 p-4 sm:col-span-2">
+    <legend class="px-2 text-sm font-semibold text-slate-800">Persona autorizada ${n}</legend>
+    <div class="grid gap-4 sm:grid-cols-3">${camposAutorizada(n).map(controlHtml)}</div>
+    ${oculta ? html`<button type="button" data-quitar-autorizada="${n}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'mt-3')}">${icono('x', 'h-4 w-4')}<span>Quitar persona autorizada ${n}</span></button>` : null}
+  </fieldset>`;
 }
 
 function seccionHtml(s: DefSeccion, numero: number): HtmlSeguro {
   // En el paso de pago las instrucciones de las cuentas van PRIMERO: se paga y luego se anota la referencia.
   const bloqueCuentas = s.id === 'pago' ? html`<div class="sm:col-span-2" id="cuentas-pago" aria-live="polite"></div>` : null;
+  const cuerpo = s.id === 'autorizadas'
+    ? html`${NUMEROS_AUTORIZADA.map(filaAutorizadaHtml)}<div class="sm:col-span-2"><button type="button" id="anadir-autorizada" class="${boton(CLS.btnSecundario)}">Añadir otra persona autorizada</button></div>`
+    : camposAgrupadosHtml(s.campos);
   return html`<section class="${CLS.tarjeta} p-6" aria-labelledby="t-${s.id}">
     ${encabezadoSeccion(s.id, numero, s.titulo)}
-    <div class="grid gap-4 sm:grid-cols-2">${bloqueCuentas}${s.campos.map(controlHtml)}</div>
+    ${s.nota ? html`<p class="mb-4 text-sm text-slate-600">${s.nota}</p>` : null}
+    <div class="grid gap-4 sm:grid-cols-2">${bloqueCuentas}${cuerpo}</div>
   </section>`;
 }
+
+const seccionPorId = (id: string): DefSeccion => SECCIONES.find((s) => s.id === id) ?? { id, titulo: id, campos: [] };
 
 function esqueleto(): HtmlSeguro {
   return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
     <header class="flex items-center gap-4">
-      <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-900 text-white">${icono('school', 'h-6 w-6')}</span>
+      <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-bma-azul text-white">${icono('school', 'h-6 w-6')}</span>
       <div>
         <h1 id="titulo-pagina" tabindex="-1" class="${CLS.titulo}">Inscripción de nuevos estudiantes</h1>
-        <p class="${CLS.subtitulo}">Brilliant Minds Academy · Planilla de admisión</p>
+        <p class="${CLS.subtitulo}">Brilliant Minds Academy · Planilla de inscripción</p>
       </div>
     </header>
 
@@ -447,12 +646,14 @@ function esqueleto(): HtmlSeguro {
     <div id="resumen-errores" tabindex="-1"></div>
 
     <form id="planilla" novalidate class="flex flex-col gap-6" aria-label="Planilla de inscripción">
-      ${SECCIONES.slice(0, 3).map((s, i) => seccionHtml(s, i + 1))}
+      ${seccionHtml(seccionPorId('estudiante'), 1)}
+      ${seccionHtml(seccionPorId('representante'), 2)}
+      ${seccionHtml(seccionPorId('autorizadas'), 3)}
       <section class="${CLS.tarjeta} p-6" aria-labelledby="t-documentos">
         ${encabezadoSeccion('documentos', 4, 'Documentos obligatorios')}
         <div class="grid gap-4 sm:grid-cols-2">${ARCHIVOS.map(archivoHtml)}</div>
       </section>
-      ${seccionHtml(SECCIONES[3] ?? { id: 'pago', titulo: 'Pago', campos: [] }, 5)}
+      ${seccionHtml(seccionPorId('pago'), 5)}
       <button id="enviar" type="submit" class="${boton(CLS.btnPrimario, 'w-full py-3 text-base')}">${icono('upload', 'h-5 w-5')}<span>Enviar inscripción</span></button>
       <p class="text-center text-xs text-slate-600">Los campos con <span aria-hidden="true">*</span><span class="sr-only">asterisco</span> son obligatorios.</p>
     </form>
@@ -668,7 +869,19 @@ async function refrescarConfig(silencioso: boolean): Promise<boolean> {
 
 // ───────────────────────── Errores en pantalla ─────────────────────────
 
-const ALIAS_CAMPO: Readonly<Record<string, string>> = { telefono: 'telefono_numero' };
+/** Errores del servidor con nombres del formulario clásico → el campo equivalente de la planilla (el principal es la madre o el padre). */
+function aliasCampo(campo: string): string {
+  const principal = buscar('#f-representante_principal', HTMLSelectElement)?.value.toLowerCase() ?? '';
+  if (principal !== 'madre' && principal !== 'padre') return campo;
+  switch (campo) {
+    case 'telefono': return `${principal}_telefono_movil`;
+    case 'representante_nombres': return `${principal}_nombres`;
+    case 'representante_apellidos': return `${principal}_apellidos`;
+    case 'representante_cedula': return `${principal}_cedula`;
+    case 'representante_email': return `${principal}_email`;
+    default: return campo;
+  }
+}
 
 function limpiarErrores(): void {
   montar(obtener('#resumen-errores', HTMLElement), html``);
@@ -680,7 +893,7 @@ function limpiarErrores(): void {
 }
 
 function marcarCampo(campo: string, mensaje: string): boolean {
-  const nombre = ALIAS_CAMPO[campo] ?? campo;
+  const nombre = aliasCampo(campo);
   const texto = buscar(`#e-${CSS.escape(nombre)}`, HTMLElement);
   const control = buscar(`#f-${CSS.escape(nombre)}`, HTMLElement);
   if (!texto || !control) return false;
@@ -694,7 +907,7 @@ function mostrarErrores(errores: readonly ErrorValidacion[], titulo = 'Revisa la
   for (const e of errores) marcarCampo(e.campo, e.mensaje);
   const zona = obtener('#resumen-errores', HTMLElement);
   montar(zona, aviso('bad', html`<ul class="list-disc pl-4">${errores.map((e) => html`<li>${e.mensaje}</li>`)}</ul>`, titulo));
-  const primero = errores.map((e) => buscar(`#f-${CSS.escape(ALIAS_CAMPO[e.campo] ?? e.campo)}`, HTMLElement)).find((c) => c !== null);
+  const primero = errores.map((e) => buscar(`#f-${CSS.escape(aliasCampo(e.campo))}`, HTMLElement)).find((c) => c !== null);
   if (primero) primero.focus();
   else zona.focus();
   zona.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -812,6 +1025,107 @@ function mostrarArchivoElegido(control: HTMLInputElement): void {
   }
 }
 
+// ───────────────────────── Comportamiento dinámico de la planilla ─────────────────────────
+
+const TEXTO_EDAD_ALUMNO = 'Edad: se calcula con la fecha de nacimiento.';
+const CLASES_EDAD_AUTOMATICA = ['bg-slate-100', 'select-none'] as const;
+
+/** Muestra u oculta los campos que dependen de una respuesta «Sí» (alergia, tratamiento). */
+function sincronizarCondicionales(formulario: HTMLFormElement): void {
+  for (const bloque of todos('[data-visible-si]', HTMLElement, formulario)) {
+    const campo = bloque.dataset['visibleSi'] ?? '';
+    const control = formulario.elements.namedItem(campo);
+    const visible = (control instanceof HTMLSelectElement || control instanceof HTMLInputElement) && control.value === (bloque.dataset['valor'] ?? '');
+    bloque.hidden = !visible;
+  }
+}
+
+/** La edad del estudiante y la de cada progenitor salen de su fecha de nacimiento (el servidor vuelve a calcularla). */
+function sincronizarEdades(formulario: HTMLFormElement): void {
+  const hoy = hoyCaracas();
+  const fechaAlumno = leerTexto(formulario, 'alumno_fecha_nacimiento');
+  const ayuda = buscar('#a-alumno_fecha_nacimiento', HTMLElement);
+  if (ayuda) {
+    const edad = esFechaPasadaValida(fechaAlumno, hoy) ? edadEnAnios(fechaAlumno, hoy) : null;
+    ayuda.textContent = edad !== null ? `Edad: ${edad} ${edad === 1 ? 'año' : 'años'}` : TEXTO_EDAD_ALUMNO;
+  }
+  for (const p of PROGENITORES) {
+    const campoEdad = buscar(`#f-${nombreProgenitor(p, 'edad')}`, HTMLInputElement);
+    if (!campoEdad) continue;
+    const fecha = leerTexto(formulario, nombreProgenitor(p, 'fecha_nacimiento'));
+    const edad = esFechaPasadaValida(fecha, hoy, NACIMIENTO_MINIMO_PROGENITOR) ? edadEnAnios(fecha, hoy) : null;
+    if (edad !== null) {
+      campoEdad.value = String(edad);
+      campoEdad.readOnly = true;
+      campoEdad.classList.add(...CLASES_EDAD_AUTOMATICA);
+    } else if (campoEdad.readOnly) {
+      campoEdad.readOnly = false;
+      campoEdad.value = '';
+      campoEdad.classList.remove(...CLASES_EDAD_AUTOMATICA);
+    }
+  }
+}
+
+/** Marca como obligatorios (asterisco + aria-required) los datos esenciales del progenitor elegido como representante principal. */
+function sincronizarPrincipal(formulario: HTMLFormElement): void {
+  const principal = leerTexto(formulario, 'representante_principal').toLowerCase();
+  for (const bloque of todos('[data-esencial]', HTMLElement, formulario)) {
+    const esencial = bloque.dataset['esencial'] === principal;
+    const estrella = buscar('[data-estrella]', HTMLElement, bloque);
+    if (estrella) estrella.hidden = !esencial;
+    const control = buscar('input', HTMLInputElement, bloque);
+    if (control) {
+      if (esencial) control.setAttribute('aria-required', 'true');
+      else control.removeAttribute('aria-required');
+    }
+  }
+}
+
+function sincronizarFormulario(formulario: HTMLFormElement): void {
+  sincronizarCondicionales(formulario);
+  sincronizarEdades(formulario);
+  sincronizarPrincipal(formulario);
+}
+
+/** Grilla dinámica de personas autorizadas: «Añadir» muestra la siguiente fila (máx. 2) y «Quitar» la vacía y la oculta. */
+function iniciarAutorizadas(formulario: HTMLFormElement): void {
+  const filas = (): readonly HTMLElement[] => todos('[data-fila-autorizada]', HTMLElement, formulario);
+  const botonAnadir = buscar('#anadir-autorizada', HTMLButtonElement, formulario);
+  const refrescarBoton = (): void => {
+    if (botonAnadir) botonAnadir.hidden = filas().every((f) => !f.hidden);
+  };
+  formulario.addEventListener('click', (ev) => {
+    const origen = ev.target instanceof Element ? ev.target : null;
+    if (origen?.closest('#anadir-autorizada')) {
+      const siguiente = filas().find((f) => f.hidden);
+      if (siguiente) {
+        siguiente.hidden = false;
+        buscar('input', HTMLInputElement, siguiente)?.focus();
+      }
+      refrescarBoton();
+      return;
+    }
+    const quitar = origen?.closest('[data-quitar-autorizada]');
+    if (quitar instanceof HTMLElement) {
+      const fila = quitar.closest('[data-fila-autorizada]');
+      if (fila instanceof HTMLElement) {
+        for (const c of todos('input', HTMLInputElement, fila)) {
+          c.value = '';
+          c.removeAttribute('aria-invalid');
+        }
+        for (const e of todos('[id^="e-"]', HTMLElement, fila)) {
+          e.hidden = true;
+          e.textContent = '';
+        }
+        fila.hidden = true;
+      }
+      refrescarBoton();
+      botonAnadir?.focus();
+    }
+  });
+  refrescarBoton();
+}
+
 function iniciar(): void {
   const raiz = obtener('#app', HTMLElement);
   document.body.className = 'text-slate-900';
@@ -823,6 +1137,10 @@ function iniciar(): void {
     ev.preventDefault();
     void alEnviar(formulario);
   });
+  formulario.addEventListener('input', () => sincronizarFormulario(formulario));
+  formulario.addEventListener('change', () => sincronizarFormulario(formulario));
+  sincronizarFormulario(formulario);
+  iniciarAutorizadas(formulario);
   for (const control of todos('input[type="file"]', HTMLInputElement, formulario)) {
     control.addEventListener('change', () => mostrarArchivoElegido(control));
   }

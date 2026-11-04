@@ -30,7 +30,7 @@ const codigo = FUENTES.map((f) => [f, sinComentariosJs(leer(f))]);
 const sinComentariosSql = (t) => t.replace(/--[^\n]*/g, '');
 
 // ── Esquema ─────────────────────────────────────────────────────────────────────────────────────
-const TIPOS = 'SERIAL|BIGSERIAL|INTEGER|SMALLINT|BIGINT|VARCHAR|CHAR|TEXT|DATE|TIMESTAMPTZ|NUMERIC|BOOLEAN';
+const TIPOS = 'SERIAL|BIGSERIAL|INTEGER|SMALLINT|BIGINT|VARCHAR|CHAR|TEXT|DATE|TIMESTAMPTZ|NUMERIC|BOOLEAN|JSONB';
 const tablas = {};
 const unicos = {}; // tabla → Set de 'col1,col2'
 for (const m of sqlTodo.matchAll(/CREATE TABLE IF NOT EXISTS (\w+)\s*\(([\s\S]*?)\n\);/g)) {
