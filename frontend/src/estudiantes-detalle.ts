@@ -293,7 +293,7 @@ function cabecera(d: DetalleEstudiante): HtmlSeguro {
       <button type="button" data-accion="volver" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'mb-3')}">${icono('back', 'h-4 w-4')}<span>Volver al listado</span></button>
       <h1 id="ficha-titulo" tabindex="-1" class="${CLS.titulo} break-words">${d.apellidos}, ${d.nombres}</h1>
       <p class="${CLS.subtitulo} flex flex-wrap items-center gap-2">${etiquetaEstado(d.estado_dinamico)}<span>${d.grado_solicitado}</span>
-        ${d.deuda_vencida_usd > 0 ? html`<span class="font-semibold text-red-800">Deuda vencida: ${usd(d.deuda_vencida_usd)}</span>` : null}</p>
+        ${d.deuda_vencida_usd > 0 ? html`<span class="font-semibold text-bma-coral-oscuro">Deuda vencida: ${usd(d.deuda_vencida_usd)}</span>` : null}</p>
     </div>
     <div class="flex flex-wrap gap-2" role="group" aria-label="Acciones sobre el estudiante">
       ${retirado

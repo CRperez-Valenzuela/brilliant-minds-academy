@@ -432,7 +432,7 @@ function tarjetaKpi(k: TarjetaKpi): HtmlSeguro {
       <h3 class="text-sm font-medium text-slate-600">${k.titulo}</h3>
       <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-700">${icono(k.icono, 'h-4 w-4')}</span>
     </div>
-    <p class="mt-3 text-2xl font-bold ${k.tono === 'malo' ? 'text-red-800' : 'text-slate-900'}" data-kpi>${k.valor}</p>
+    <p class="mt-3 text-2xl font-bold ${k.tono === 'malo' ? 'text-bma-coral-oscuro' : 'text-slate-900'}" data-kpi>${k.valor}</p>
     <p class="mt-1 text-xs text-slate-600">${k.detalle}</p>
   </article>`;
 }
@@ -551,8 +551,8 @@ function filaEstudiante(s: EstudianteListado): HtmlSeguro {
     <td class="${CLS.td}">${etiquetaEstado(s.estado_dinamico)}</td>
     <td class="${CLS.td} whitespace-nowrap">${usd(s.deuda_vencida_usd)}</td>
     <td class="${CLS.td}"><div class="flex flex-wrap gap-2">
-      <button type="button" data-alerta="preventiva" data-id="${s.id}" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">Preventiva</button>
-      <button type="button" data-alerta="morosidad" data-id="${s.id}" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">Morosidad</button>
+      <button type="button" data-alerta="preventiva" data-id="${s.id}" class="${boton(CLS.btnPrimario, CLS.btnPeq)}">Preventiva</button>
+      <button type="button" data-alerta="morosidad" data-id="${s.id}" class="${boton(CLS.btnPrimario, CLS.btnPeq)}">Morosidad</button>
     </div></td>
   </tr>`;
 }

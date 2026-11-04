@@ -28,7 +28,9 @@ function crearApp() {
   app.use('/admin', express.static(path.join(pub, 'admin')));
   app.use('/admisiones', express.static(path.join(pub, 'admisiones')));
   app.get('/portal/:token', (_req, res) => res.sendFile(path.join(pub, 'portal', 'index.html')));
-  app.get('/', (_req, res) => res.redirect('/admisiones'));
+  // Raíz → panel administrativo. `app.get('/')` solo casa con la ruta exacta «/»: no toca /assets/*, /admin/*, /admisiones/* ni /portal/:token.
+  // 302 (res.redirect por defecto) a propósito: un 301 queda en caché del navegador de forma indefinida y no se podría reapuntar la raíz después.
+  app.get('/', (_req, res) => res.redirect('/admin'));
 
   app.use(notFound);
   app.use(errorHandler);

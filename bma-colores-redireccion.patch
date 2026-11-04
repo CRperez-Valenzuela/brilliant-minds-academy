@@ -1,0 +1,353 @@
+From 43fe85bb292de7e9f9baab70101163821e01af61 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 4 Nov 2026 00:04:03 -0400
+Subject: [PATCH] =?UTF-8?q?feat:=20vestido=20crom=C3=A1tico=20BMA=20audita?=
+ =?UTF-8?q?do,=20ra=C3=ADz=20=E2=86=92=20/admin=20y=20retiro=20del=20?=
+ =?UTF-8?q?=C3=ADndice=20temporal?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- app.js: GET / redirige a /admin (302); no afecta /assets, /admisiones ni /portal/:token.
+- frontend/index.html (índice con viñetas, solo vite dev) eliminado; el plugin de vite redirige / → /admin/.
+- tailwind: tonos -oscuro auditados WCAG AA (verde #2A7253, coral #A23429, amarillo #82650C).
+- admin.ts: botones de alerta WhatsApp (Preventiva/Morosidad) en bg-bma-azul; KPI malo en coral-oscuro.
+- estudiantes-detalle.ts: «Deuda vencida» en coral-oscuro.
+- tests/raiz-redireccion.test.js (3 pruebas) y CAMBIOS_BMA_COLORES_REDIRECCION.md.
+---
+ CAMBIOS_BMA_COLORES_REDIRECCION.md  | 72 +++++++++++++++++++++++
+ app.js                              |  4 +-
+ frontend/index.html                 | 19 ------
+ frontend/src/admin.ts               |  6 +-
+ frontend/src/estudiantes-detalle.ts |  2 +-
+ frontend/tailwind.config.js         | 26 +++++----
+ frontend/vite.config.ts             | 11 +++-
+ tests/raiz-redireccion.test.js      | 91 +++++++++++++++++++++++++++++
+ 8 files changed, 193 insertions(+), 38 deletions(-)
+ create mode 100644 CAMBIOS_BMA_COLORES_REDIRECCION.md
+ delete mode 100644 frontend/index.html
+ create mode 100644 tests/raiz-redireccion.test.js
+
+diff --git a/CAMBIOS_BMA_COLORES_REDIRECCION.md b/CAMBIOS_BMA_COLORES_REDIRECCION.md
+new file mode 100644
+index 0000000..9fb76bc
+--- /dev/null
++++ b/CAMBIOS_BMA_COLORES_REDIRECCION.md
+@@ -0,0 +1,72 @@
++# CAMBIOS_BMA_COLORES_REDIRECCION — Vestido cromático BMA y redirección de entrega profesional
++
++**Proyecto:** Brilliant Minds Academy · **Rama:** `development` · **Base del patch:** `bed0cde` (tip de `development`)
++**Anclaje de Git:** `0390b25` existe y **es ancestro** de `bed0cde` (`git merge-base --is-ancestor 0390b25 HEAD` → sí). El patch se genera sobre `bed0cde`, no sobre `0390b25`, porque ese commit posterior (`Inyección de identidad corporativa BMA…`) ya introdujo los tokens `bma-*-suave/-oscuro` y `CLS.*` que este prompt da por existentes (`bg-bma-verde-suave`, `bg-bma-purpura`…). Si tu copia local está en `0390b25`, haz `git pull` de `development` antes de aplicar.
++**Motor de datos:** PostgreSQL / Supabase. **Este cambio no toca SQL, migraciones, `config/db` ni servicios**; no hay consultas nuevas.
++**Animación vectorial del logo:** pospuesta a la siguiente fase, como se indicó.
++
++## Archivos
++
++| Acción | Archivo | Qué cambia |
++|---|---|---|
++| Modificado | `app.js` | `GET /` ahora hace `res.redirect('/admin')` (antes `/admisiones`). Ruta exacta: no afecta `/assets`, `/admin`, `/admisiones` ni `/portal/:token`. |
++| Eliminado | `frontend/index.html` | Índice temporal de desarrollo con viñetas genéricas (solo servía en `vite dev`; no entraba al build). |
++| Modificado | `frontend/vite.config.ts` | El plugin `bma-rutas-express` redirige `/` → `/admin/` en `vite dev`, igual que Express (sin el índice eliminado, `/` habría dado 404). |
++| Modificado | `frontend/tailwind.config.js` | Tonos `-oscuro` auditados: verde `#2A7253`, coral `#A23429`, amarillo `#82650C`, y comentarios con los ratios de contraste. Diff mínimo (14+/12−). |
++| Modificado | `frontend/src/admin.ts` | Botones **Preventiva** y **Morosidad** (CRM Escolar) pasan de `btnSecundario` a `btnPrimario` (`bg-bma-azul`). Texto del KPI «malo»: `text-red-800` → `text-bma-coral-oscuro`. |
++| Modificado | `frontend/src/estudiantes-detalle.ts` | «Deuda vencida» en la ficha: `text-red-800` → `text-bma-coral-oscuro`. |
++| Creado | `tests/raiz-redireccion.test.js` | 3 pruebas: `/` → `/admin` (302, sin `next()`), no interfiere con `/assets` `/admin` `/admisiones`, índice temporal eliminado. |
++| Creado | `CAMBIOS_BMA_COLORES_REDIRECCION.md` | Este resumen. |
++
++Sin cambios, a propósito:
++- **`frontend/src/lib/ui.ts`** ya cumple lo pedido y es la única fuente: `CLS.th` = `bg-bma-purpura … text-white`; `etiquetaEstado` usa `bg-bma-verde-suave text-bma-verde-oscuro` (Activo) y `bg-bma-coral-suave text-bma-coral-oscuro` (Moroso); `btnPeligro` («Retirar») = `bg-bma-coral-oscuro`. Los tres tonos nuevos de `tailwind.config.js` se propagan por aquí sin tocar el código.
++- **Cabeceras de tabla:** 34 de 34 `<th>` del frontend usan `CLS.th` (CRM Escolar, Auditoría de Referencias, ficha del alumno, sedes/invitaciones, configuración).
++- **`frontend/src/facturacion-masiva.ts`:** es un formulario (no tiene tabla) y su botón «Generar» ya era `bg-bma-azul`; los `*` rojos son de validación de formulario, no estado de marca. No requirió cambios.
++
++## Decisiones que se apartan de la letra del prompt
++
++1. **La ruta `/` vive en `app.js`, no en `routes/index.js`** (este es solo el router `/api`). El prompt admitía «tu ruteador Express correspondiente».
++2. **302, no 301.** El prompt dice «permanente» pero fija el código `res.redirect('/admin')`, que es 302. Un 301 queda en caché del navegador de forma indefinida y no podrías reapuntar la raíz después. Para 301: `res.redirect(301, '/admin')`.
++3. **La paleta ya existía** (con estructura anidada `DEFAULT/suave/oscuro`, que produce exactamente las clases pedidas). Se conservó y solo se ajustaron los tres `-oscuro` a los valores auditados. `bma-azul-oscuro` y `bma-purpura-oscuro` no estaban en el prompt y se dejaron.
++4. **`content` de Tailwind conserva `"./index.html"`** (línea 3), aunque ese archivo ya no existe: es un glob muerto e inofensivo. `tailwind.config.js` tiene finales de línea **mixtos** (CRLF en las líneas 1–4 y 25–27; LF en el resto) y tocar esas líneas rompería `git am` (que elimina los CR del patch). Limpieza pendiente, mejor en un commit que normalice el archivo a LF.
++5. **«Botones de WhatsApp de cobranza preventiva y masiva»:** en el código solo existen los botones por fila **Preventiva** y **Morosidad** (más «Abrir en WhatsApp» del modal, ya azul). No hay ningún botón de WhatsApp masivo; no se inventó uno.
++
++## Contraste WCAG 2.1 (calculado con la fórmula, no a ojo)
++
++| Par | Ratio | AA (≥ 4.5) |
++|---|---|---|
++| blanco / `#0073BB` (botón primario) | 5.04 | ✅ |
++| blanco / `#8C59A4` (cabecera de tabla) | 5.15 | ✅ |
++| `#2A7253` / `#E8F6F0` (badge Activo) | 5.20 | ✅ |
++| `#A23429` / `#FEECEA` (badge Moroso) | 6.01 | ✅ |
++| `#82650C` / `#FEF7DC` (aviso) | 5.12 | ✅ |
++| blanco / `#A23429` (botón Retirar) | 6.86 | ✅ |
++| blanco / `#2A7253` (botón Reactivar/Aprobar) | 5.78 | ✅ |
++| `#A23429` / blanco (Deuda vencida, KPI malo) | 6.86 | ✅ |
++| blanco / `#4BB387` · `#F37365` · `#F9D03D` | 2.59 · 2.82 · 1.49 | ❌ (por eso solo se usan como fondo/acento, nunca con texto blanco) |
++
++Los tonos nuevos son algo más claros que los anteriores (`#1F6B4B`, `#B3362A`, `#7A5B00`) pero siguen sobre el umbral en todos los pares de uso.
++
++## Verificación realizada y sus límites
++
++| Verificación | Resultado |
++|---|---|
++| `node --test tests/*.test.js` | **143 pasan, 0 fallan, 57 omitidas** (integración: requieren PostgreSQL real). Base previa: 140 pasan. |
++| Prueba de la raíz, con mutación | Revertida a `/admisiones` → falla; con `/admin` → pasa. |
++| `tsc` estricto sobre `frontend/src/**` (todas las reglas de `tsconfig.json`) | **0 errores**; se comprobó con un error inyectado que el chequeo detecta fallos. **0 usos de `any`.** |
++| Barrido de residuos MSSQL (`mssql`, `@p1`, `GETDATE`, `TOP n`, `[dbo]`, `NVARCHAR`, `ISNULL`, …) | Ninguno en código; solo tests/comentarios que afirman su ausencia. |
++
++**Lo que NO se pudo comprobar (importante):**
++- **`public/` NO se regeneró.** El registro de npm responde 403 desde el proxy de este entorno: no se pudo instalar Tailwind/Vite ni ejecutar `vite build`. Hasta recompilar, el panel servido sigue mostrando los colores y botones anteriores. **La redirección `/` → `/admin` sí es efectiva al aplicar el patch (no depende del build).**
++- `vite.config.ts` no se pudo tipar aquí (necesita `vite` y `@types/node`); el cambio es mínimo y se revisó a mano. Lo cubrirá `npm run frontend:build` (`tsc --noEmit && vite build`).
++- No hay prueba HTTP con Express real (no instalable aquí): la prueba nueva ejecuta el `app.js` real con un `express` simulado. Tampoco hubo revisión visual en navegador.
++
++## Cómo aplicar
++
++```bash
++git checkout development && git pull          # debe incluir bed0cde
++git am bma-colores-redireccion.patch          # o: git apply bma-colores-redireccion.patch
++npm test
++npm run frontend:install && npm run frontend:build   # regenera public/ (hashes nuevos)
++git add public && git commit -m "build: recompila frontend con paleta BMA auditada"
++```
+diff --git a/app.js b/app.js
+index 959d600..4b0729d 100644
+--- a/app.js
++++ b/app.js
+@@ -28,7 +28,9 @@ function crearApp() {
+   app.use('/admin', express.static(path.join(pub, 'admin')));
+   app.use('/admisiones', express.static(path.join(pub, 'admisiones')));
+   app.get('/portal/:token', (_req, res) => res.sendFile(path.join(pub, 'portal', 'index.html')));
+-  app.get('/', (_req, res) => res.redirect('/admisiones'));
++  // Raíz → panel administrativo. `app.get('/')` solo casa con la ruta exacta «/»: no toca /assets/*, /admin/*, /admisiones/* ni /portal/:token.
++  // 302 (res.redirect por defecto) a propósito: un 301 queda en caché del navegador de forma indefinida y no se podría reapuntar la raíz después.
++  app.get('/', (_req, res) => res.redirect('/admin'));
+ 
+   app.use(notFound);
+   app.use(errorHandler);
+diff --git a/frontend/index.html b/frontend/index.html
+deleted file mode 100644
+index 27ca036..0000000
+--- a/frontend/index.html
++++ /dev/null
+@@ -1,19 +0,0 @@
+-<!doctype html>
+-<html lang="es">
+-  <head>
+-    <meta charset="utf-8" />
+-    <meta name="viewport" content="width=device-width,initial-scale=1" />
+-    <title>BMA · Índice de desarrollo</title>
+-  </head>
+-  <body>
+-    <!-- Solo para `vite dev`: no forma parte del build (ver build.rollupOptions.input). -->
+-    <main style="font-family: system-ui, sans-serif; margin: 2rem auto; max-width: 32rem">
+-      <h1>Brilliant Minds Academy · interfaces</h1>
+-      <ul>
+-        <li><a href="/admisiones/">Admisiones públicas</a></li>
+-        <li><a href="/admin/">Panel administrativo</a></li>
+-        <li><a href="/portal/?token=TOKEN_DE_PRUEBA">Portal del representante (pasa ?token=… en desarrollo)</a></li>
+-      </ul>
+-    </main>
+-  </body>
+-</html>
+diff --git a/frontend/src/admin.ts b/frontend/src/admin.ts
+index cb80b49..2f55e12 100644
+--- a/frontend/src/admin.ts
++++ b/frontend/src/admin.ts
+@@ -432,7 +432,7 @@ function tarjetaKpi(k: TarjetaKpi): HtmlSeguro {
+       <h3 class="text-sm font-medium text-slate-600">${k.titulo}</h3>
+       <span class="flex h-8 w-8 items-center justify-center rounded-lg bg-slate-100 text-slate-700">${icono(k.icono, 'h-4 w-4')}</span>
+     </div>
+-    <p class="mt-3 text-2xl font-bold ${k.tono === 'malo' ? 'text-red-800' : 'text-slate-900'}" data-kpi>${k.valor}</p>
++    <p class="mt-3 text-2xl font-bold ${k.tono === 'malo' ? 'text-bma-coral-oscuro' : 'text-slate-900'}" data-kpi>${k.valor}</p>
+     <p class="mt-1 text-xs text-slate-600">${k.detalle}</p>
+   </article>`;
+ }
+@@ -551,8 +551,8 @@ function filaEstudiante(s: EstudianteListado): HtmlSeguro {
+     <td class="${CLS.td}">${etiquetaEstado(s.estado_dinamico)}</td>
+     <td class="${CLS.td} whitespace-nowrap">${usd(s.deuda_vencida_usd)}</td>
+     <td class="${CLS.td}"><div class="flex flex-wrap gap-2">
+-      <button type="button" data-alerta="preventiva" data-id="${s.id}" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">Preventiva</button>
+-      <button type="button" data-alerta="morosidad" data-id="${s.id}" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">Morosidad</button>
++      <button type="button" data-alerta="preventiva" data-id="${s.id}" class="${boton(CLS.btnPrimario, CLS.btnPeq)}">Preventiva</button>
++      <button type="button" data-alerta="morosidad" data-id="${s.id}" class="${boton(CLS.btnPrimario, CLS.btnPeq)}">Morosidad</button>
+     </div></td>
+   </tr>`;
+ }
+diff --git a/frontend/src/estudiantes-detalle.ts b/frontend/src/estudiantes-detalle.ts
+index d0d97ca..12f3279 100644
+--- a/frontend/src/estudiantes-detalle.ts
++++ b/frontend/src/estudiantes-detalle.ts
+@@ -293,7 +293,7 @@ function cabecera(d: DetalleEstudiante): HtmlSeguro {
+       <button type="button" data-accion="volver" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'mb-3')}">${icono('back', 'h-4 w-4')}<span>Volver al listado</span></button>
+       <h1 id="ficha-titulo" tabindex="-1" class="${CLS.titulo} break-words">${d.apellidos}, ${d.nombres}</h1>
+       <p class="${CLS.subtitulo} flex flex-wrap items-center gap-2">${etiquetaEstado(d.estado_dinamico)}<span>${d.grado_solicitado}</span>
+-        ${d.deuda_vencida_usd > 0 ? html`<span class="font-semibold text-red-800">Deuda vencida: ${usd(d.deuda_vencida_usd)}</span>` : null}</p>
++        ${d.deuda_vencida_usd > 0 ? html`<span class="font-semibold text-bma-coral-oscuro">Deuda vencida: ${usd(d.deuda_vencida_usd)}</span>` : null}</p>
+     </div>
+     <div class="flex flex-wrap gap-2" role="group" aria-label="Acciones sobre el estudiante">
+       ${retirado
+diff --git a/frontend/tailwind.config.js b/frontend/tailwind.config.js
+index 395f9db..1bfcb8d 100644
+--- a/frontend/tailwind.config.js
++++ b/frontend/tailwind.config.js
+@@ -5,20 +5,22 @@ export default {
+     extend: {
+       // Identidad visual de Brilliant Minds Academy (logotipo oficial + paleta corporativa).
+       // Uso: bg-bma-azul, text-bma-purpura, border-bma-coral, ring-bma-azul, etc.
+-      // Cada color expone además `suave` (fondo tenue para estados) y `oscuro` (texto/hover con contraste AA sobre blanco):
+-      //   · #0073BB (azul) y #8C59A4 (púrpura) admiten texto blanco encima (≥ 4.5:1).
+-      //   · #4BB387 (verde), #F37365 (coral) y #F9D03D (amarillo) NO alcanzan 4.5:1 con texto blanco: úsalos como
+-      //     fondo/acento con texto oscuro (`text-bma-*-oscuro` o `text-slate-900`), nunca como fondo de texto blanco.
++      // Cada color expone además `suave` (fondo tenue para estados) y `oscuro` (texto/hover con contraste AA sobre su fondo suave):
++      //   · #0073BB (azul) y #8C59A4 (púrpura) admiten texto blanco encima (5.04:1 y 5.15:1).
++      //   · #4BB387 (verde), #F37365 (coral) y #F9D03D (amarillo) NO alcanzan 4.5:1 con texto blanco (2.59 · 2.82 · 1.49):
++      //     úsalos solo como fondo/acento/borde con texto oscuro (`text-bma-*-oscuro`), nunca como fondo de texto blanco.
++      //   · Pares auditados (WCAG 2.1 AA, ≥ 4.5:1): verde-oscuro/verde-suave 5.20 · coral-oscuro/coral-suave 6.01 ·
++      //     amarillo-oscuro/amarillo-suave 5.12 · blanco/coral-oscuro 6.86 · blanco/verde-oscuro 5.78.
+       colors: {
+-        // Acento principal: botones, focos y enlaces.
++        // Acento principal: botones, focos de inputs y enlaces (también botones de WhatsApp).
+         'bma-azul': { DEFAULT: '#0073BB', suave: '#E6F2FA', oscuro: '#005A92' },
+-        // Éxito y estados «Activo».
+-        'bma-verde': { DEFAULT: '#4BB387', suave: '#E8F6F0', oscuro: '#1F6B4B' },
+-        // Alertas de cobro y estados «Moroso».
+-        'bma-coral': { DEFAULT: '#F37365', suave: '#FEECEA', oscuro: '#B3362A' },
+-        // Destellos y avisos de contingencia.
+-        'bma-amarillo': { DEFAULT: '#F9D03D', suave: '#FEF7DC', oscuro: '#7A5B00' },
+-        // Módulos premium y cabeceras de tablas.
++        // Éxito y badges «Activo».
++        'bma-verde': { DEFAULT: '#4BB387', suave: '#E8F6F0', oscuro: '#2A7253' },
++        // Alertas de cobro, badges «Moroso» y botón «Retirar».
++        'bma-coral': { DEFAULT: '#F37365', suave: '#FEECEA', oscuro: '#A23429' },
++        // Avisos de contingencia y advertencias.
++        'bma-amarillo': { DEFAULT: '#F9D03D', suave: '#FEF7DC', oscuro: '#82650C' },
++        // Cabeceras de tablas, candados premium y títulos secundarios.
+         'bma-purpura': { DEFAULT: '#8C59A4', suave: '#F3ECF7', oscuro: '#6B3F82' },
+       },
+     },
+diff --git a/frontend/vite.config.ts b/frontend/vite.config.ts
+index b7c0908..2df00cb 100644
+--- a/frontend/vite.config.ts
++++ b/frontend/vite.config.ts
+@@ -10,15 +10,22 @@ const aqui = fileURLToPath(new URL('.', import.meta.url));
+  * Express (app.js) ya sirve /admin, /admisiones y GET /portal/:token; /assets se sirve con su propio static.
+  */
+ 
+-/** Solo en `vite dev`: replica las rutas de Express (/admin, /admisiones, /portal/:token). */
++/** Solo en `vite dev`: replica las rutas de Express (/ → /admin, /admin, /admisiones, /portal/:token). */
+ function rutasDeExpress(): Plugin {
+   return {
+     name: 'bma-rutas-express',
+     configureServer(servidor) {
+-      servidor.middlewares.use((req, _res, next) => {
++      servidor.middlewares.use((req, res, next) => {
+         const url = req.url ?? '/';
+         const ruta = url.split('?')[0] ?? '/';
+         const consulta = url.slice(ruta.length);
++        if (ruta === '/') {
++          // Igual que app.js: la raíz entrega el panel (ya no existe un índice temporal con enlaces).
++          res.statusCode = 302;
++          res.setHeader('Location', '/admin/');
++          res.end();
++          return;
++        }
+         if (ruta === '/admin' || ruta === '/admisiones') req.url = `${ruta}/${consulta}`;
+         else if (ruta.startsWith('/portal/') && ruta !== '/portal/index.html') req.url = `/portal/index.html${consulta}`;
+         next();
+diff --git a/tests/raiz-redireccion.test.js b/tests/raiz-redireccion.test.js
+new file mode 100644
+index 0000000..b1ee0b7
+--- /dev/null
++++ b/tests/raiz-redireccion.test.js
+@@ -0,0 +1,91 @@
++'use strict';
++/**
++ * Contrato de la ruta raíz «/» (entrega profesional de Brilliant Minds Academy).
++ *
++ * Ejecuta el `app.js` REAL con un `express` simulado que solo registra lo que la app monta: así se verifica, sin red ni
++ * dependencias instaladas, que
++ *   1. «/» redirige al panel (`/admin`) y ya no sirve ningún índice temporal;
++ *   2. la redirección no interfiere con los recursos estáticos (`/assets`) ni con el formulario público (`/admisiones`);
++ *   3. el índice de desarrollo con viñetas (`frontend/index.html`) fue eliminado.
++ * La semántica de coincidencia exacta de `app.get('/')` es la documentada de Express (no coincide con `/assets/x.js`).
++ */
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const fs = require('node:fs');
++const path = require('node:path');
++const Module = require('node:module');
++require('./helpers/entorno');
++
++const raiz = path.join(__dirname, '..');
++
++function expressSimulado() {
++  const rutasGet = [];
++  const montajes = [];
++  const app = {
++    disable() {},
++    set() {},
++    use(...args) { montajes.push(args); },
++    get(ruta, ...manejadores) { rutasGet.push({ ruta, manejadores }); },
++  };
++  const fabrica = () => app;
++  fabrica.json = () => function json() {};
++  fabrica.static = (dir, opciones) => ({ tipo: 'static', dir, opciones });
++  return { fabrica, rutasGet, montajes };
++}
++
++function cargarApp() {
++  const sim = expressSimulado();
++  const cargaPrevia = Module._load;
++  Module._load = function cargar(request, ...resto) {
++    if (request === 'express') return sim.fabrica;
++    if (request === './routes') return { api: function api() {}, fachada: function fachada() {} };
++    return cargaPrevia.call(this, request, ...resto);
++  };
++  try {
++    const ruta = require.resolve('../app');
++    delete require.cache[ruta];
++    const { crearApp } = require('../app');
++    crearApp();
++  } finally {
++    Module._load = cargaPrevia;
++  }
++  return sim;
++}
++
++test('GET / redirige al panel administrativo (/admin) y no encadena otro manejador', () => {
++  const { rutasGet } = cargarApp();
++  const raizGet = rutasGet.filter((r) => r.ruta === '/');
++  assert.equal(raizGet.length, 1, 'debe existir exactamente una ruta GET «/»');
++  assert.equal(raizGet[0].manejadores.length, 1);
++
++  const llamadas = [];
++  const res = { redirect: (...args) => { llamadas.push(args); } };
++  raizGet[0].manejadores[0]({}, res, () => assert.fail('«/» no debe delegar con next()'));
++  // Un solo argumento → Express usa 302 (no 301): la raíz se puede reapuntar sin que el navegador la fije en caché.
++  assert.deepEqual(llamadas, [['/admin']]);
++});
++
++test('la raíz no interfiere con /assets, /admin, /admisiones ni /portal/:token', () => {
++  const { rutasGet, montajes } = cargarApp();
++
++  // Las únicas rutas GET directas son «/» y el portal por token: ningún comodín que pueda tragarse /assets/* o /admisiones/*.
++  assert.deepEqual(rutasGet.map((r) => r.ruta).sort(), ['/', '/portal/:token']);
++
++  const estaticos = montajes
++    .filter((a) => a[0] !== '/api' && a[0] !== '/ir' && a[1] && a[1].tipo === 'static')
++    .map((a) => ({ ruta: a[0], dir: path.relative(raiz, a[1].dir), opciones: a[1].opciones }));
++  const porRuta = Object.fromEntries(estaticos.map((e) => [e.ruta, e]));
++
++  assert.equal(porRuta['/assets'].dir, path.join('public', 'assets'));
++  assert.equal(porRuta['/assets'].opciones.immutable, true);
++  assert.equal(porRuta['/assets'].opciones.index, false, '/assets nunca debe listar ni servir index');
++  assert.equal(porRuta['/admin'].dir, path.join('public', 'admin'));
++  assert.equal(porRuta['/admisiones'].dir, path.join('public', 'admisiones'), 'el formulario público sigue servido tal cual');
++});
++
++test('el índice temporal de desarrollo con viñetas fue eliminado', () => {
++  assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'index.html')), false);
++  // El build nunca lo incluyó como entrada: las únicas son los tres cascarones (admin, admisiones, portal).
++  const vite = fs.readFileSync(path.join(raiz, 'frontend', 'vite.config.ts'), 'utf8');
++  assert.doesNotMatch(vite, /resolve\(aqui,\s*['"]index\.html['"]\)/);
++});
+-- 
+2.43.0
+

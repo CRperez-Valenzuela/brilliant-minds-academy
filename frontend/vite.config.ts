@@ -10,15 +10,22 @@ const aqui = fileURLToPath(new URL('.', import.meta.url));
  * Express (app.js) ya sirve /admin, /admisiones y GET /portal/:token; /assets se sirve con su propio static.
  */
 
-/** Solo en `vite dev`: replica las rutas de Express (/admin, /admisiones, /portal/:token). */
+/** Solo en `vite dev`: replica las rutas de Express (/ → /admin, /admin, /admisiones, /portal/:token). */
 function rutasDeExpress(): Plugin {
   return {
     name: 'bma-rutas-express',
     configureServer(servidor) {
-      servidor.middlewares.use((req, _res, next) => {
+      servidor.middlewares.use((req, res, next) => {
         const url = req.url ?? '/';
         const ruta = url.split('?')[0] ?? '/';
         const consulta = url.slice(ruta.length);
+        if (ruta === '/') {
+          // Igual que app.js: la raíz entrega el panel (ya no existe un índice temporal con enlaces).
+          res.statusCode = 302;
+          res.setHeader('Location', '/admin/');
+          res.end();
+          return;
+        }
         if (ruta === '/admin' || ruta === '/admisiones') req.url = `${ruta}/${consulta}`;
         else if (ruta.startsWith('/portal/') && ruta !== '/portal/index.html') req.url = `/portal/index.html${consulta}`;
         next();
