@@ -1,6 +1,9 @@
 /**
  * Sistema de diseño neutro (Slate). Reglas:
- *  - Glassmorphism sobrio: TODAS las superficies de contenido usan `bg-white/90` o `bg-white/95` (opacidad ≥ 86 %), borde slate-200 y blur suave.
+ *  - Panel administrativo: el lienzo es el azul institucional (`bg-bma-azul`, ver styles/main.css) y NINGÚN texto va directamente sobre él:
+ *    todo el contenido flota sobre superficies claras (el contenedor central `bg-slate-50/95` y tarjetas `bg-white` sólidas), de modo que
+ *    el contraste de lectura sea el de texto oscuro sobre claro (WCAG 2.1 AA) y no el del azul de fondo (texto oscuro sobre #0073BB = 3.6:1).
+ *  - Cristal (`bg-white/90`–`/95` + blur): solo la tarjeta del login, la planilla pública y el portal, donde sí hay un fondo que se transparenta.
  *    Excepciones deliberadas: (1) la capa del Candado Premium usa `bg-white/80` + `backdrop-blur-md`, tal como pide la especificación
  *    (el texto va dentro de una tarjeta `bg-white/95`); (2) el telón oscuro detrás de los diálogos (`backdrop:bg-slate-900/60`);
  *    (3) tintes `/30` de borde y anillo en etiquetas/avisos, que no son superficies.
@@ -11,14 +14,19 @@ import { HtmlSeguro, esc, html, montar } from './html';
 import { icono } from './icons';
 
 export const CLS = {
-  tarjeta: 'rounded-xl border border-slate-200 bg-white/90 shadow-sm backdrop-blur',
+  /** Superficie sólida (KPI, tablas, formularios del panel): flota sobre el contenedor central, nunca sobre el azul. */
+  tarjeta: 'rounded-xl border border-slate-200 bg-white shadow-sm',
   tarjetaCristal: 'rounded-xl border border-slate-200 bg-white/95 shadow-lg backdrop-blur',
+  /** Tarjeta flotante del login: cristal esmerilado sobre el azul institucional. */
+  loginTarjeta: 'w-full max-w-md rounded-2xl border border-white/20 bg-white/90 p-8 shadow-2xl backdrop-blur-md',
   input:
-    'block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 aria-[invalid=true]:border-red-700 aria-[invalid=true]:bg-red-50',
+    'block w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-500 focus:border-bma-azul focus:outline-none focus:ring-2 focus:ring-bma-azul aria-[invalid=true]:border-red-700 aria-[invalid=true]:bg-red-50',
   etiqueta: 'mb-1 block text-sm font-medium text-slate-700',
   ayuda: 'mt-1 text-xs text-slate-600',
   errorCampo: 'mt-1 text-xs font-medium text-red-800',
-  btn: 'inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-60',
+  btn: 'inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold transition duration-200 ease-out disabled:cursor-not-allowed disabled:opacity-60 motion-reduce:transition-none',
+  /** Botón de ingreso del login: bloque sólido a todo el ancho con sombra que se eleva al pasar el cursor. */
+  btnLogin: 'w-full !py-3 text-base shadow-md hover:shadow-lg',
   btnPrimario: 'bg-bma-azul text-white hover:bg-bma-azul-oscuro',
   btnSecundario: 'border border-slate-300 bg-white text-slate-800 hover:bg-slate-50',
   btnPeligro: 'bg-bma-coral-oscuro text-white hover:bg-red-900',

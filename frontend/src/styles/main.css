@@ -11,6 +11,17 @@
     @apply min-h-screen bg-gradient-to-br from-slate-100 via-slate-50 to-slate-200;
   }
 
+  /*
+   * Panel administrativo (frontend/admin/index.html declara <html data-panel="admin">): lienzo en el azul institucional #0073BB,
+   * rígido y sin degradado. Este CSS lo comparten también la planilla pública y el portal, que conservan su lienzo claro: por eso
+   * el azul va atado al atributo y no a `html`/`body` a secas. Regla de legibilidad: NINGÚN texto va directo sobre el azul (texto
+   * oscuro sobre #0073BB da 3.6:1, por debajo de AA); el contenido flota sobre superficies claras (ver styles de lib/ui.ts).
+   */
+  html[data-panel='admin'],
+  html[data-panel='admin'] body {
+    @apply bg-bma-azul bg-none;
+  }
+
   /* Foco visible para teclado en TODO control interactivo (contraste 3:1 mínimo sobre fondos claros). */
   :focus-visible {
     @apply outline-none ring-2 ring-bma-azul ring-offset-2 ring-offset-white;

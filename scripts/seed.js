@@ -26,7 +26,13 @@ const cfg = require('../config/env');
 const { ejecutar, conTransaccion, closePool } = require('../config/db');
 
 const DOMINIO = '@seed.bma.test';
-const SEDES = ['Sede Acarigua', 'Sede Barquisimeto'];
+// Las dos sedes del Core Base. Nombres oficiales y únicos: 'Sede Este' y 'Sede Norte' (UNIQUE sedes.nombre).
+const SEDES = ['Sede Este', 'Sede Norte'];
+// Nombres que tenían estas mismas sedes antes del saneamiento: se renombran en sitio (conservan id y datos) en vez de duplicarse.
+const SEDES_HEREDADAS = [
+  { antes: 'Sede Acarigua', ahora: SEDES[0] },
+  { antes: 'Sede Barquisimeto', ahora: SEDES[1] },
+];
 const TASA_PRUEBA = 36.5; // Bs. por US$ (valor ficticio para las referencias de prueba)
 // Roles de la API REST de Supabase y lecturas de prueba (constantes literales: nada de SQL armado con datos).
 const ROLES_API = { anon: 'SET LOCAL ROLE anon', authenticated: 'SET LOCAL ROLE authenticated' };
@@ -92,16 +98,16 @@ const ALUMNOS = [
 ];
 
 const ADMINS = [
-  { nombre: 'Secretaria Acarigua (prueba)', email: `secretaria.acarigua${DOMINIO}`, rol: 'secretaria', sede: SEDES[0] },
-  { nombre: 'Secretaria Barquisimeto (prueba)', email: `secretaria.barquisimeto${DOMINIO}`, rol: 'secretaria', sede: SEDES[1] },
+  { nombre: 'Secretaria Sede Este (prueba)', email: `secretaria.este${DOMINIO}`, rol: 'secretaria', sede: SEDES[0] },
+  { nombre: 'Secretaria Sede Norte (prueba)', email: `secretaria.norte${DOMINIO}`, rol: 'secretaria', sede: SEDES[1] },
   { nombre: 'SuperAdmin Consolidado (prueba)', email: `superadmin${DOMINIO}`, rol: 'admin', sede: null },
 ];
 
 // detalle (VARCHAR 500) con el MISMO formato tipado que compone frontend/src/configuracion.ts.
 const CUENTAS = [
   { sede: null, metodo: 'PAYPAL', titular: 'Brilliant Minds Academy (prueba)', detalle: `pagos${DOMINIO}` },
-  { sede: SEDES[0], metodo: 'ZELLE', titular: 'BMA Acarigua (prueba)', detalle: `acarigua${DOMINIO}` },
-  { sede: SEDES[1], metodo: 'PAGO_MOVIL', titular: 'BMA Barquisimeto (prueba)', detalle: 'Banco 0102 · Tel 04145559999 · Cédula/RIF J000000000' },
+  { sede: SEDES[0], metodo: 'ZELLE', titular: 'BMA Sede Este (prueba)', detalle: `este${DOMINIO}` },
+  { sede: SEDES[1], metodo: 'PAGO_MOVIL', titular: 'BMA Sede Norte (prueba)', detalle: 'Banco 0102 · Tel 04145559999 · Cédula/RIF J000000000' },
 ];
 
 // ── Utilidades ────────────────────────────────────────────────────────────────────────────────
@@ -200,13 +206,32 @@ async function sembrar(tx, clave) {
   };
 
   // 1) Sedes (UNIQUE sede.nombre)
+  //    Primero se renombran en sitio las sedes con el nombre antiguo (si el nombre nuevo ya existe, no se toca: evita violar UNIQUE),
+  //    y los datos de prueba heredados (usuarios y cuentas del seed anterior) se alinean a los nombres nuevos.
+  for (const { antes, ahora } of SEDES_HEREDADAS) {
+    await ejecutar(
+      'UPDATE sedes SET nombre = $2 WHERE nombre = $1 AND NOT EXISTS (SELECT 1 FROM sedes WHERE nombre = $2)', [antes, ahora], tx);
+  }
+  const RENOMBRES_PRUEBA = [
+    ['UPDATE usuarios_admin SET email = $2 WHERE email = $1 AND NOT EXISTS (SELECT 1 FROM usuarios_admin WHERE email = $2)',
+      `secretaria.acarigua${DOMINIO}`, `secretaria.este${DOMINIO}`],
+    ['UPDATE usuarios_admin SET email = $2 WHERE email = $1 AND NOT EXISTS (SELECT 1 FROM usuarios_admin WHERE email = $2)',
+      `secretaria.barquisimeto${DOMINIO}`, `secretaria.norte${DOMINIO}`],
+    ['UPDATE cuentas_pago SET titular = $2 WHERE titular = $1 AND NOT EXISTS (SELECT 1 FROM cuentas_pago WHERE titular = $2)',
+      'BMA Acarigua (prueba)', 'BMA Sede Este (prueba)'],
+    ['UPDATE cuentas_pago SET titular = $2 WHERE titular = $1 AND NOT EXISTS (SELECT 1 FROM cuentas_pago WHERE titular = $2)',
+      'BMA Barquisimeto (prueba)', 'BMA Sede Norte (prueba)'],
+  ];
+  for (const [texto, antes, ahora] of RENOMBRES_PRUEBA) await ejecutar(texto, [antes, ahora], tx);
   const sedeId = {};
   for (const nombre of SEDES) {
-    const r = await buscarOCrear(tx,
-      'SELECT id FROM sedes WHERE nombre = $1', [nombre],
-      'INSERT INTO sedes (nombre) VALUES ($1) ON CONFLICT (nombre) DO NOTHING RETURNING id', [nombre]);
+    // Upsert: si la sede ya existe se la reafirma (nombre canónico, activa) y se conserva su id; `xmax = 0` distingue INSERT de UPDATE.
+    const r = await uno(
+      `INSERT INTO sedes (nombre) VALUES ($1)
+       ON CONFLICT (nombre) DO UPDATE SET nombre = EXCLUDED.nombre, activa = TRUE
+       RETURNING id, (xmax = 0) AS creada`, [nombre], tx);
     sedeId[nombre] = r.id;
-    contar('sedes', r.creado);
+    contar('sedes', r.creada);
   }
 
   // 2) Usuarios del panel: 2 secretarias (sede fija) + 1 admin consolidado (sede_id NULL). UNIQUE email.
@@ -322,16 +347,16 @@ async function verificar(tx, { estudiantes, sedeId }) {
     [sede, idsPg]);
   const enA = estudiantes.filter((e) => e.sede === SEDES[0]).length;
   const enB = estudiantes.filter((e) => e.sede === SEDES[1]).length;
-  registrar(`secretaria Acarigua ve solo sus ${enA} estudiantes`, (await ver(sedeId[SEDES[0]])) === enA);
-  registrar(`secretaria Barquisimeto ve solo sus ${enB} estudiantes`, (await ver(sedeId[SEDES[1]])) === enB);
+  registrar(`secretaria Sede Este ve solo sus ${enA} estudiantes`, (await ver(sedeId[SEDES[0]])) === enA);
+  registrar(`secretaria Sede Norte ve solo sus ${enB} estudiantes`, (await ver(sedeId[SEDES[1]])) === enB);
   registrar(`consolidado (sede_id NULL) ve los ${ids.length}`, (await ver(null)) === ids.length);
 
   // Cuentas visibles por sede = comunes + propias (misma consulta que parametros.service.cuentasActivas).
   const cuentas = async (sede) => nSede(
     `SELECT COUNT(*)::int AS n FROM cuentas_pago WHERE activa = TRUE AND titular LIKE $2 AND (sede_id IS NULL OR sede_id = $1::int)`,
     [sede, '% (prueba)']);
-  registrar('portal público: sede Acarigua = 1 común + 1 propia', (await cuentas(sedeId[SEDES[0]])) === 2);
-  registrar('portal público: sede Barquisimeto = 1 común + 1 propia', (await cuentas(sedeId[SEDES[1]])) === 2);
+  registrar('portal público: Sede Este = 1 común + 1 propia', (await cuentas(sedeId[SEDES[0]])) === 2);
+  registrar('portal público: Sede Norte = 1 común + 1 propia', (await cuentas(sedeId[SEDES[1]])) === 2);
   registrar('sin invitación (sede NULL) solo las comunes', (await cuentas(null)) === 1);
 
   registrar('usuarios: secretarias con sede y admin consolidado sin sede',

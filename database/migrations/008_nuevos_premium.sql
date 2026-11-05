@@ -3,7 +3,7 @@
 --
 -- 1) Catálogo: dos módulos de pago único. ON CONFLICT DO NOTHING: re-ejecutar jamás pisa un estado "habilitado", una prueba
 --    en curso ni un precio negociado (misma política que 003).
--- 2) Regla comercial del Core Base: la oferta base incluye hasta DOS (2) sedes (Acarigua y Barquisimeto). La tercera sede solo
+-- 2) Regla comercial del Core Base: la oferta base incluye hasta DOS (2) sedes (Sede Este y Sede Norte). La tercera sede solo
 --    se puede crear si MULTI_SEDE_PREMIUM está habilitado de forma permanente o con una prueba de 15 días vigente
 --    (habilitado = TRUE y expira_prueba_en NULL o futura: misma semántica que modules/premium/guard.js → estadoEfectivo).
 --    El trigger es la garantía definitiva (aplica a cualquier camino: API, scripts, SQL manual); services/sedes.service.js
@@ -19,7 +19,7 @@
 -- ───────────────────────── 1) Módulos premium de la Fase 2 ─────────────────────────
 INSERT INTO modulos_premium (codigo, nombre, descripcion, precio_usd) VALUES
   ('MULTI_SEDE_PREMIUM', 'Expansión Multi-Sede Avanzada (3+ Sedes)',
-   'Habilita la creación de una tercera sede y siguientes. El Core Base incluye dos sedes (Acarigua y Barquisimeto).',     50.00),
+   'Habilita la creación de una tercera sede y siguientes. El Core Base incluye dos sedes (Sede Este y Sede Norte).',     50.00),
   ('FACTURACION_MASIVA', 'Módulo de Facturación Masiva Automatizada',
    'Genera de un solo paso la mensualidad de todos los estudiantes activos (concepto, monto y vencimiento).',              20.00)
 ON CONFLICT (codigo) DO NOTHING;

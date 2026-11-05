@@ -19,7 +19,7 @@ const CATALOGO = Object.freeze([
   { codigo: 'FACTURACION_MASIVA', nombre: 'Módulo de Facturación Masiva Automatizada', precioUsd: 20, vista: 'facturacion-masiva', rutas: ['/api/facturacion/cuotas/generar-mensualidades'] },
 ]);
 
-/** Oferta base (Core Base, US$ 750): hasta dos sedes (Acarigua y Barquisimeto). Desde la tercera se exige MULTI_SEDE_PREMIUM. */
+/** Oferta base (Core Base, US$ 750): hasta dos sedes (Sede Este y Sede Norte). Desde la tercera se exige MULTI_SEDE_PREMIUM. */
 const LIMITE_SEDES_BASE = 2;
 const MODULO_MULTI_SEDE = 'MULTI_SEDE_PREMIUM';
 

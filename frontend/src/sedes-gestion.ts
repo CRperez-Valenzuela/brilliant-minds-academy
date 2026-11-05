@@ -4,7 +4,7 @@
  *    o sin sede asignada) ve «Sección Restringida» y NO dispara ninguna petición. El servidor impone la misma regla (`requireConsolidado`).
  *  - GET  /api/sedes → cuadrícula responsiva de tarjetas con el estado operativo de cada sede.
  *  - POST /api/sedes { nombre } → alta. 409 SEDE_DUPLICADA y 422 VALIDACION se pintan junto al campo.
- *  - Core Base: hasta 2 sedes (Acarigua y Barquisimeto). A partir de la 3ª el trigger trg_sedes_limite_base (SQLSTATE BM403) responde
+ *  - Core Base: hasta 2 sedes (Sede Este y Sede Norte). A partir de la 3ª el trigger trg_sedes_limite_base (SQLSTATE BM403) responde
  *    403 MODULO_PREMIUM_DESHABILITADO con { modulo, nombre, precio_usd }: la vista delega en `alBloquear`, que relee el catálogo y pinta
  *    la pantalla de cristal de lib/candado.ts con el precio vigente (US$ 50.00 por defecto) y, si aún aplica, la prueba gratuita.
  *
@@ -47,7 +47,7 @@ export interface ResultadoNombreSede {
 /** Misma regla que el servidor (nombre obligatorio, ≤ 120). Los espacios repetidos se colapsan para evitar duplicados «fantasma». */
 export function validarNombreSede(texto: string): ResultadoNombreSede {
   const nombre = texto.trim().replace(/\s+/g, ' ');
-  if (nombre === '') return { error: 'Escribe el nombre de la sede, por ejemplo «Sede Acarigua».', nombre: null };
+  if (nombre === '') return { error: 'Escribe el nombre de la sede, por ejemplo «Sede Este».', nombre: null };
   if (nombre.length > MAX_NOMBRE) return { error: `El nombre admite hasta ${MAX_NOMBRE} caracteres.`, nombre: null };
   return { error: null, nombre };
 }
@@ -102,7 +102,7 @@ function formularioHtml(sedes: readonly SedeResumen[]): HtmlSeguro {
     <form id="form-sede" novalidate class="flex flex-col gap-4 sm:flex-row sm:items-start" aria-label="Crear sede">
       <div class="min-w-0 flex-1">
         <label for="f-sede-nombre" class="${CLS.etiqueta}">Nombre de la sede <span class="text-red-800" aria-hidden="true">*</span></label>
-        <input id="f-sede-nombre" name="nombre" type="text" maxlength="${MAX_NOMBRE}" required autocomplete="off" placeholder="Sede Acarigua" aria-describedby="e-sede-nombre" class="${CLS.input} min-h-10">
+        <input id="f-sede-nombre" name="nombre" type="text" maxlength="${MAX_NOMBRE}" required autocomplete="off" placeholder="Sede Este" aria-describedby="e-sede-nombre" class="${CLS.input} min-h-10">
         <p id="e-sede-nombre" data-error="nombre" role="alert" hidden class="${CLS.errorCampo}"></p>
       </div>
       <button type="submit" class="${boton(CLS.btnPrimario, 'min-h-10 sm:mt-6')}">${icono('check', 'h-4 w-4')}<span>Crear sede</span></button>

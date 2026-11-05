@@ -18,7 +18,7 @@ import { vistaFacturacionMasiva } from './facturacion-masiva';
 import { vistaConfiguracion } from './configuracion';
 import { vistaSedesGestion } from './sedes-gestion';
 import { vistaInvitaciones } from './invitaciones-modulo';
-import { montarAnimacionLogin } from './login-animation';
+import { logoCompletoHtml, isotipoHtml } from './lib/marca';
 import type {
   AlertaWhatsapp,
   BalanceContable,
@@ -169,27 +169,28 @@ function mostrarLogin(mensaje?: string): void {
   document.body.className = 'text-slate-900';
   montar(
     obtener('#app', HTMLElement),
-    html`<main class="mx-auto flex min-h-screen max-w-md flex-col justify-center gap-6 px-4 py-12">
-      <div id="login-logo" class="w-full"></div>
-      <div class="text-center">
-        <h1 class="${CLS.titulo}">Brilliant Minds Academy</h1>
-        <p class="${CLS.subtitulo}">Panel administrativo</p>
-      </div>
-      <form id="login" novalidate class="${CLS.tarjetaCristal} flex flex-col gap-4 p-6" aria-label="Iniciar sesión">
-        <div id="login-aviso">${mensaje ? aviso('warn', mensaje) : null}</div>
-        <div>
-          <label for="login-email" class="${CLS.etiqueta}">Correo</label>
-          <input id="login-email" name="email" type="email" required autocomplete="username" class="${CLS.input}">
-        </div>
-        <div>
-          <label for="login-password" class="${CLS.etiqueta}">Contraseña</label>
-          <input id="login-password" name="password" type="password" required autocomplete="current-password" class="${CLS.input}">
-        </div>
-        <button type="submit" class="${boton(CLS.btnPrimario, 'w-full')}"><span>Entrar</span></button>
-      </form>
+    html`<main class="flex min-h-screen items-center justify-center bg-bma-azul px-4 py-12">
+      <section class="${CLS.loginTarjeta}" aria-labelledby="login-titulo">
+        <header class="mb-8 flex flex-col items-center text-center">
+          ${logoCompletoHtml('h-auto w-48 sm:w-56', true)}
+          <h1 id="login-titulo" class="sr-only">Brilliant Minds Academy · Panel administrativo</h1>
+          <p class="mt-3 text-sm font-medium text-slate-700">Panel administrativo</p>
+        </header>
+        <form id="login" novalidate class="flex flex-col gap-4" aria-labelledby="login-titulo">
+          <div id="login-aviso">${mensaje ? aviso('warn', mensaje) : null}</div>
+          <div>
+            <label for="login-email" class="${CLS.etiqueta}">Correo</label>
+            <input id="login-email" name="email" type="email" required autocomplete="username" class="${CLS.input}">
+          </div>
+          <div>
+            <label for="login-password" class="${CLS.etiqueta}">Contraseña</label>
+            <input id="login-password" name="password" type="password" required autocomplete="current-password" class="${CLS.input}">
+          </div>
+          <button type="submit" class="${boton(CLS.btnPrimario, CLS.btnLogin)}"><span>Entrar</span></button>
+        </form>
+      </section>
     </main>`,
   );
-  void montarAnimacionLogin(obtener('#login-logo', HTMLElement));
   const form = obtener('#login', HTMLFormElement);
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
@@ -228,7 +229,7 @@ function cerrarSesion(mensaje?: string): void {
 function itemNav(opciones: { readonly id: string; readonly titulo: string; readonly icono: NombreIcono; readonly tooltip: string; readonly bloqueado: boolean }): HtmlSeguro {
   const { id, titulo, tooltip, bloqueado } = opciones;
   return html`<button type="button" data-nav="${id}" data-bloqueado="${bloqueado}"
-    class="group/item relative flex h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 aria-[current=page]:bg-slate-900 aria-[current=page]:text-white group-data-[collapsed=true]/sb:justify-center group-data-[collapsed=true]/sb:px-0">
+    class="group/item relative flex h-10 w-full items-center gap-3 rounded-lg px-3 text-left text-sm font-medium text-slate-700 transition-colors hover:bg-slate-100 aria-[current=page]:bg-bma-azul aria-[current=page]:text-white group-data-[collapsed=true]/sb:justify-center group-data-[collapsed=true]/sb:px-0">
     ${icono(opciones.icono)}
     <span class="min-w-0 flex-1 truncate group-data-[collapsed=true]/sb:sr-only">${titulo}</span>
     ${bloqueado ? html`<span class="text-slate-500 group-data-[collapsed=true]/sb:absolute group-data-[collapsed=true]/sb:right-2 group-data-[collapsed=true]/sb:top-1">${icono('lock', 'h-4 w-4 group-data-[collapsed=true]/sb:h-3 group-data-[collapsed=true]/sb:w-3')}</span>` : null}
@@ -241,10 +242,11 @@ function shellHtml(): HtmlSeguro {
   const vistas = VISTAS.filter((v) => !v.soloAdmin || esAdmin());
   return html`<div id="shell" data-collapsed="${estado.colapsado}" class="group/sb flex min-h-screen">
     <aside id="barra-lateral" aria-label="Navegación principal"
-      class="sticky top-0 z-30 flex h-screen w-64 shrink-0 flex-col border-r border-slate-200 bg-white/95 backdrop-blur transition-[width] duration-200 group-data-[collapsed=true]/sb:w-20">
-      <div class="flex h-16 items-center gap-3 border-b border-slate-200 px-4 group-data-[collapsed=true]/sb:justify-center">
-        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-white">${icono('school')}</span>
-        <span class="truncate text-sm font-bold text-slate-900 group-data-[collapsed=true]/sb:sr-only">BMA · Administración</span>
+      class="sticky top-0 z-30 flex h-screen w-64 shrink-0 flex-col border-r border-slate-200 bg-white shadow-lg transition-[width] duration-200 group-data-[collapsed=true]/sb:w-20">
+      <div class="flex h-24 items-center justify-center border-b border-slate-200 px-4 group-data-[collapsed=true]/sb:h-16 group-data-[collapsed=true]/sb:px-2">
+        ${logoCompletoHtml('h-auto max-h-20 w-auto max-w-full object-contain group-data-[collapsed=true]/sb:hidden')}
+        ${isotipoHtml('hidden h-10 w-10 object-contain group-data-[collapsed=true]/sb:block')}
+        <span class="sr-only">Administración</span>
       </div>
       <nav class="flex flex-1 flex-col gap-1 p-3" aria-label="Secciones">
         ${vistas.map((v) => itemNav({ id: v.id, titulo: v.titulo, icono: v.icono, tooltip: v.titulo, bloqueado: false }))}
@@ -268,7 +270,7 @@ function shellHtml(): HtmlSeguro {
         </button>
       </div>
     </aside>
-    <main id="contenido" tabindex="-1" class="min-w-0 flex-1 p-4 sm:p-8"></main>
+    <main id="contenido" tabindex="-1" class="m-2 min-w-0 flex-1 rounded-xl bg-slate-50/95 p-4 shadow-lg sm:m-4 sm:p-8"></main>
   </div>`;
 }
 
@@ -866,7 +868,7 @@ function vistaPremium(ctx: Contexto, codigo: string): void {
     <div class="${CLS.tarjeta} flex flex-col gap-4 p-6">
       ${hasta ? aviso('warn', `Prueba gratuita vigente hasta el ${fechaHora(hasta)}. Después de esa fecha el módulo se bloquea automáticamente.`, 'Estás en periodo de prueba') : null}
       ${m.codigo === 'MULTI_SEDE_PREMIUM'
-        ? html`${aviso('info', 'El Core Base incluye dos sedes (Acarigua y Barquisimeto). Con este módulo puedes registrar la tercera sede y las siguientes desde la sección Sedes.', 'Expansión multi-sede habilitada')}
+        ? html`${aviso('info', 'El Core Base incluye dos sedes (Sede Este y Sede Norte). Con este módulo puedes registrar la tercera sede y las siguientes desde la sección Sedes.', 'Expansión multi-sede habilitada')}
           ${esConsolidado()
             ? html`<div><button type="button" id="ir-sedes" class="${boton(CLS.btnPrimario, 'min-h-10')}">${icono('building', 'h-4 w-4')}<span>Ir a Sedes</span></button></div>`
             : null}`
