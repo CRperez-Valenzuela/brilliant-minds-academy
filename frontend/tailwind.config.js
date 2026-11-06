@@ -3,6 +3,12 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,js}"],
   theme: {
     extend: {
+      // Tipografía: Inter (texto) y Outfit (títulos, etiquetas del login y firma). Se cargan desde Google Fonts en admin/index.html;
+      // si no llegan, caen a la pila del sistema sin romper el diseño.
+      fontFamily: {
+        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+        display: ['Outfit', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
+      },
       // Identidad visual de Brilliant Minds Academy (logotipo oficial + paleta corporativa).
       // Uso: bg-bma-azul, text-bma-purpura, border-bma-coral, ring-bma-azul, etc.
       // Cada color expone además `suave` (fondo tenue para estados) y `oscuro` (texto/hover con contraste AA sobre su fondo suave):

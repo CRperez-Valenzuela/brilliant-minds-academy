@@ -50,26 +50,10 @@ const LIMITE_PAGINA = 10;
 const OPCION_OTRO = '__otro__';
 
 /**
- * Niveles ofrecidos en el selector. Es una lista base: ajústala a los niveles reales de la academia; «Otro…» permite escribir uno distinto.
- * El valor elegido viaja como `nivel_asignado` y se convierte en el «Grado a cursar» bloqueado de la planilla pública.
+ * Niveles FIJOS de la Sede Este (Fundalara) ofrecidos en el selector de invitaciones. «Otro…» sigue permitiendo escribir uno distinto.
+ * El valor elegido viaja como `nivel_asignado` y se convierte en el «Nivel a cursar» bloqueado de la planilla pública.
  */
-export const NIVELES: readonly string[] = [
-  'Maternal',
-  'Preescolar 1.er nivel',
-  'Preescolar 2.º nivel',
-  'Preescolar 3.er nivel',
-  '1.er grado',
-  '2.º grado',
-  '3.er grado',
-  '4.º grado',
-  '5.º grado',
-  '6.º grado',
-  '1.er año',
-  '2.º año',
-  '3.er año',
-  '4.º año',
-  '5.º año',
-];
+export const NIVELES: readonly string[] = ['Kids 1 B', 'Kids 1 A', 'Beginner B', 'Beginner A', 'Adultos', 'Kids 1 C', 'Beginner C'];
 
 const FILTROS: readonly ('' | EstadoInvitacion)[] = ['', 'Pendiente', 'Usada', 'Vencida', 'Revocada'];
 
@@ -108,12 +92,12 @@ export function validarInvitacion(e: EntradaInvitacion, alcance: AlcanceUsuario)
   let nivel = '';
   if (e.nivel === OPCION_OTRO) {
     nivel = e.nivelOtro.trim().replace(/\s+/g, ' ');
-    if (nivel === '') errores['nivel_otro'] = 'Escribe el nivel o grado.';
+    if (nivel === '') errores['nivel_otro'] = 'Escribe el nivel.';
     else if (nivel.length > MAX_NIVEL) errores['nivel_otro'] = `El nivel admite hasta ${MAX_NIVEL} caracteres.`;
   } else if (NIVELES.includes(e.nivel)) {
     nivel = e.nivel;
   } else {
-    errores['nivel_asignado'] = 'Elige el nivel o grado asignado.';
+    errores['nivel_asignado'] = 'Elige el nivel asignado.';
   }
 
   const diasTexto = e.dias.trim();
@@ -184,7 +168,7 @@ function formularioHtml(alcance: AlcanceUsuario, sedes: readonly SedeResumen[]):
     <form id="form-inv" novalidate class="grid gap-4 sm:grid-cols-2" aria-label="Emitir invitación">
       ${campoSedeHtml(alcance, sedes)}
       <div>
-        <label for="f-inv-nivel" class="${CLS.etiqueta}">Nivel / grado asignado <span class="text-red-800" aria-hidden="true">*</span></label>
+        <label for="f-inv-nivel" class="${CLS.etiqueta}">Nivel asignado <span class="text-red-800" aria-hidden="true">*</span></label>
         <select id="f-inv-nivel" name="nivel_asignado" required aria-describedby="e-inv-nivel" class="${CLS.input} min-h-10">
           <option value="">Elige un nivel…</option>
           ${NIVELES.map((n) => html`<option value="${n}">${n}</option>`)}

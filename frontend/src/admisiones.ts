@@ -684,7 +684,7 @@ function costoHtml(): HtmlSeguro {
     <p class="mt-4 text-sm text-slate-700">Las cuentas autorizadas y los pasos para pagar están en el <a href="#t-pago" class="font-semibold text-slate-900 underline">paso 5 · Pago de la matrícula</a>.</p>`;
 }
 
-/** Aplica el bloqueo visual del campo «Grado a cursar» con el nivel asignado por la invitación (idempotente). */
+/** Aplica el bloqueo visual del campo «Nivel a cursar» con el nivel asignado por la invitación (idempotente). */
 function aplicarNivelBloqueado(nivel: string): void {
   const control = buscar('#f-grado_solicitado', HTMLInputElement);
   if (!control) return;

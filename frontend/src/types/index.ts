@@ -41,6 +41,9 @@ export interface EstudianteListado extends Estudiante {
   readonly representante: string;
   readonly telefono_representante: string | null;
   readonly cuotas_vencidas: number;
+  /** Sede del estudiante (NULL = sin sede asignada). */
+  readonly sede_id?: number | null;
+  readonly sede?: string | null;
 }
 
 export type TipoCuota = 'MATRICULA' | 'MENSUALIDAD' | 'OTRO';

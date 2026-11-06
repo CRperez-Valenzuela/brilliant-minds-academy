@@ -7,9 +7,12 @@ const { alcanceDe } = require('../utils/alcance');
 const resumen = asyncHandler(async (req, res) => ok(res, await crm.resumen(alcanceDe(req.usuario))));
 
 const listar = asyncHandler(async (req, res) => {
-  const { estado, q } = validar(req.query, { estado: { tipo: 'enum', valores: crm.ESTADOS }, q: { max: 100 } });
+  const { estado, q, sede_id: sedeFiltro } = validar(req.query, {
+    estado: { tipo: 'enum', valores: crm.ESTADOS }, q: { max: 100 }, sede_id: { tipo: 'entero', min: 1 },
+  });
   const pag = paginacion(req.query);
-  const r = await crm.listar({ estado, q, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario) });
+  // El alcance del usuario manda (una secretaria siempre queda atada a su sede); `sede_id` solo acota al acceso consolidado (ver crm.listar).
+  const r = await crm.listar({ estado, q, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario), sedeFiltro: sedeFiltro ?? null });
   ok(res, r.items, 200, { paginacion: { pagina: pag.pagina, limite: pag.limite, total: r.total } });
 });
 

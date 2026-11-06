@@ -622,15 +622,27 @@ t('exportación: cada hoja se lee por lotes con LIMIT/keyset sin perder ni dupli
 });
 
 // ── Candados premium ────────────────────────────────────────────────────────────────────────────
+t('012: precios definitivos (idempotente) y el estado de los módulos no se toca', async () => {
+  const sql = fs.readFileSync(path.join(RAIZ, 'database', 'migrations', '012_ajuste_precios.sql'), 'utf8');
+  await db.ejecutar(`UPDATE modulos_premium SET precio_usd = 999 WHERE codigo IN ('APP_MOVIL', 'IA_ATENCION')`);
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE WHERE codigo = 'APP_MOVIL'`);
+  await db.ejecutarScript(sql);
+  await db.ejecutarScript(sql); // idempotente
+  const f = await filas(`SELECT codigo, precio_usd, habilitado FROM modulos_premium WHERE codigo IN ('APP_MOVIL', 'IA_ATENCION', 'FACHADA_WEB', 'BANCAMIGA', 'WHATSAPP_AUTOMATICO') ORDER BY codigo`);
+  assert.deepEqual(f.map((x) => [x.codigo, x.precio_usd, x.habilitado]), [
+    ['APP_MOVIL', 350, true], ['BANCAMIGA', 250, false], ['FACHADA_WEB', 450, false], ['IA_ATENCION', 150, false], ['WHATSAPP_AUTOMATICO', 50, false]]);
+  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE WHERE codigo = 'APP_MOVIL'`);
+});
+
 t('premium: 7 módulos sembrados y deshabilitados; el guard bloquea con 403 y se abre al habilitar', async () => {
   const todos = await svc.guard.guard.repo.leerTodos();
   assert.deepEqual(todos.map((m) => [m.codigo, m.precio_usd, m.habilitado]), [
-    ['FACTURACION_MASIVA', 20, false], ['MULTI_SEDE_PREMIUM', 50, false], ['WHATSAPP_AUTOMATICO', 150, false], ['IA_ATENCION', 200, false],
-    ['BANCAMIGA', 300, false], ['APP_MOVIL', 450, false], ['FACHADA_WEB', 550, false]]);
+    ['FACTURACION_MASIVA', 20, false], ['MULTI_SEDE_PREMIUM', 50, false], ['WHATSAPP_AUTOMATICO', 50, false], ['IA_ATENCION', 150, false],
+    ['BANCAMIGA', 250, false], ['APP_MOVIL', 350, false], ['FACHADA_WEB', 450, false]]);
   let resultado;
   const g = svc.guard.crearGuard({ ttlMs: 0 });
   await g.requireModulo('BANCAMIGA')({}, {}, (e) => { resultado = e; });
-  assert.deepEqual([resultado.status, resultado.codigo, resultado.detalles.precio_usd], [403, 'MODULO_PREMIUM_DESHABILITADO', 300]);
+  assert.deepEqual([resultado.status, resultado.codigo, resultado.detalles.precio_usd], [403, 'MODULO_PREMIUM_DESHABILITADO', 250]);
   await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'BANCAMIGA'`);
   await g.requireModulo('BANCAMIGA')({}, {}, (e) => { resultado = e; });
   assert.equal(resultado, undefined);
@@ -777,6 +789,11 @@ t('multi-sede: CRM, tablero, cuotas y mensualidades se filtran por sede; sede NU
   assert.deepEqual(await nombresDe(sedeB), ['IsoB', 'IsoC']);
   assert.deepEqual(await nombresDe(null), ['IsoA', 'IsoB', 'IsoC', 'IsoG']);
   assert.equal((await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId: sedeA })).total, 1, 'el conteo respeta la sede');
+  // Filtro por tarjeta de sede (consolidado): acota; el alcance de un usuario de sede manda y `sedeFiltro` jamás lo ensancha.
+  const filtrados = (await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId: null, sedeFiltro: sedeB })).items;
+  assert.deepEqual(filtrados.map((x) => x.nombres).sort(), ['IsoB', 'IsoC']);
+  assert.ok(filtrados.every((x) => x.sede_id === sedeB && typeof x.sede === 'string'), 'cada fila trae sede_id y el nombre de la sede');
+  assert.deepEqual((await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId: sedeA, sedeFiltro: sedeB })).items.map((x) => x.nombres), ['IsoA']);
 
   assert.equal((await svc.crm.resumen(sedeA)).morosos, 1);
   assert.equal((await svc.crm.resumen(sedeB)).morosos, 1);

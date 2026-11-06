@@ -22,19 +22,22 @@ async function resumen(sedeId = null) {
   };
 }
 
-async function listar({ estado, q, offset, limite, sedeId = null }) {
+async function listar({ estado, q, offset, limite, sedeId = null, sedeFiltro = null }) {
+  // `sedeId` es el alcance del usuario (entero = atado a esa sede; NULL = consolidado). `sedeFiltro` solo acota al consolidado: nunca ensancha a nadie.
+  const sedeEfectiva = sedeId ?? sedeFiltro;
   // Escapa los comodines de LIKE (\ % _) y busca sin distinguir mayúsculas (ILIKE; el esquema anterior era insensible por colación).
   const busqueda = q ? `%${q.replace(/[\\%_]/g, '\\$&')}%` : null;
-  const filtroParams = [estado || null, busqueda, sedeId];
+  const filtroParams = [estado || null, busqueda, sedeEfectiva];
   const filtro = `WHERE ($1::text IS NULL OR v.estado_dinamico = $1::text)
                     AND ($2::text IS NULL OR v.nombres ILIKE $2::text OR v.apellidos ILIKE $2::text OR r.cedula ILIKE $2::text OR r.apellidos ILIKE $2::text)
                     AND ($3::int IS NULL OR v.sede_id = $3::int)`;
   const [items, total] = await Promise.all([
     ejecutar(
       `SELECT v.id, v.nombres, v.apellidos, v.grado_solicitado, v.estado_dinamico, v.estatus_pago, v.cuotas_vencidas, v.deuda_vencida_usd,
-              v.proximo_vencimiento,
+              v.proximo_vencimiento, v.sede_id, s.nombre AS sede,
               r.id AS representante_id, r.nombres || ' ' || r.apellidos AS representante, r.telefono AS telefono_representante
        FROM vw_estudiantes_estado v JOIN representantes r ON r.id = v.representante_id
+       LEFT JOIN sedes s ON s.id = v.sede_id
        ${filtro}
        ORDER BY v.apellidos, v.nombres, v.id
        LIMIT $4 OFFSET $5`, [...filtroParams, limite, offset]),

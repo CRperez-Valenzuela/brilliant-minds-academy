@@ -7,7 +7,7 @@
  *  - Candado Premium: los módulos de Fase 2 deshabilitados interceptan el clic y muestran una capa de cristal.
  */
 import './styles/main.css';
-import { bma, BmaApiError, BmaRedError, BmaSesionExpiradaError, mensajeDeError, sesion } from './api/bmaClient';
+import { bma, BmaApiError, BmaRedError, BmaSesionExpiradaError, mensajeDeError, sesion, type Pagina } from './api/bmaClient';
 import { html, montar, raw, urlSegura, type HtmlSeguro } from './lib/html';
 import { icono, type NombreIcono } from './lib/icons';
 import { bs, diasDelPeriodo, fechaCorta, fechaHora, horaConSegundos, nombreMetodo, periodoActual, tasa as formatoTasa, usd } from './lib/format';
@@ -19,6 +19,12 @@ import { vistaConfiguracion } from './configuracion';
 import { vistaSedesGestion } from './sedes-gestion';
 import { vistaInvitaciones } from './invitaciones-modulo';
 import { logoCompletoHtml, isotipoHtml } from './lib/marca';
+import { cargarConCache, invalidarCache, type Guarda } from './lib/cache';
+import { esqueletoPara } from './lib/esqueleto';
+import { montarRedNeuronal } from './lib/red-neuronal';
+import { firmaLogin, firmaSidebar } from './lib/firma';
+import { CLAVE_SEDES, esListaSedes } from './lib/sedes-cache';
+import { alcanceDe } from './lib/alcance';
 import type {
   AlertaWhatsapp,
   BalanceContable,
@@ -31,6 +37,7 @@ import type {
   ModuloPremium,
   Paginacion,
   ReferenciaAuditoria,
+  SedeResumen,
   RespuestaLogin,
   RespuestaMe,
   RespuestaPrueba,
@@ -48,6 +55,11 @@ const CLAVE_SIDEBAR = 'bma.sidebar.colapsado';
 const REFRESCO_TABLERO_MS = 30_000;
 const LIMITE_PAGINA = 25;
 const MAX_NOTA = 300;
+/**
+ * Módulo de Egresos (nómina, personal, balance): INACTIVO hasta que la academia necesite controlar la nómina. Mientras sea `false` no aparece
+ * en la barra lateral y su ruta de navegación cae al Dashboard. El backend (`/api/contabilidad`) se conserva intacto; reactivarlo es cambiar esta constante.
+ */
+const MODULO_EGRESOS_ACTIVO: boolean = false;
 
 interface DefVista {
   readonly id: VistaAdmin;
@@ -64,7 +76,7 @@ const VISTAS: readonly DefVista[] = [
   // «Invitaciones» la usa también la secretaria, limitada a su sede.
   { id: 'sedes', titulo: 'Sedes', icono: 'building', soloAdmin: false },
   { id: 'invitaciones', titulo: 'Invitaciones', icono: 'link', soloAdmin: false },
-  { id: 'contabilidad', titulo: 'Contabilidad', icono: 'book', soloAdmin: true },
+  { id: 'contabilidad', titulo: 'Egresos y contabilidad', icono: 'book', soloAdmin: true },
   { id: 'configuracion', titulo: 'Configuración de cobro', icono: 'wallet', soloAdmin: true },
 ];
 
@@ -91,6 +103,8 @@ interface EstadoAdmin {
   readonly periodo: string;
   readonly filtroEstudiantes: FiltroEstudiantes;
   readonly paginaEstudiantes: number;
+  /** Sede elegida (tarjeta de Sedes o selector) para filtrar el CRM; null = todas. Solo el acceso consolidado puede fijarla. */
+  readonly sedeFiltro: number | null;
   readonly filtroAuditoria: EstadoPagoReferencia;
   readonly paginaAuditoria: number;
 }
@@ -103,6 +117,7 @@ let estado: EstadoAdmin = {
   periodo: periodoActual(),
   filtroEstudiantes: '',
   paginaEstudiantes: 1,
+  sedeFiltro: null,
   filtroAuditoria: 'Por Validar',
   paginaAuditoria: 1,
 };
@@ -161,36 +176,52 @@ function usuarioGuardado(): Usuario | null {
 
 const esAdmin = (): boolean => estado.usuario?.rol === 'admin';
 
+/** Vistas que el usuario ve en el menú y a las que puede navegar (Egresos oculto mientras el módulo esté inactivo). */
+function vistasVisibles(): readonly DefVista[] {
+  return VISTAS.filter((v) => (!v.soloAdmin || esAdmin()) && (v.id !== 'contabilidad' || MODULO_EGRESOS_ACTIVO));
+}
+
 // ───────────────────────── Login ─────────────────────────
+
+let detenerRed: (() => void) | null = null;
+
+function liberarRed(): void {
+  detenerRed?.();
+  detenerRed = null;
+}
 
 function mostrarLogin(mensaje?: string): void {
   detenerTablero();
+  liberarRed();
   ticketVista += 1;
   document.body.className = 'text-slate-900';
   montar(
     obtener('#app', HTMLElement),
-    html`<main class="flex min-h-screen items-center justify-center bg-bma-azul px-4 py-12">
-      <section class="${CLS.loginTarjeta}" aria-labelledby="login-titulo">
+    html`<main class="relative flex min-h-screen items-center justify-center overflow-hidden bg-bma-azul px-4 py-12">
+      <canvas id="red-neuronal" aria-hidden="true" class="pointer-events-none absolute inset-0 h-full w-full"></canvas>
+      <section class="${CLS.loginTarjeta} relative z-10" aria-labelledby="login-titulo">
         <header class="mb-8 flex flex-col items-center text-center">
           ${logoCompletoHtml('h-auto w-48 sm:w-56', true)}
           <h1 id="login-titulo" class="sr-only">Brilliant Minds Academy · Panel administrativo</h1>
-          <p class="mt-3 text-sm font-medium text-slate-700">Panel administrativo</p>
+          <p class="mt-3 font-display text-sm font-medium tracking-wide text-slate-700">Panel administrativo</p>
         </header>
         <form id="login" novalidate class="flex flex-col gap-4" aria-labelledby="login-titulo">
           <div id="login-aviso">${mensaje ? aviso('warn', mensaje) : null}</div>
           <div>
-            <label for="login-email" class="${CLS.etiqueta}">Correo</label>
+            <label for="login-email" class="${CLS.etiqueta} font-display tracking-wide">Correo</label>
             <input id="login-email" name="email" type="email" required autocomplete="username" class="${CLS.input}">
           </div>
           <div>
-            <label for="login-password" class="${CLS.etiqueta}">Contraseña</label>
+            <label for="login-password" class="${CLS.etiqueta} font-display tracking-wide">Contraseña</label>
             <input id="login-password" name="password" type="password" required autocomplete="current-password" class="${CLS.input}">
           </div>
-          <button type="submit" class="${boton(CLS.btnPrimario, CLS.btnLogin)}"><span>Entrar</span></button>
+          <button type="submit" class="${boton(CLS.btnPrimario, CLS.btnLogin, 'font-display tracking-wide')}"><span>Entrar</span></button>
         </form>
+        ${firmaLogin()}
       </section>
     </main>`,
   );
+  detenerRed = montarRedNeuronal(obtener('#red-neuronal', HTMLCanvasElement));
   const form = obtener('#login', HTMLFormElement);
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
@@ -212,6 +243,7 @@ async function alIniciarSesion(form: HTMLFormElement): Promise<void> {
       bma.post<RespuestaLogin>('/auth/login', { email, password }, { sinAuth: true }),
     );
     sesion.guardar(r.token, JSON.stringify(r.usuario));
+    invalidarCache(); // jamás se hereda el caché de otra sesión
     await arrancar();
   } catch (e: unknown) {
     montar(zona, aviso('bad', mensajeDeError(e)));
@@ -220,7 +252,8 @@ async function alIniciarSesion(form: HTMLFormElement): Promise<void> {
 
 function cerrarSesion(mensaje?: string): void {
   sesion.cerrar();
-  actualizar({ usuario: null, modulos: [], vista: 'dashboard' });
+  invalidarCache();
+  actualizar({ usuario: null, modulos: [], vista: 'dashboard', sedeFiltro: null });
   mostrarLogin(mensaje);
 }
 
@@ -239,7 +272,7 @@ function itemNav(opciones: { readonly id: string; readonly titulo: string; reado
 
 function shellHtml(): HtmlSeguro {
   const u = estado.usuario;
-  const vistas = VISTAS.filter((v) => !v.soloAdmin || esAdmin());
+  const vistas = vistasVisibles();
   return html`<div id="shell" data-collapsed="${estado.colapsado}" class="group/sb flex min-h-screen">
     <aside id="barra-lateral" aria-label="Navegación principal"
       class="sticky top-0 z-30 flex h-screen w-64 shrink-0 flex-col border-r border-slate-200 bg-white shadow-lg transition-[width] duration-200 group-data-[collapsed=true]/sb:w-20">
@@ -269,6 +302,7 @@ function shellHtml(): HtmlSeguro {
           <span role="tooltip" class="pointer-events-none absolute left-full top-1/2 z-40 ml-2 hidden -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-lg group-data-[collapsed=true]/sb:group-hover/item:block group-data-[collapsed=true]/sb:group-focus-visible/item:block">Expandir menú</span>
         </button>
       </div>
+      ${firmaSidebar()}
     </aside>
     <main id="contenido" tabindex="-1" class="m-2 min-w-0 flex-1 rounded-xl bg-slate-50/95 p-4 shadow-lg sm:m-4 sm:p-8"></main>
   </div>`;
@@ -312,6 +346,7 @@ async function arrancar(): Promise<void> {
   }
 
   document.body.className = 'text-slate-900';
+  liberarRed();
   montar(obtener('#app', HTMLElement), shellHtml());
   const shell = obtener('#shell', HTMLElement);
   shell.addEventListener('click', (ev) => {
@@ -329,7 +364,7 @@ async function arrancar(): Promise<void> {
   });
   obtener('#salir', HTMLButtonElement).addEventListener('click', () => cerrarSesion());
   obtener('#alternar-sidebar', HTMLButtonElement).addEventListener('click', alternarSidebar);
-  const vistaInicial = estado.vista.startsWith('premium:') || VISTAS.some((v) => v.id === estado.vista) ? estado.vista : 'dashboard';
+  const vistaInicial = estado.vista.startsWith('premium:') || vistasVisibles().some((v) => v.id === estado.vista) ? estado.vista : 'dashboard';
   await navegar(vistaInicial);
 }
 
@@ -350,7 +385,8 @@ async function navegar(id: string): Promise<void> {
   marcarNavegacion(id);
   const zona = obtener('#contenido', HTMLElement);
   const ctx: Contexto = { zona, vigente: () => mio === ticketVista };
-  montar(zona, html`<div class="h-32 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando"></div>`);
+  // Navegación instantánea: la vista anterior se retira y el esqueleto entra en el mismo cuadro; los datos llegan después (caché + red).
+  montar(zona, esqueletoPara(id));
   try {
     if (id.startsWith('premium:')) vistaPremium(ctx, id.slice('premium:'.length));
     else if (id.startsWith('estudiante:')) await vistaDetalle(ctx, id.slice('estudiante:'.length));
@@ -363,6 +399,11 @@ async function navegar(id: string): Promise<void> {
         usuario: estado.usuario,
         // 403 MODULO_PREMIUM_DESHABILITADO (3.ª sede sin el módulo): relee el catálogo y pinta la pantalla de cristal con el precio.
         alBloquear: (d) => void bloquearModulo(ctx, d),
+        // Clic en la tarjeta de una sede: se guarda su id en el estado y se abre el CRM de Estudiantes ya filtrado por esa sucursal.
+        alElegirSede: (sedeId) => {
+          actualizar({ sedeFiltro: sedeId, paginaEstudiantes: 1, filtroEstudiantes: '' });
+          void navegar('estudiantes');
+        },
         alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
       });
     } else if (id === 'invitaciones') {
@@ -372,7 +413,7 @@ async function navegar(id: string): Promise<void> {
         usuario: estado.usuario,
         alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
       });
-    } else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
+    } else if (id === 'contabilidad' && MODULO_EGRESOS_ACTIVO && esAdmin()) await vistaContabilidad(ctx);
     else if (id === 'configuracion' && esAdmin()) await vistaConfiguracion({ zona: ctx.zona, vigente: ctx.vigente, usuario: estado.usuario });
     else await vistaDashboard(ctx);
   } catch (e: unknown) {
@@ -549,6 +590,7 @@ function filaEstudiante(s: EstudianteListado): HtmlSeguro {
   return html`<tr>
     <td class="${CLS.td}"><button type="button" data-detalle="${s.id}" class="rounded-md text-left font-medium text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-slate-900" aria-label="Ver ficha de ${s.apellidos}, ${s.nombres}">${s.apellidos}, ${s.nombres}</button></td>
     <td class="${CLS.td}">${s.grado_solicitado}</td>
+    <td class="${CLS.td}">${s.sede ?? 'Sin sede'}</td>
     <td class="${CLS.td}">${s.representante}</td>
     <td class="${CLS.td}">${etiquetaEstado(s.estado_dinamico)}</td>
     <td class="${CLS.td} whitespace-nowrap">${usd(s.deuda_vencida_usd)}</td>
@@ -559,24 +601,73 @@ function filaEstudiante(s: EstudianteListado): HtmlSeguro {
   </tr>`;
 }
 
+const esPaginaEstudiantes: Guarda<Pagina<EstudianteListado>> = (v): v is Pagina<EstudianteListado> => {
+  if (typeof v !== 'object' || v === null) return false;
+  const o = v as Readonly<Record<string, unknown>>;
+  const p = o['paginacion'];
+  return Array.isArray(o['datos']) && typeof p === 'object' && p !== null && typeof (p as Readonly<Record<string, unknown>>)['total'] === 'number';
+};
+
+/** Selector de sede del CRM (solo acceso consolidado): las sedes salen del caché al instante y se refrescan en segundo plano. */
+function pintarSelectorSedes(ctx: Contexto, sedes: readonly SedeResumen[]): void {
+  const zona = buscar('#zona-filtro-sede', HTMLElement, ctx.zona);
+  if (!zona) return;
+  montar(
+    zona,
+    html`<label for="filtro-sede" class="${CLS.etiqueta}">Sede</label>
+      <select id="filtro-sede" class="${CLS.input} min-h-10 min-w-48">
+        <option value="" ${estado.sedeFiltro === null ? raw('selected') : null}>Todas las sedes</option>
+        ${sedes.map((x) => html`<option value="${x.id}" ${estado.sedeFiltro === x.id ? raw('selected') : null}>${x.nombre}</option>`)}
+      </select>`,
+  );
+  obtener('#filtro-sede', HTMLSelectElement, zona).addEventListener('change', (ev) => {
+    const n = ev.target instanceof HTMLSelectElement ? Number(ev.target.value) : Number.NaN;
+    actualizar({ sedeFiltro: Number.isInteger(n) && n > 0 ? n : null, paginaEstudiantes: 1 });
+    void navegar('estudiantes');
+  });
+}
+
 async function vistaEstudiantes(ctx: Contexto): Promise<void> {
-  const r = await bma.pagina<EstudianteListado>('/estudiantes', { estado: estado.filtroEstudiantes, pagina: estado.paginaEstudiantes, limite: LIMITE_PAGINA });
-  if (!ctx.vigente()) return;
+  const sedeFiltro = alcanceDe(estado.usuario).tipo === 'consolidado' ? estado.sedeFiltro : null;
+  const consulta = { estado: estado.filtroEstudiantes, pagina: estado.paginaEstudiantes, limite: LIMITE_PAGINA, sede_id: sedeFiltro };
+  await cargarConCache<Pagina<EstudianteListado>>({
+    clave: `estudiantes:${estado.filtroEstudiantes}:${estado.paginaEstudiantes}:${sedeFiltro ?? 'todas'}`,
+    esValido: esPaginaEstudiantes,
+    cargar: () => bma.pagina<EstudianteListado>('/estudiantes', consulta),
+    pintar: (r) => pintarEstudiantes(ctx, r),
+    vigente: ctx.vigente,
+  });
+}
+
+function pintarEstudiantes(ctx: Contexto, r: Pagina<EstudianteListado>): void {
+  const consolidado = alcanceDe(estado.usuario).tipo === 'consolidado';
   montar(
     ctx.zona,
     html`${encabezado('Estudiantes', `${r.paginacion.total} resultado(s)`)}
-    <div class="mb-4 flex flex-wrap gap-2" role="group" aria-label="Filtrar por estado">
-      ${FILTROS_ESTUDIANTES.map((f) => html`<button type="button" data-filtro="${f}" aria-pressed="${f === estado.filtroEstudiantes}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'aria-pressed:border-slate-900 aria-pressed:bg-slate-900 aria-pressed:text-white')}">${f === '' ? 'Todos' : f}</button>`)}
+    <div class="mb-4 flex flex-wrap items-end gap-4">
+      <div class="flex flex-wrap gap-2" role="group" aria-label="Filtrar por estado">
+        ${FILTROS_ESTUDIANTES.map((f) => html`<button type="button" data-filtro="${f}" aria-pressed="${f === estado.filtroEstudiantes}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'aria-pressed:border-slate-900 aria-pressed:bg-slate-900 aria-pressed:text-white')}">${f === '' ? 'Todos' : f}</button>`)}
+      </div>
+      ${consolidado ? html`<div id="zona-filtro-sede"></div>` : null}
     </div>
-    <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white/90 backdrop-blur">
+    <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white">
       <table class="${CLS.tabla}">
         <caption class="sr-only">Listado de estudiantes</caption>
-        <thead><tr><th scope="col" class="${CLS.th}">Estudiante</th><th scope="col" class="${CLS.th}">Grado</th><th scope="col" class="${CLS.th}">Representante</th><th scope="col" class="${CLS.th}">Estado</th><th scope="col" class="${CLS.th}">Deuda vencida</th><th scope="col" class="${CLS.th}">Alertas WhatsApp</th></tr></thead>
-        <tbody>${r.datos.length === 0 ? html`<tr><td colspan="6" class="${CLS.td}">Sin resultados.</td></tr>` : r.datos.map(filaEstudiante)}</tbody>
+        <thead><tr><th scope="col" class="${CLS.th}">Estudiante</th><th scope="col" class="${CLS.th}">Nivel</th><th scope="col" class="${CLS.th}">Sede</th><th scope="col" class="${CLS.th}">Representante</th><th scope="col" class="${CLS.th}">Estado</th><th scope="col" class="${CLS.th}">Deuda vencida</th><th scope="col" class="${CLS.th}">Alertas WhatsApp</th></tr></thead>
+        <tbody>${r.datos.length === 0 ? html`<tr><td colspan="7" class="${CLS.td}">Sin resultados.</td></tr>` : r.datos.map(filaEstudiante)}</tbody>
       </table>
     </div>
     ${paginacionHtml(r.paginacion)}`,
   );
+  if (consolidado) {
+    void cargarConCache<readonly SedeResumen[]>({
+      clave: CLAVE_SEDES,
+      esValido: esListaSedes,
+      cargar: () => bma.get<readonly SedeResumen[]>('/sedes'),
+      pintar: (sedes) => pintarSelectorSedes(ctx, sedes),
+      vigente: ctx.vigente,
+    }).catch(() => undefined); // el selector es accesorio: si falla, la lista sigue funcionando
+  }
   for (const b of todos('[data-filtro]', HTMLButtonElement, ctx.zona)) {
     b.addEventListener('click', () => {
       const valor = b.dataset['filtro'] ?? '';

@@ -94,7 +94,7 @@ function seccionAcademica(d: DetalleEstudiante): HtmlSeguro {
   return html`<section class="${CLS.tarjeta} p-6 lg:col-span-2" aria-labelledby="t-academico">
     ${tituloSeccion('t-academico', 'Información académica', 'school')}
     <dl class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-      ${dato('Grado', d.grado_solicitado)}
+      ${dato('Nivel', d.grado_solicitado)}
       ${dato('Cédula de identidad', d.cedula_identidad)}
       ${dato('Fecha de nacimiento', `${fechaCorta(d.fecha_nacimiento)}${edad !== null ? ` · ${edad} años` : ''}`)}
       ${dato('Lugar de nacimiento', d.lugar_nacimiento)}

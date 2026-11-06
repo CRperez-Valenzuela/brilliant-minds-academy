@@ -15,7 +15,7 @@ const repoSql = {
   async leerTodos() {
     return (await ejecutar(
       `SELECT codigo, nombre, descripcion, precio_usd, habilitado, habilitado_en, prueba_iniciada_en, expira_prueba_en
-         FROM modulos_premium ORDER BY precio_usd`)).rows;
+         FROM modulos_premium ORDER BY precio_usd, codigo`)).rows;
   },
   /** Bloqueo automático de UN módulo cuya prueba venció. El reloj que decide es el de la base (NOW()). Devuelve filas afectadas. */
   async bloquearVencida(codigo) {

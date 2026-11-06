@@ -23,12 +23,15 @@ test('catálogo: MULTI_SEDE_PREMIUM (US$ 50) y FACTURACION_MASIVA (US$ 20) con l
 });
 
 test('008: cada módulo del catálogo tiene su código en alguna migración (003 o 008) con el mismo precio', () => {
-  const todas = fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((f) => f.endsWith('.sql'))
-    .map((f) => fs.readFileSync(path.join(RAIZ, 'database', 'migrations', f), 'utf8')).join('\n');
+  const dir = path.join(RAIZ, 'database', 'migrations');
+  const todas = fs.readdirSync(dir).filter((f) => f.endsWith('.sql') && !f.startsWith('012_'))
+    .map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+  // 012_ajuste_precios.sql fija los precios definitivos y manda sobre los sembrados por 003/008 (que usan DO NOTHING).
+  const ajustes = new Map([...fs.readFileSync(path.join(dir, '012_ajuste_precios.sql'), 'utf8').matchAll(/\('([A-Z_]+)',\s+([0-9]+\.[0-9]{2})::numeric\)/g)].map((x) => [x[1], Number(x[2])]));
   for (const m of CATALOGO) {
     const fila = new RegExp(`\\('${m.codigo}',[\\s\\S]*?([0-9]+\\.[0-9]{2})\\)`).exec(todas);
     assert.ok(fila, `${m.codigo} sin INSERT en las migraciones`);
-    assert.equal(Number(fila[1]), m.precioUsd, `${m.codigo}: precio del catálogo = precio sembrado`);
+    assert.equal(ajustes.get(m.codigo) ?? Number(fila[1]), m.precioUsd, `${m.codigo}: precio del catálogo = precio vigente (012 sobre 003/008)`);
   }
 });
 

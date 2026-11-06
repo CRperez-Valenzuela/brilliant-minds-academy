@@ -8,7 +8,7 @@ const path = require('node:path');
 const raiz = path.join(__dirname, '..');
 const leer = (...p) => fs.readFileSync(path.join(raiz, ...p), 'utf8');
 
-test('el login usa el logotipo BMA sobre tarjeta de cristal y no queda rastro de Astra', () => {
+test('el login usa el logotipo BMA sobre tarjeta de cristal; Astra solo aparece en la firma de autoría (lib/firma.ts)', () => {
   const admin = leer('frontend', 'src', 'admin.ts');
   assert.match(admin, /logoCompletoHtml\(/);
   assert.match(admin, /bg-bma-azul/);
@@ -33,4 +33,29 @@ test('las sedes del Core Base se llaman Sede Este y Sede Norte (seed y migració
   assert.match(m, /'Sede Norte'/);
   assert.doesNotMatch(m, /INSERT\s+INTO\s+sedes/i);
   assert.doesNotMatch(leer('database', 'migrations', '008_nuevos_premium.sql'), /Acarigua|Barquisimeto/);
+});
+
+test('rendimiento: esqueleto inmediato, caché SWR en sessionStorage, sin Egresos en el menú y filtro por tarjeta de sede', () => {
+  const admin = leer('frontend', 'src', 'admin.ts');
+  assert.match(admin, /montar\(zona, esqueletoPara\(id\)\)/);
+  assert.match(admin, /const MODULO_EGRESOS_ACTIVO: boolean = false/);
+  assert.match(admin, /alElegirSede: \(sedeId\) =>/);
+  assert.match(admin, /invalidarCache\(\)/);
+  assert.match(leer('frontend', 'src', 'lib', 'cache.ts'), /sessionStorage/);
+  assert.match(leer('frontend', 'src', 'lib', 'esqueleto.ts'), /animate-pulse/);
+  assert.match(leer('frontend', 'src', 'sedes-gestion.ts'), /data-sede-id/);
+});
+
+test('login: red neuronal y firma Astra; niveles fijos de la Sede Este y «Nivel» en lugar de «Grado»', () => {
+  const admin = leer('frontend', 'src', 'admin.ts');
+  assert.match(admin, /montarRedNeuronal\(/);
+  assert.match(admin, /firmaLogin\(\)/);
+  assert.match(admin, /firmaSidebar\(\)/);
+  const firma = leer('frontend', 'src', 'lib', 'firma.ts');
+  assert.match(firma, /Diseñado y desarrollado por Astra Digital Solutions/);
+  assert.match(firma, /Astra Academy Suite v1\.0/);
+  assert.match(firma, /#22D3EE/);
+  assert.match(leer('frontend', 'src', 'invitaciones-modulo.ts'), /\['Kids 1 B', 'Kids 1 A', 'Beginner B', 'Beginner A', 'Adultos', 'Kids 1 C', 'Beginner C'\]/);
+  assert.match(admin, /<th scope="col" class="\$\{CLS\.th\}">Nivel<\/th><th scope="col" class="\$\{CLS\.th\}">Sede<\/th>/);
+  assert.match(leer('frontend', 'tailwind.config.js'), /Outfit/);
 });

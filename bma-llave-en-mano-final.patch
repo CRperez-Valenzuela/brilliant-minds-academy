@@ -1,0 +1,1625 @@
+From b50476756f254072a6fa171b0f114209c2167db1 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 5 Nov 2026 20:28:32 -0400
+Subject: [PATCH] =?UTF-8?q?feat:=20llave=20en=20mano=20final=20-=20navegac?=
+ =?UTF-8?q?i=C3=B3n=20instant=C3=A1nea,=20red=20neuronal,=20precios=20012,?=
+ =?UTF-8?q?=20filtro=20por=20sede=20e=20ingesta=20Sede=20Este?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01P7rPdy2oCq7CzDpMqHvgZa
+---
+ CAMBIOS_BMA_LLAVE_EN_MANO_FINAL.md         |  45 +++
+ controllers/crm.controller.js              |   7 +-
+ database/migrations/012_ajuste_precios.sql |  14 +
+ frontend/admin/index.html                  |   3 +
+ frontend/src/admin.ts                      | 131 +++++++--
+ frontend/src/admisiones.ts                 |   2 +-
+ frontend/src/estudiantes-detalle.ts        |   2 +-
+ frontend/src/invitaciones-modulo.ts        |  28 +-
+ frontend/src/lib/cache.ts                  |  92 +++++++
+ frontend/src/lib/esqueleto.ts              |  46 ++++
+ frontend/src/lib/firma.ts                  |  28 ++
+ frontend/src/lib/red-neuronal.ts           | 198 +++++++++++++
+ frontend/src/lib/sedes-cache.ts            |  12 +
+ frontend/src/sedes-gestion.ts              |  52 +++-
+ frontend/src/types/index.ts                |   3 +
+ frontend/tailwind.config.js                |   6 +
+ modules/premium/catalogo.js                |  10 +-
+ modules/premium/guard.js                   |   2 +-
+ scripts/importar_este.js                   | 306 +++++++++++++++++++++
+ services/crm.service.js                    |   9 +-
+ tests/frontend-identidad.test.js           |  27 +-
+ tests/importar-este.test.js                |  66 +++++
+ tests/integracion.pg.test.js               |  23 +-
+ tests/premium-008.test.js                  |   9 +-
+ 24 files changed, 1045 insertions(+), 76 deletions(-)
+ create mode 100644 CAMBIOS_BMA_LLAVE_EN_MANO_FINAL.md
+ create mode 100644 database/migrations/012_ajuste_precios.sql
+ create mode 100644 frontend/src/lib/cache.ts
+ create mode 100644 frontend/src/lib/esqueleto.ts
+ create mode 100644 frontend/src/lib/firma.ts
+ create mode 100644 frontend/src/lib/red-neuronal.ts
+ create mode 100644 frontend/src/lib/sedes-cache.ts
+ create mode 100644 scripts/importar_este.js
+ create mode 100644 tests/importar-este.test.js
+
+diff --git a/CAMBIOS_BMA_LLAVE_EN_MANO_FINAL.md b/CAMBIOS_BMA_LLAVE_EN_MANO_FINAL.md
+new file mode 100644
+index 0000000..7b26fe2
+--- /dev/null
++++ b/CAMBIOS_BMA_LLAVE_EN_MANO_FINAL.md
+@@ -0,0 +1,45 @@
++# CAMBIOS · Llave en mano final (rendimiento, red neuronal, precios, sedes e ingesta)
++
++Rama `development` · ancla `0390b25` · se aplica sobre `cbc8032` (entrega anterior). PostgreSQL nativo de Supabase, parámetros `$1…$n`.
++Aplicar: `git am --keep-cr bma-llave-en-mano-final.patch` (o `git apply --index`). `--keep-cr` es necesario por los CRLF de `ui.ts`/`crm.service.js`.
++
++## Archivos
++
++| Acción | Archivo | Qué cambia |
++|---|---|---|
++| NUEVO | `frontend/src/lib/cache.ts` | Caché «stale-while-revalidate» en `sessionStorage`: pinta lo guardado al instante y refresca en segundo plano (repinta solo si cambió; un fallo de fondo no borra lo visible; 401 siempre se propaga). Validado con guardas de tipo, se vacía al entrar/salir de sesión. |
++| NUEVO | `frontend/src/lib/sedes-cache.ts` | Clave y guarda del caché de sedes (compartido por Sedes y Estudiantes). |
++| NUEVO | `frontend/src/lib/esqueleto.ts` | Skeleton loaders (`animate-pulse` + `bg-slate-200`) para tabla, tarjetas y genérico. |
++| NUEVO | `frontend/src/lib/red-neuronal.ts` | Canvas 2D: nodos y partículas conectadas; ~1/3 anclados a una «A» abstracta; atracción/enlace con el cursor; `prefers-reduced-motion`, DPR, limpieza de listeners. |
++| NUEVO | `frontend/src/lib/firma.ts` | Firma «Diseñado y desarrollado por Astra Digital Solutions» (login) y «Astra Academy Suite v1.0» (base del sidebar) con isotipo «A» en cian `#22D3EE`. |
++| EDIT | `frontend/src/admin.ts` | Navegación: esqueleto en el mismo cuadro; login con canvas + firma + Outfit; sidebar con firma; Egresos oculto (`MODULO_EGRESOS_ACTIVO = false`); lista de estudiantes con columnas **Nivel** y **Sede**, selector de sede y SWR; filtro por `sedeFiltro`. |
++| EDIT | `frontend/src/sedes-gestion.ts` | Tarjetas de sede clicables (`button` accesible, listener) → guarda `sede_id` y abre Estudiantes filtrado; lista con caché SWR. |
++| EDIT | `frontend/src/invitaciones-modulo.ts` | `NIVELES` fijos: Kids 1 B, Kids 1 A, Beginner B, Beginner A, Adultos, Kids 1 C, Beginner C. |
++| EDIT | `estudiantes-detalle.ts`, `admisiones.ts`, `types/index.ts` | «Grado» → «Nivel» (la ficha conserva «Grado de estudio» = último grado aprobado); tipos `sede_id`/`sede`. |
++| EDIT | `frontend/tailwind.config.js`, `frontend/admin/index.html` | Fuentes Inter (sans) y Outfit (`font-display`) desde Google Fonts, con respaldo del sistema. |
++| EDIT | `controllers/crm.controller.js`, `services/crm.service.js` | `GET /api/estudiantes?sede_id=`: solo acota al acceso consolidado (el alcance de una secretaria manda siempre); el listado devuelve `sede_id` y `sede`. |
++| NUEVO | `database/migrations/012_ajuste_precios.sql` | Precios definitivos, idempotente, sin tocar el estado de los módulos. |
++| EDIT | `modules/premium/catalogo.js`, `modules/premium/guard.js` | Precios del catálogo alineados; orden estable `precio_usd, codigo`. |
++| NUEVO | `scripts/importar_este.js` | Ingesta de la Sede Este desde el Excel (ver abajo). |
++| TESTS | `tests/importar-este.test.js` (nuevo, datos sintéticos), `tests/frontend-identidad.test.js`, `tests/premium-008.test.js`, `tests/integracion.pg.test.js` | Parseo de ingesta, rendimiento/identidad, precio vigente 012, filtro de sede y 012 idempotente. |
++
++## Precios (012)
++`FACHADA_WEB` 450 · `APP_MOVIL` 350 · `WHATSAPP_AUTOMATICO` 50 · `IA_ATENCION` 150 (`ATENCION_IA` en tu prompt) · `BANCAMIGA` 250 (`INTEGRACION_BANCARIA` en tu prompt).
++Los códigos reales no se renombraron: están enlazados a rutas, guards e interfaz.
++
++## Egresos
++«Egresos y contabilidad» (balance, nómina, personal) sale del menú y su ruta cae al Dashboard. El backend `/api/contabilidad` queda intacto;
++para reactivarlo basta `MODULO_EGRESOS_ACTIVO = true` en `admin.ts`.
++
++## Ingesta `scripts/importar_este.js`
++`node scripts/importar_este.js --archivo "/ruta/Datos_Academia_BMA_-_Sede_Este.xlsx" [--dry-run] [--vence AAAA-MM-DD] [--monto N]`
++- Lee el Excel desde una ruta local: **no hay datos de menores en el repositorio** y el informe no imprime nombres ni teléfonos (solo hoja/fila).
++- Todo a `Sede Este`, estudiante `Activo`, nivel por bloque de grupo, una sola transacción, idempotente (`ON CONFLICT`, `NOT EXISTS`).
++- Representante: mismo nombre + teléfono = una ficha (hermanos). **El Excel no trae cédula ni fecha de nacimiento**: se asigna cédula
++  provisional `IMP-XXXXXXXXXXXX` y fecha de nacimiento aproximada (1-jul de año de inscripción − edad). Hay que completarlas luego en el CRM.
++- Cuota «Matrícula inicial» `Pendiente`: monto = `MATRICULA_USD` (o `--monto`), vence hoy + 30 días (o `--vence`).
++- Prueba con tu archivo (BD local desechable): 63 alumnos importados, 3 omitidos; 2.ª ejecución: 0 nuevos.
++
++## Verificación
++`tsc` estricto sin errores, 0 `any`; `npm test` con PostgreSQL 16 real: **211/211**; migración 012 aplicada; capturas Playwright (login con red neuronal, sedes, CRM filtrado).
++Pendiente tuyo: `npm run frontend:install && npm run frontend:build`, `npm run migrate` y la ingesta.
+diff --git a/controllers/crm.controller.js b/controllers/crm.controller.js
+index d94c05c..63facb4 100644
+--- a/controllers/crm.controller.js
++++ b/controllers/crm.controller.js
+@@ -7,9 +7,12 @@ const { alcanceDe } = require('../utils/alcance');
+ const resumen = asyncHandler(async (req, res) => ok(res, await crm.resumen(alcanceDe(req.usuario))));
+ 
+ const listar = asyncHandler(async (req, res) => {
+-  const { estado, q } = validar(req.query, { estado: { tipo: 'enum', valores: crm.ESTADOS }, q: { max: 100 } });
++  const { estado, q, sede_id: sedeFiltro } = validar(req.query, {
++    estado: { tipo: 'enum', valores: crm.ESTADOS }, q: { max: 100 }, sede_id: { tipo: 'entero', min: 1 },
++  });
+   const pag = paginacion(req.query);
+-  const r = await crm.listar({ estado, q, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario) });
++  // El alcance del usuario manda (una secretaria siempre queda atada a su sede); `sede_id` solo acota al acceso consolidado (ver crm.listar).
++  const r = await crm.listar({ estado, q, offset: pag.offset, limite: pag.limite, sedeId: alcanceDe(req.usuario), sedeFiltro: sedeFiltro ?? null });
+   ok(res, r.items, 200, { paginacion: { pagina: pag.pagina, limite: pag.limite, total: r.total } });
+ });
+ 
+diff --git a/database/migrations/012_ajuste_precios.sql b/database/migrations/012_ajuste_precios.sql
+new file mode 100644
+index 0000000..1a890b9
+--- /dev/null
++++ b/database/migrations/012_ajuste_precios.sql
+@@ -0,0 +1,14 @@
++-- 012 · Precios definitivos de los módulos Premium (US$). PostgreSQL / Supabase. Idempotente: re-ejecutarla no cambia nada.
++-- Códigos reales del catálogo: ATENCION_IA → IA_ATENCION e INTEGRACION_BANCARIA → BANCAMIGA (no se renombran: están enlazados a rutas,
++-- guards y a la interfaz). Solo cambia el precio; el estado (habilitado, prueba) de cada módulo no se toca.
++UPDATE modulos_premium AS m
++   SET precio_usd = v.precio_usd, actualizado_en = NOW()
++  FROM (VALUES
++          ('FACHADA_WEB',         450.00::numeric),
++          ('APP_MOVIL',           350.00::numeric),
++          ('BANCAMIGA',           250.00::numeric),
++          ('WHATSAPP_AUTOMATICO',  50.00::numeric),
++          ('IA_ATENCION',         150.00::numeric)
++       ) AS v (codigo, precio_usd)
++ WHERE m.codigo = v.codigo
++   AND m.precio_usd IS DISTINCT FROM v.precio_usd;
+diff --git a/frontend/admin/index.html b/frontend/admin/index.html
+index 9d9210e..eb7ed5b 100644
+--- a/frontend/admin/index.html
++++ b/frontend/admin/index.html
+@@ -6,6 +6,9 @@
+     <meta name="robots" content="noindex,nofollow" />
+     <meta name="theme-color" content="#0073BB" />
+     <link rel="icon" href="data:," />
++    <link rel="preconnect" href="https://fonts.googleapis.com" />
++    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
++    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@400;500;600;700&display=swap" />
+     <title>Panel administrativo · Brilliant Minds Academy</title>
+   </head>
+   <body>
+diff --git a/frontend/src/admin.ts b/frontend/src/admin.ts
+index fe1daf3..91dad74 100644
+--- a/frontend/src/admin.ts
++++ b/frontend/src/admin.ts
+@@ -7,7 +7,7 @@
+  *  - Candado Premium: los módulos de Fase 2 deshabilitados interceptan el clic y muestran una capa de cristal.
+  */
+ import './styles/main.css';
+-import { bma, BmaApiError, BmaRedError, BmaSesionExpiradaError, mensajeDeError, sesion } from './api/bmaClient';
++import { bma, BmaApiError, BmaRedError, BmaSesionExpiradaError, mensajeDeError, sesion, type Pagina } from './api/bmaClient';
+ import { html, montar, raw, urlSegura, type HtmlSeguro } from './lib/html';
+ import { icono, type NombreIcono } from './lib/icons';
+ import { bs, diasDelPeriodo, fechaCorta, fechaHora, horaConSegundos, nombreMetodo, periodoActual, tasa as formatoTasa, usd } from './lib/format';
+@@ -19,6 +19,12 @@ import { vistaConfiguracion } from './configuracion';
+ import { vistaSedesGestion } from './sedes-gestion';
+ import { vistaInvitaciones } from './invitaciones-modulo';
+ import { logoCompletoHtml, isotipoHtml } from './lib/marca';
++import { cargarConCache, invalidarCache, type Guarda } from './lib/cache';
++import { esqueletoPara } from './lib/esqueleto';
++import { montarRedNeuronal } from './lib/red-neuronal';
++import { firmaLogin, firmaSidebar } from './lib/firma';
++import { CLAVE_SEDES, esListaSedes } from './lib/sedes-cache';
++import { alcanceDe } from './lib/alcance';
+ import type {
+   AlertaWhatsapp,
+   BalanceContable,
+@@ -31,6 +37,7 @@ import type {
+   ModuloPremium,
+   Paginacion,
+   ReferenciaAuditoria,
++  SedeResumen,
+   RespuestaLogin,
+   RespuestaMe,
+   RespuestaPrueba,
+@@ -48,6 +55,11 @@ const CLAVE_SIDEBAR = 'bma.sidebar.colapsado';
+ const REFRESCO_TABLERO_MS = 30_000;
+ const LIMITE_PAGINA = 25;
+ const MAX_NOTA = 300;
++/**
++ * Módulo de Egresos (nómina, personal, balance): INACTIVO hasta que la academia necesite controlar la nómina. Mientras sea `false` no aparece
++ * en la barra lateral y su ruta de navegación cae al Dashboard. El backend (`/api/contabilidad`) se conserva intacto; reactivarlo es cambiar esta constante.
++ */
++const MODULO_EGRESOS_ACTIVO: boolean = false;
+ 
+ interface DefVista {
+   readonly id: VistaAdmin;
+@@ -64,7 +76,7 @@ const VISTAS: readonly DefVista[] = [
+   // «Invitaciones» la usa también la secretaria, limitada a su sede.
+   { id: 'sedes', titulo: 'Sedes', icono: 'building', soloAdmin: false },
+   { id: 'invitaciones', titulo: 'Invitaciones', icono: 'link', soloAdmin: false },
+-  { id: 'contabilidad', titulo: 'Contabilidad', icono: 'book', soloAdmin: true },
++  { id: 'contabilidad', titulo: 'Egresos y contabilidad', icono: 'book', soloAdmin: true },
+   { id: 'configuracion', titulo: 'Configuración de cobro', icono: 'wallet', soloAdmin: true },
+ ];
+ 
+@@ -91,6 +103,8 @@ interface EstadoAdmin {
+   readonly periodo: string;
+   readonly filtroEstudiantes: FiltroEstudiantes;
+   readonly paginaEstudiantes: number;
++  /** Sede elegida (tarjeta de Sedes o selector) para filtrar el CRM; null = todas. Solo el acceso consolidado puede fijarla. */
++  readonly sedeFiltro: number | null;
+   readonly filtroAuditoria: EstadoPagoReferencia;
+   readonly paginaAuditoria: number;
+ }
+@@ -103,6 +117,7 @@ let estado: EstadoAdmin = {
+   periodo: periodoActual(),
+   filtroEstudiantes: '',
+   paginaEstudiantes: 1,
++  sedeFiltro: null,
+   filtroAuditoria: 'Por Validar',
+   paginaAuditoria: 1,
+ };
+@@ -161,36 +176,52 @@ function usuarioGuardado(): Usuario | null {
+ 
+ const esAdmin = (): boolean => estado.usuario?.rol === 'admin';
+ 
++/** Vistas que el usuario ve en el menú y a las que puede navegar (Egresos oculto mientras el módulo esté inactivo). */
++function vistasVisibles(): readonly DefVista[] {
++  return VISTAS.filter((v) => (!v.soloAdmin || esAdmin()) && (v.id !== 'contabilidad' || MODULO_EGRESOS_ACTIVO));
++}
++
+ // ───────────────────────── Login ─────────────────────────
+ 
++let detenerRed: (() => void) | null = null;
++
++function liberarRed(): void {
++  detenerRed?.();
++  detenerRed = null;
++}
++
+ function mostrarLogin(mensaje?: string): void {
+   detenerTablero();
++  liberarRed();
+   ticketVista += 1;
+   document.body.className = 'text-slate-900';
+   montar(
+     obtener('#app', HTMLElement),
+-    html`<main class="flex min-h-screen items-center justify-center bg-bma-azul px-4 py-12">
+-      <section class="${CLS.loginTarjeta}" aria-labelledby="login-titulo">
++    html`<main class="relative flex min-h-screen items-center justify-center overflow-hidden bg-bma-azul px-4 py-12">
++      <canvas id="red-neuronal" aria-hidden="true" class="pointer-events-none absolute inset-0 h-full w-full"></canvas>
++      <section class="${CLS.loginTarjeta} relative z-10" aria-labelledby="login-titulo">
+         <header class="mb-8 flex flex-col items-center text-center">
+           ${logoCompletoHtml('h-auto w-48 sm:w-56', true)}
+           <h1 id="login-titulo" class="sr-only">Brilliant Minds Academy · Panel administrativo</h1>
+-          <p class="mt-3 text-sm font-medium text-slate-700">Panel administrativo</p>
++          <p class="mt-3 font-display text-sm font-medium tracking-wide text-slate-700">Panel administrativo</p>
+         </header>
+         <form id="login" novalidate class="flex flex-col gap-4" aria-labelledby="login-titulo">
+           <div id="login-aviso">${mensaje ? aviso('warn', mensaje) : null}</div>
+           <div>
+-            <label for="login-email" class="${CLS.etiqueta}">Correo</label>
++            <label for="login-email" class="${CLS.etiqueta} font-display tracking-wide">Correo</label>
+             <input id="login-email" name="email" type="email" required autocomplete="username" class="${CLS.input}">
+           </div>
+           <div>
+-            <label for="login-password" class="${CLS.etiqueta}">Contraseña</label>
++            <label for="login-password" class="${CLS.etiqueta} font-display tracking-wide">Contraseña</label>
+             <input id="login-password" name="password" type="password" required autocomplete="current-password" class="${CLS.input}">
+           </div>
+-          <button type="submit" class="${boton(CLS.btnPrimario, CLS.btnLogin)}"><span>Entrar</span></button>
++          <button type="submit" class="${boton(CLS.btnPrimario, CLS.btnLogin, 'font-display tracking-wide')}"><span>Entrar</span></button>
+         </form>
++        ${firmaLogin()}
+       </section>
+     </main>`,
+   );
++  detenerRed = montarRedNeuronal(obtener('#red-neuronal', HTMLCanvasElement));
+   const form = obtener('#login', HTMLFormElement);
+   form.addEventListener('submit', (ev) => {
+     ev.preventDefault();
+@@ -212,6 +243,7 @@ async function alIniciarSesion(form: HTMLFormElement): Promise<void> {
+       bma.post<RespuestaLogin>('/auth/login', { email, password }, { sinAuth: true }),
+     );
+     sesion.guardar(r.token, JSON.stringify(r.usuario));
++    invalidarCache(); // jamás se hereda el caché de otra sesión
+     await arrancar();
+   } catch (e: unknown) {
+     montar(zona, aviso('bad', mensajeDeError(e)));
+@@ -220,7 +252,8 @@ async function alIniciarSesion(form: HTMLFormElement): Promise<void> {
+ 
+ function cerrarSesion(mensaje?: string): void {
+   sesion.cerrar();
+-  actualizar({ usuario: null, modulos: [], vista: 'dashboard' });
++  invalidarCache();
++  actualizar({ usuario: null, modulos: [], vista: 'dashboard', sedeFiltro: null });
+   mostrarLogin(mensaje);
+ }
+ 
+@@ -239,7 +272,7 @@ function itemNav(opciones: { readonly id: string; readonly titulo: string; reado
+ 
+ function shellHtml(): HtmlSeguro {
+   const u = estado.usuario;
+-  const vistas = VISTAS.filter((v) => !v.soloAdmin || esAdmin());
++  const vistas = vistasVisibles();
+   return html`<div id="shell" data-collapsed="${estado.colapsado}" class="group/sb flex min-h-screen">
+     <aside id="barra-lateral" aria-label="Navegación principal"
+       class="sticky top-0 z-30 flex h-screen w-64 shrink-0 flex-col border-r border-slate-200 bg-white shadow-lg transition-[width] duration-200 group-data-[collapsed=true]/sb:w-20">
+@@ -269,6 +302,7 @@ function shellHtml(): HtmlSeguro {
+           <span role="tooltip" class="pointer-events-none absolute left-full top-1/2 z-40 ml-2 hidden -translate-y-1/2 whitespace-nowrap rounded-md bg-slate-900 px-3 py-1 text-xs font-medium text-white shadow-lg group-data-[collapsed=true]/sb:group-hover/item:block group-data-[collapsed=true]/sb:group-focus-visible/item:block">Expandir menú</span>
+         </button>
+       </div>
++      ${firmaSidebar()}
+     </aside>
+     <main id="contenido" tabindex="-1" class="m-2 min-w-0 flex-1 rounded-xl bg-slate-50/95 p-4 shadow-lg sm:m-4 sm:p-8"></main>
+   </div>`;
+@@ -312,6 +346,7 @@ async function arrancar(): Promise<void> {
+   }
+ 
+   document.body.className = 'text-slate-900';
++  liberarRed();
+   montar(obtener('#app', HTMLElement), shellHtml());
+   const shell = obtener('#shell', HTMLElement);
+   shell.addEventListener('click', (ev) => {
+@@ -329,7 +364,7 @@ async function arrancar(): Promise<void> {
+   });
+   obtener('#salir', HTMLButtonElement).addEventListener('click', () => cerrarSesion());
+   obtener('#alternar-sidebar', HTMLButtonElement).addEventListener('click', alternarSidebar);
+-  const vistaInicial = estado.vista.startsWith('premium:') || VISTAS.some((v) => v.id === estado.vista) ? estado.vista : 'dashboard';
++  const vistaInicial = estado.vista.startsWith('premium:') || vistasVisibles().some((v) => v.id === estado.vista) ? estado.vista : 'dashboard';
+   await navegar(vistaInicial);
+ }
+ 
+@@ -350,7 +385,8 @@ async function navegar(id: string): Promise<void> {
+   marcarNavegacion(id);
+   const zona = obtener('#contenido', HTMLElement);
+   const ctx: Contexto = { zona, vigente: () => mio === ticketVista };
+-  montar(zona, html`<div class="h-32 animate-pulse rounded-xl bg-slate-200" role="status" aria-label="Cargando"></div>`);
++  // Navegación instantánea: la vista anterior se retira y el esqueleto entra en el mismo cuadro; los datos llegan después (caché + red).
++  montar(zona, esqueletoPara(id));
+   try {
+     if (id.startsWith('premium:')) vistaPremium(ctx, id.slice('premium:'.length));
+     else if (id.startsWith('estudiante:')) await vistaDetalle(ctx, id.slice('estudiante:'.length));
+@@ -363,6 +399,11 @@ async function navegar(id: string): Promise<void> {
+         usuario: estado.usuario,
+         // 403 MODULO_PREMIUM_DESHABILITADO (3.ª sede sin el módulo): relee el catálogo y pinta la pantalla de cristal con el precio.
+         alBloquear: (d) => void bloquearModulo(ctx, d),
++        // Clic en la tarjeta de una sede: se guarda su id en el estado y se abre el CRM de Estudiantes ya filtrado por esa sucursal.
++        alElegirSede: (sedeId) => {
++          actualizar({ sedeFiltro: sedeId, paginaEstudiantes: 1, filtroEstudiantes: '' });
++          void navegar('estudiantes');
++        },
+         alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
+       });
+     } else if (id === 'invitaciones') {
+@@ -372,7 +413,7 @@ async function navegar(id: string): Promise<void> {
+         usuario: estado.usuario,
+         alSesionExpirada: () => cerrarSesion('Tu sesión expiró. Inicia sesión de nuevo.'),
+       });
+-    } else if (id === 'contabilidad' && esAdmin()) await vistaContabilidad(ctx);
++    } else if (id === 'contabilidad' && MODULO_EGRESOS_ACTIVO && esAdmin()) await vistaContabilidad(ctx);
+     else if (id === 'configuracion' && esAdmin()) await vistaConfiguracion({ zona: ctx.zona, vigente: ctx.vigente, usuario: estado.usuario });
+     else await vistaDashboard(ctx);
+   } catch (e: unknown) {
+@@ -549,6 +590,7 @@ function filaEstudiante(s: EstudianteListado): HtmlSeguro {
+   return html`<tr>
+     <td class="${CLS.td}"><button type="button" data-detalle="${s.id}" class="rounded-md text-left font-medium text-slate-900 underline decoration-slate-300 underline-offset-4 hover:decoration-slate-900" aria-label="Ver ficha de ${s.apellidos}, ${s.nombres}">${s.apellidos}, ${s.nombres}</button></td>
+     <td class="${CLS.td}">${s.grado_solicitado}</td>
++    <td class="${CLS.td}">${s.sede ?? 'Sin sede'}</td>
+     <td class="${CLS.td}">${s.representante}</td>
+     <td class="${CLS.td}">${etiquetaEstado(s.estado_dinamico)}</td>
+     <td class="${CLS.td} whitespace-nowrap">${usd(s.deuda_vencida_usd)}</td>
+@@ -559,24 +601,73 @@ function filaEstudiante(s: EstudianteListado): HtmlSeguro {
+   </tr>`;
+ }
+ 
++const esPaginaEstudiantes: Guarda<Pagina<EstudianteListado>> = (v): v is Pagina<EstudianteListado> => {
++  if (typeof v !== 'object' || v === null) return false;
++  const o = v as Readonly<Record<string, unknown>>;
++  const p = o['paginacion'];
++  return Array.isArray(o['datos']) && typeof p === 'object' && p !== null && typeof (p as Readonly<Record<string, unknown>>)['total'] === 'number';
++};
++
++/** Selector de sede del CRM (solo acceso consolidado): las sedes salen del caché al instante y se refrescan en segundo plano. */
++function pintarSelectorSedes(ctx: Contexto, sedes: readonly SedeResumen[]): void {
++  const zona = buscar('#zona-filtro-sede', HTMLElement, ctx.zona);
++  if (!zona) return;
++  montar(
++    zona,
++    html`<label for="filtro-sede" class="${CLS.etiqueta}">Sede</label>
++      <select id="filtro-sede" class="${CLS.input} min-h-10 min-w-48">
++        <option value="" ${estado.sedeFiltro === null ? raw('selected') : null}>Todas las sedes</option>
++        ${sedes.map((x) => html`<option value="${x.id}" ${estado.sedeFiltro === x.id ? raw('selected') : null}>${x.nombre}</option>`)}
++      </select>`,
++  );
++  obtener('#filtro-sede', HTMLSelectElement, zona).addEventListener('change', (ev) => {
++    const n = ev.target instanceof HTMLSelectElement ? Number(ev.target.value) : Number.NaN;
++    actualizar({ sedeFiltro: Number.isInteger(n) && n > 0 ? n : null, paginaEstudiantes: 1 });
++    void navegar('estudiantes');
++  });
++}
++
+ async function vistaEstudiantes(ctx: Contexto): Promise<void> {
+-  const r = await bma.pagina<EstudianteListado>('/estudiantes', { estado: estado.filtroEstudiantes, pagina: estado.paginaEstudiantes, limite: LIMITE_PAGINA });
+-  if (!ctx.vigente()) return;
++  const sedeFiltro = alcanceDe(estado.usuario).tipo === 'consolidado' ? estado.sedeFiltro : null;
++  const consulta = { estado: estado.filtroEstudiantes, pagina: estado.paginaEstudiantes, limite: LIMITE_PAGINA, sede_id: sedeFiltro };
++  await cargarConCache<Pagina<EstudianteListado>>({
++    clave: `estudiantes:${estado.filtroEstudiantes}:${estado.paginaEstudiantes}:${sedeFiltro ?? 'todas'}`,
++    esValido: esPaginaEstudiantes,
++    cargar: () => bma.pagina<EstudianteListado>('/estudiantes', consulta),
++    pintar: (r) => pintarEstudiantes(ctx, r),
++    vigente: ctx.vigente,
++  });
++}
++
++function pintarEstudiantes(ctx: Contexto, r: Pagina<EstudianteListado>): void {
++  const consolidado = alcanceDe(estado.usuario).tipo === 'consolidado';
+   montar(
+     ctx.zona,
+     html`${encabezado('Estudiantes', `${r.paginacion.total} resultado(s)`)}
+-    <div class="mb-4 flex flex-wrap gap-2" role="group" aria-label="Filtrar por estado">
+-      ${FILTROS_ESTUDIANTES.map((f) => html`<button type="button" data-filtro="${f}" aria-pressed="${f === estado.filtroEstudiantes}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'aria-pressed:border-slate-900 aria-pressed:bg-slate-900 aria-pressed:text-white')}">${f === '' ? 'Todos' : f}</button>`)}
++    <div class="mb-4 flex flex-wrap items-end gap-4">
++      <div class="flex flex-wrap gap-2" role="group" aria-label="Filtrar por estado">
++        ${FILTROS_ESTUDIANTES.map((f) => html`<button type="button" data-filtro="${f}" aria-pressed="${f === estado.filtroEstudiantes}" class="${boton(CLS.btnSecundario, CLS.btnPeq, 'aria-pressed:border-slate-900 aria-pressed:bg-slate-900 aria-pressed:text-white')}">${f === '' ? 'Todos' : f}</button>`)}
++      </div>
++      ${consolidado ? html`<div id="zona-filtro-sede"></div>` : null}
+     </div>
+-    <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white/90 backdrop-blur">
++    <div class="overflow-x-auto rounded-xl border border-slate-200 bg-white">
+       <table class="${CLS.tabla}">
+         <caption class="sr-only">Listado de estudiantes</caption>
+-        <thead><tr><th scope="col" class="${CLS.th}">Estudiante</th><th scope="col" class="${CLS.th}">Grado</th><th scope="col" class="${CLS.th}">Representante</th><th scope="col" class="${CLS.th}">Estado</th><th scope="col" class="${CLS.th}">Deuda vencida</th><th scope="col" class="${CLS.th}">Alertas WhatsApp</th></tr></thead>
+-        <tbody>${r.datos.length === 0 ? html`<tr><td colspan="6" class="${CLS.td}">Sin resultados.</td></tr>` : r.datos.map(filaEstudiante)}</tbody>
++        <thead><tr><th scope="col" class="${CLS.th}">Estudiante</th><th scope="col" class="${CLS.th}">Nivel</th><th scope="col" class="${CLS.th}">Sede</th><th scope="col" class="${CLS.th}">Representante</th><th scope="col" class="${CLS.th}">Estado</th><th scope="col" class="${CLS.th}">Deuda vencida</th><th scope="col" class="${CLS.th}">Alertas WhatsApp</th></tr></thead>
++        <tbody>${r.datos.length === 0 ? html`<tr><td colspan="7" class="${CLS.td}">Sin resultados.</td></tr>` : r.datos.map(filaEstudiante)}</tbody>
+       </table>
+     </div>
+     ${paginacionHtml(r.paginacion)}`,
+   );
++  if (consolidado) {
++    void cargarConCache<readonly SedeResumen[]>({
++      clave: CLAVE_SEDES,
++      esValido: esListaSedes,
++      cargar: () => bma.get<readonly SedeResumen[]>('/sedes'),
++      pintar: (sedes) => pintarSelectorSedes(ctx, sedes),
++      vigente: ctx.vigente,
++    }).catch(() => undefined); // el selector es accesorio: si falla, la lista sigue funcionando
++  }
+   for (const b of todos('[data-filtro]', HTMLButtonElement, ctx.zona)) {
+     b.addEventListener('click', () => {
+       const valor = b.dataset['filtro'] ?? '';
+diff --git a/frontend/src/admisiones.ts b/frontend/src/admisiones.ts
+index b3bd821..2dd27eb 100644
+--- a/frontend/src/admisiones.ts
++++ b/frontend/src/admisiones.ts
+@@ -684,7 +684,7 @@ function costoHtml(): HtmlSeguro {
+     <p class="mt-4 text-sm text-slate-700">Las cuentas autorizadas y los pasos para pagar están en el <a href="#t-pago" class="font-semibold text-slate-900 underline">paso 5 · Pago de la matrícula</a>.</p>`;
+ }
+ 
+-/** Aplica el bloqueo visual del campo «Grado a cursar» con el nivel asignado por la invitación (idempotente). */
++/** Aplica el bloqueo visual del campo «Nivel a cursar» con el nivel asignado por la invitación (idempotente). */
+ function aplicarNivelBloqueado(nivel: string): void {
+   const control = buscar('#f-grado_solicitado', HTMLInputElement);
+   if (!control) return;
+diff --git a/frontend/src/estudiantes-detalle.ts b/frontend/src/estudiantes-detalle.ts
+index 12f3279..801e4ce 100644
+--- a/frontend/src/estudiantes-detalle.ts
++++ b/frontend/src/estudiantes-detalle.ts
+@@ -94,7 +94,7 @@ function seccionAcademica(d: DetalleEstudiante): HtmlSeguro {
+   return html`<section class="${CLS.tarjeta} p-6 lg:col-span-2" aria-labelledby="t-academico">
+     ${tituloSeccion('t-academico', 'Información académica', 'school')}
+     <dl class="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+-      ${dato('Grado', d.grado_solicitado)}
++      ${dato('Nivel', d.grado_solicitado)}
+       ${dato('Cédula de identidad', d.cedula_identidad)}
+       ${dato('Fecha de nacimiento', `${fechaCorta(d.fecha_nacimiento)}${edad !== null ? ` · ${edad} años` : ''}`)}
+       ${dato('Lugar de nacimiento', d.lugar_nacimiento)}
+diff --git a/frontend/src/invitaciones-modulo.ts b/frontend/src/invitaciones-modulo.ts
+index c152a90..ea4a343 100644
+--- a/frontend/src/invitaciones-modulo.ts
++++ b/frontend/src/invitaciones-modulo.ts
+@@ -50,26 +50,10 @@ const LIMITE_PAGINA = 10;
+ const OPCION_OTRO = '__otro__';
+ 
+ /**
+- * Niveles ofrecidos en el selector. Es una lista base: ajústala a los niveles reales de la academia; «Otro…» permite escribir uno distinto.
+- * El valor elegido viaja como `nivel_asignado` y se convierte en el «Grado a cursar» bloqueado de la planilla pública.
++ * Niveles FIJOS de la Sede Este (Fundalara) ofrecidos en el selector de invitaciones. «Otro…» sigue permitiendo escribir uno distinto.
++ * El valor elegido viaja como `nivel_asignado` y se convierte en el «Nivel a cursar» bloqueado de la planilla pública.
+  */
+-export const NIVELES: readonly string[] = [
+-  'Maternal',
+-  'Preescolar 1.er nivel',
+-  'Preescolar 2.º nivel',
+-  'Preescolar 3.er nivel',
+-  '1.er grado',
+-  '2.º grado',
+-  '3.er grado',
+-  '4.º grado',
+-  '5.º grado',
+-  '6.º grado',
+-  '1.er año',
+-  '2.º año',
+-  '3.er año',
+-  '4.º año',
+-  '5.º año',
+-];
++export const NIVELES: readonly string[] = ['Kids 1 B', 'Kids 1 A', 'Beginner B', 'Beginner A', 'Adultos', 'Kids 1 C', 'Beginner C'];
+ 
+ const FILTROS: readonly ('' | EstadoInvitacion)[] = ['', 'Pendiente', 'Usada', 'Vencida', 'Revocada'];
+ 
+@@ -108,12 +92,12 @@ export function validarInvitacion(e: EntradaInvitacion, alcance: AlcanceUsuario)
+   let nivel = '';
+   if (e.nivel === OPCION_OTRO) {
+     nivel = e.nivelOtro.trim().replace(/\s+/g, ' ');
+-    if (nivel === '') errores['nivel_otro'] = 'Escribe el nivel o grado.';
++    if (nivel === '') errores['nivel_otro'] = 'Escribe el nivel.';
+     else if (nivel.length > MAX_NIVEL) errores['nivel_otro'] = `El nivel admite hasta ${MAX_NIVEL} caracteres.`;
+   } else if (NIVELES.includes(e.nivel)) {
+     nivel = e.nivel;
+   } else {
+-    errores['nivel_asignado'] = 'Elige el nivel o grado asignado.';
++    errores['nivel_asignado'] = 'Elige el nivel asignado.';
+   }
+ 
+   const diasTexto = e.dias.trim();
+@@ -184,7 +168,7 @@ function formularioHtml(alcance: AlcanceUsuario, sedes: readonly SedeResumen[]):
+     <form id="form-inv" novalidate class="grid gap-4 sm:grid-cols-2" aria-label="Emitir invitación">
+       ${campoSedeHtml(alcance, sedes)}
+       <div>
+-        <label for="f-inv-nivel" class="${CLS.etiqueta}">Nivel / grado asignado <span class="text-red-800" aria-hidden="true">*</span></label>
++        <label for="f-inv-nivel" class="${CLS.etiqueta}">Nivel asignado <span class="text-red-800" aria-hidden="true">*</span></label>
+         <select id="f-inv-nivel" name="nivel_asignado" required aria-describedby="e-inv-nivel" class="${CLS.input} min-h-10">
+           <option value="">Elige un nivel…</option>
+           ${NIVELES.map((n) => html`<option value="${n}">${n}</option>`)}
+diff --git a/frontend/src/lib/cache.ts b/frontend/src/lib/cache.ts
+new file mode 100644
+index 0000000..108ba61
+--- /dev/null
++++ b/frontend/src/lib/cache.ts
+@@ -0,0 +1,92 @@
++/**
++ * Caché transitorio «stale-while-revalidate» en `sessionStorage` para datos de baja mutación (lista de sedes, etc.).
++ *  - Con dato en caché: se pinta AL INSTANTE y se pide el dato fresco en segundo plano; si cambió, se repinta en silencio.
++ *  - Sin caché: se pide y se pinta al llegar (el llamador muestra un esqueleto mientras tanto).
++ *  - Vive solo en la pestaña (sessionStorage) y se vacía al cerrar sesión; si el almacenamiento está bloqueado, todo sigue funcionando sin caché.
++ *  - Un fallo de red en el refresco de fondo NO borra lo que ya se ve; un 401 (sesión vencida) siempre se propaga.
++ * El dato guardado jamás se asume correcto: se valida con una guarda de tipo antes de usarlo (sin `any`).
++ */
++import { BmaSesionExpiradaError } from '../api/bmaClient';
++
++const PREFIJO = 'bma.cache.v1:';
++
++export type Guarda<T> = (valor: unknown) => valor is T;
++
++function almacen(): Storage | null {
++  try {
++    return sessionStorage;
++  } catch {
++    return null;
++  }
++}
++
++export function leerCache<T>(clave: string, esValido: Guarda<T>): T | null {
++  const s = almacen();
++  if (!s) return null;
++  try {
++    const crudo = s.getItem(PREFIJO + clave);
++    if (crudo === null) return null;
++    const v: unknown = JSON.parse(crudo);
++    return esValido(v) ? v : null;
++  } catch {
++    return null;
++  }
++}
++
++export function guardarCache(clave: string, valor: unknown): void {
++  try {
++    almacen()?.setItem(PREFIJO + clave, JSON.stringify(valor));
++  } catch {
++    /* cuota llena o bloqueado: se sigue sin caché */
++  }
++}
++
++/** Invalida una clave (tras una escritura que la deja vieja) o, sin argumento, todo el caché. */
++export function invalidarCache(clave?: string): void {
++  const s = almacen();
++  if (!s) return;
++  try {
++    if (clave !== undefined) {
++      s.removeItem(PREFIJO + clave);
++      return;
++    }
++    const claves: string[] = [];
++    for (let i = 0; i < s.length; i += 1) {
++      const k = s.key(i);
++      if (k !== null && k.startsWith(PREFIJO)) claves.push(k);
++    }
++    for (const k of claves) s.removeItem(k);
++  } catch {
++    /* nada que limpiar */
++  }
++}
++
++export interface OpcionesSwr<T> {
++  readonly clave: string;
++  readonly esValido: Guarda<T>;
++  readonly cargar: () => Promise<T>;
++  /** `desdeCache` es true en el primer pintado instantáneo. Debe ser idempotente (se llama una o dos veces). */
++  readonly pintar: (datos: T, desdeCache: boolean) => void;
++  /** Si devuelve false se abandona (el usuario ya cambió de pestaña). */
++  readonly vigente?: () => boolean;
++}
++
++/**
++ * Devuelve cuando termina el refresco (o enseguida si ya había caché y se prefiere no esperar: ver `esperarRefresco`).
++ * Con caché la promesa se resuelve tras el pintado instantáneo + el refresco; el llamador puede ignorarla con `void`.
++ */
++export async function cargarConCache<T>(o: OpcionesSwr<T>): Promise<void> {
++  const vigente = o.vigente ?? ((): boolean => true);
++  const enCache = leerCache(o.clave, o.esValido);
++  if (enCache !== null && vigente()) o.pintar(enCache, true);
++  try {
++    const fresco = await o.cargar();
++    if (!vigente()) return;
++    const cambio = enCache === null || JSON.stringify(fresco) !== JSON.stringify(enCache);
++    guardarCache(o.clave, fresco);
++    if (cambio) o.pintar(fresco, false);
++  } catch (e: unknown) {
++    if (e instanceof BmaSesionExpiradaError || enCache === null) throw e;
++    /* refresco de fondo fallido: se conserva lo ya pintado */
++  }
++}
+diff --git a/frontend/src/lib/esqueleto.ts b/frontend/src/lib/esqueleto.ts
+new file mode 100644
+index 0000000..0780daf
+--- /dev/null
++++ b/frontend/src/lib/esqueleto.ts
+@@ -0,0 +1,46 @@
++/**
++ * Esqueletos de carga («skeleton loaders»): estructura fantasma con pulsación sutil que se inyecta de inmediato al cambiar de pestaña,
++ * antes de que llegue ningún dato. Todo es estático (sin datos dinámicos) y accesible: un único `role="status"` anuncia la carga.
++ */
++import { html, type HtmlSeguro } from './html';
++
++/** Cabecera de vista (título + subtítulo) fantasma. */
++function cabecera(): HtmlSeguro {
++  return html`<div class="mb-6"><div class="h-8 w-56 rounded-lg bg-slate-200"></div><div class="mt-3 h-4 w-80 max-w-full rounded bg-slate-200"></div></div>`;
++}
++
++/** Esqueleto de una vista de tabla: cabecera, filtros y `filas` filas. */
++export function esqueletoTabla(filas = 6): HtmlSeguro {
++  const fila = html`<div class="flex gap-4 border-b border-slate-100 px-4 py-4"><div class="h-4 w-1/4 rounded bg-slate-200"></div><div class="h-4 w-1/6 rounded bg-slate-200"></div><div class="h-4 w-1/5 rounded bg-slate-200"></div><div class="h-4 w-1/6 rounded bg-slate-200"></div></div>`;
++  return html`<div role="status" aria-label="Cargando" class="animate-pulse">
++    ${cabecera()}
++    <div class="mb-4 flex gap-2"><div class="h-8 w-20 rounded-lg bg-slate-200"></div><div class="h-8 w-24 rounded-lg bg-slate-200"></div><div class="h-8 w-28 rounded-lg bg-slate-200"></div></div>
++    <div class="overflow-hidden rounded-xl border border-slate-200 bg-white"><div class="h-11 bg-slate-200"></div>${Array.from({ length: filas }, () => fila)}</div>
++  </div>`;
++}
++
++/** Esqueleto de una vista de tarjetas (dashboard, sedes). */
++export function esqueletoTarjetas(n = 4): HtmlSeguro {
++  const tarjeta = html`<div class="rounded-xl border border-slate-200 bg-white p-6"><div class="h-4 w-1/2 rounded bg-slate-200"></div><div class="mt-4 h-7 w-2/3 rounded bg-slate-200"></div><div class="mt-3 h-3 w-1/3 rounded bg-slate-200"></div></div>`;
++  return html`<div role="status" aria-label="Cargando" class="animate-pulse">
++    ${cabecera()}
++    <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">${Array.from({ length: n }, () => tarjeta)}</div>
++    <div class="mt-6 h-48 rounded-xl bg-slate-200"></div>
++  </div>`;
++}
++
++/** Esqueleto genérico para el resto de vistas. */
++export function esqueletoGenerico(): HtmlSeguro {
++  return html`<div role="status" aria-label="Cargando" class="animate-pulse">
++    ${cabecera()}
++    <div class="h-40 rounded-xl bg-slate-200"></div>
++    <div class="mt-4 h-24 rounded-xl bg-slate-200"></div>
++  </div>`;
++}
++
++/** Elige el esqueleto que mejor imita la vista de destino. */
++export function esqueletoPara(vista: string): HtmlSeguro {
++  if (vista === 'estudiantes' || vista === 'auditoria' || vista === 'invitaciones') return esqueletoTabla();
++  if (vista === 'dashboard' || vista === 'sedes') return esqueletoTarjetas();
++  return esqueletoGenerico();
++}
+diff --git a/frontend/src/lib/firma.ts b/frontend/src/lib/firma.ts
+new file mode 100644
+index 0000000..7a93c10
+--- /dev/null
++++ b/frontend/src/lib/firma.ts
+@@ -0,0 +1,28 @@
++/**
++ * Firma de autoría de Astra Digital Solutions (pie del login y base del sidebar). Texto + isotipo «A» en Cyan Tecnológico (#22D3EE).
++ * El isotipo es un SVG inline decorativo (`aria-hidden`); el texto visible es el nombre accesible.
++ */
++import { html, type HtmlSeguro } from './html';
++
++export const TEXTO_AUTORIA = 'Diseñado y desarrollado por Astra Digital Solutions';
++export const TEXTO_SUITE = 'Astra Academy Suite v1.0';
++export const CYAN_TECNOLOGICO = '#22D3EE';
++
++/** Isotipo «A»: dos diagonales y un travesaño, trazo redondeado. */
++function isotipoAstra(clases: string): HtmlSeguro {
++  return html`<svg viewBox="0 0 24 24" fill="none" stroke="${CYAN_TECNOLOGICO}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="${clases}"><path d="M4 20 12 4l8 16"/><path d="M7.6 14h8.8"/></svg>`;
++}
++
++/** Pie de la tarjeta del login. El cian va sobre una pastilla slate-900 (contraste ≈ 11:1); el texto va en slate-700. */
++export function firmaLogin(): HtmlSeguro {
++  return html`<footer class="mt-8 flex items-center justify-center gap-2 border-t border-slate-200 pt-4 text-center font-display text-xs font-medium tracking-wide text-slate-700">
++    ${isotipoAstra('h-5 w-5 shrink-0 rounded bg-slate-900 p-0.5')}<span>${TEXTO_AUTORIA}</span>
++  </footer>`;
++}
++
++/** Base del sidebar: «Astra Academy Suite v1.0» (colapsado: solo el isotipo). */
++export function firmaSidebar(): HtmlSeguro {
++  return html`<div class="flex items-center gap-2 border-t border-slate-200 px-4 py-3 font-display text-xs font-medium tracking-wide text-slate-700 group-data-[collapsed=true]/sb:justify-center group-data-[collapsed=true]/sb:px-0" title="${TEXTO_SUITE}">
++    ${isotipoAstra('h-6 w-6 shrink-0 rounded bg-slate-900 p-1')}<span class="min-w-0 truncate group-data-[collapsed=true]/sb:sr-only">${TEXTO_SUITE}</span>
++  </div>`;
++}
+diff --git a/frontend/src/lib/red-neuronal.ts b/frontend/src/lib/red-neuronal.ts
+new file mode 100644
+index 0000000..e51720b
+--- /dev/null
++++ b/frontend/src/lib/red-neuronal.ts
+@@ -0,0 +1,198 @@
++/**
++ * Red neuronal interactiva del fondo del login (Canvas 2D, sin dependencias): nodos y partículas conectadas sobre el azul institucional.
++ *  - ~1/3 de los nodos están «anclados» a una geometría abstracta de la letra «A» (dos diagonales y un travesaño) y vuelven a ella con un
++ *    resorte muy débil: la forma se insinúa y se deshace, nunca se dibuja de forma literal.
++ *  - El resto deriva libremente. Cerca del cursor (o del dedo) los nodos se sienten atraídos y se enlazan con él.
++ *  - Respeta `prefers-reduced-motion` (un solo cuadro estático), se pausa con la pestaña oculta y se adapta a la densidad de píxeles.
++ *  - Devuelve una función que la detiene y libera todos los listeners (se llama al salir de la pantalla de login).
++ * Decorativo: el canvas va con `aria-hidden` y `pointer-events-none`; no recibe foco ni intercepta clics.
++ */
++
++interface Nodo {
++  x: number;
++  y: number;
++  vx: number;
++  vy: number;
++  /** Ancla en la «A» (coordenadas normalizadas 0–1 del área del dibujo) o null si deriva libre. */
++  ax: number | null;
++  ay: number | null;
++  r: number;
++  cian: boolean;
++}
++
++const COLOR_LINEA = '255, 255, 255';
++const COLOR_CIAN = '103, 232, 249'; // cyan-300: acento tecnológico
++const DISTANCIA_ENLACE = 130;
++const RADIO_CURSOR = 170;
++
++/** Puntos de la «A»: pata izquierda, pata derecha y travesaño, en coordenadas 0–1 (la base ocupa ~60 % del alto). */
++export function puntosDeLaA(cantidad: number): readonly (readonly [number, number])[] {
++  const apice: readonly [number, number] = [0.5, 0.12];
++  const izq: readonly [number, number] = [0.28, 0.88];
++  const der: readonly [number, number] = [0.72, 0.88];
++  const lerp = (a: readonly [number, number], b: readonly [number, number], t: number): readonly [number, number] => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
++  const porTramo = Math.max(2, Math.floor(cantidad / 3));
++  const puntos: (readonly [number, number])[] = [];
++  for (let i = 0; i < porTramo; i += 1) puntos.push(lerp(izq, apice, i / porTramo));
++  for (let i = 0; i < porTramo; i += 1) puntos.push(lerp(apice, der, i / porTramo));
++  const a = lerp(izq, apice, 0.58);
++  const b = lerp(der, apice, 0.58);
++  for (let i = 1; i < porTramo; i += 1) puntos.push(lerp(a, b, i / porTramo));
++  return puntos;
++}
++
++function crearNodos(ancho: number, alto: number): Nodo[] {
++  const total = Math.max(36, Math.min(110, Math.round((ancho * alto) / 11_000)));
++  const lado = Math.min(ancho, alto) * 0.9;
++  const x0 = (ancho - lado) / 2;
++  const y0 = (alto - lado) / 2;
++  const anclas = puntosDeLaA(Math.round(total / 3));
++  const nodos: Nodo[] = [];
++  for (const [nx, ny] of anclas) {
++    const ax = x0 + nx * lado;
++    const ay = y0 + ny * lado;
++    nodos.push({ x: ax + (Math.random() - 0.5) * 90, y: ay + (Math.random() - 0.5) * 90, vx: 0, vy: 0, ax, ay, r: 1.8 + Math.random() * 1.4, cian: Math.random() < 0.3 });
++  }
++  while (nodos.length < total) {
++    nodos.push({
++      x: Math.random() * ancho, y: Math.random() * alto, vx: (Math.random() - 0.5) * 0.35, vy: (Math.random() - 0.5) * 0.35,
++      ax: null, ay: null, r: 1.2 + Math.random() * 1.6, cian: Math.random() < 0.2,
++    });
++  }
++  return nodos;
++}
++
++export function montarRedNeuronal(canvas: HTMLCanvasElement): () => void {
++  const ctx = canvas.getContext('2d');
++  if (!ctx) return () => undefined;
++  const reducido = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
++  let ancho = 0;
++  let alto = 0;
++  let nodos: Nodo[] = [];
++  let raf = 0;
++  let activo = true;
++  const cursor = { x: -9999, y: -9999, dentro: false };
++
++  const ajustar = (): void => {
++    const dpr = Math.min(window.devicePixelRatio || 1, 2);
++    ancho = canvas.clientWidth;
++    alto = canvas.clientHeight;
++    canvas.width = Math.max(1, Math.round(ancho * dpr));
++    canvas.height = Math.max(1, Math.round(alto * dpr));
++    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
++    nodos = crearNodos(ancho, alto);
++  };
++
++  const mover = (): void => {
++    for (const n of nodos) {
++      if (n.ax !== null && n.ay !== null) {
++        n.vx += (n.ax - n.x) * 0.0016 + (Math.random() - 0.5) * 0.05;
++        n.vy += (n.ay - n.y) * 0.0016 + (Math.random() - 0.5) * 0.05;
++      }
++      if (cursor.dentro) {
++        const dx = cursor.x - n.x;
++        const dy = cursor.y - n.y;
++        const d = Math.hypot(dx, dy);
++        if (d < RADIO_CURSOR && d > 1) {
++          const f = (1 - d / RADIO_CURSOR) * 0.045;
++          n.vx += (dx / d) * f * 6;
++          n.vy += (dy / d) * f * 6;
++        }
++      }
++      n.vx *= 0.94;
++      n.vy *= 0.94;
++      n.x += n.vx;
++      n.y += n.vy;
++      if (n.ax === null) {
++        if (n.x < -20) n.x = ancho + 20;
++        else if (n.x > ancho + 20) n.x = -20;
++        if (n.y < -20) n.y = alto + 20;
++        else if (n.y > alto + 20) n.y = -20;
++        n.vx += (Math.random() - 0.5) * 0.02;
++        n.vy += (Math.random() - 0.5) * 0.02;
++      }
++    }
++  };
++
++  const dibujar = (): void => {
++    ctx.clearRect(0, 0, ancho, alto);
++    for (let i = 0; i < nodos.length; i += 1) {
++      const a = nodos[i];
++      if (!a) continue;
++      for (let j = i + 1; j < nodos.length; j += 1) {
++        const b = nodos[j];
++        if (!b) continue;
++        const d = Math.hypot(a.x - b.x, a.y - b.y);
++        if (d < DISTANCIA_ENLACE) {
++          ctx.strokeStyle = `rgba(${COLOR_LINEA}, ${(1 - d / DISTANCIA_ENLACE) * 0.28})`;
++          ctx.lineWidth = 1;
++          ctx.beginPath();
++          ctx.moveTo(a.x, a.y);
++          ctx.lineTo(b.x, b.y);
++          ctx.stroke();
++        }
++      }
++      if (cursor.dentro) {
++        const d = Math.hypot(a.x - cursor.x, a.y - cursor.y);
++        if (d < RADIO_CURSOR) {
++          ctx.strokeStyle = `rgba(${COLOR_CIAN}, ${(1 - d / RADIO_CURSOR) * 0.55})`;
++          ctx.beginPath();
++          ctx.moveTo(a.x, a.y);
++          ctx.lineTo(cursor.x, cursor.y);
++          ctx.stroke();
++        }
++      }
++    }
++    for (const n of nodos) {
++      ctx.fillStyle = n.cian ? `rgba(${COLOR_CIAN}, 0.9)` : `rgba(${COLOR_LINEA}, 0.7)`;
++      ctx.beginPath();
++      ctx.arc(n.x, n.y, n.r, 0, Math.PI * 2);
++      ctx.fill();
++    }
++  };
++
++  const cuadro = (): void => {
++    if (!activo) return;
++    mover();
++    dibujar();
++    raf = window.requestAnimationFrame(cuadro);
++  };
++
++  const alMover = (ev: PointerEvent): void => {
++    const r = canvas.getBoundingClientRect();
++    cursor.x = ev.clientX - r.left;
++    cursor.y = ev.clientY - r.top;
++    cursor.dentro = true;
++  };
++  const alSalir = (): void => {
++    cursor.dentro = false;
++  };
++
++  ajustar();
++  window.addEventListener('resize', ajustar);
++  window.addEventListener('pointermove', alMover, { passive: true });
++  window.addEventListener('pointerleave', alSalir);
++  document.addEventListener('mouseleave', alSalir);
++
++  if (reducido) {
++    // Sin animación: se asientan los nodos en su ancla y se pinta un único cuadro.
++    for (const n of nodos) {
++      if (n.ax !== null && n.ay !== null) {
++        n.x = n.ax;
++        n.y = n.ay;
++      }
++    }
++    dibujar();
++  } else {
++    raf = window.requestAnimationFrame(cuadro);
++  }
++
++  return (): void => {
++    activo = false;
++    window.cancelAnimationFrame(raf);
++    window.removeEventListener('resize', ajustar);
++    window.removeEventListener('pointermove', alMover);
++    window.removeEventListener('pointerleave', alSalir);
++    document.removeEventListener('mouseleave', alSalir);
++  };
++}
+diff --git a/frontend/src/lib/sedes-cache.ts b/frontend/src/lib/sedes-cache.ts
+new file mode 100644
+index 0000000..a53672f
+--- /dev/null
++++ b/frontend/src/lib/sedes-cache.ts
+@@ -0,0 +1,12 @@
++/** Lista de sedes en caché (dato de baja mutación): clave y guarda de tipo compartidas por Sedes, Estudiantes e Invitaciones. */
++import type { SedeResumen } from '../types/index';
++
++export const CLAVE_SEDES = 'sedes';
++
++export function esListaSedes(v: unknown): v is readonly SedeResumen[] {
++  return Array.isArray(v) && v.every((s: unknown) => {
++    if (typeof s !== 'object' || s === null) return false;
++    const o = s as Readonly<Record<string, unknown>>;
++    return typeof o['id'] === 'number' && typeof o['nombre'] === 'string' && typeof o['activa'] === 'boolean';
++  });
++}
+diff --git a/frontend/src/sedes-gestion.ts b/frontend/src/sedes-gestion.ts
+index 99623d0..462d3e5 100644
+--- a/frontend/src/sedes-gestion.ts
++++ b/frontend/src/sedes-gestion.ts
+@@ -15,7 +15,9 @@ import { html, montar, type HtmlSeguro } from './lib/html';
+ import { icono } from './lib/icons';
+ import { fechaHora, usd } from './lib/format';
+ import { alcanceDe, type AlcanceUsuario } from './lib/alcance';
+-import { CLS, aviso, boton, conBotonOcupado, etiqueta, notificar, obtener } from './lib/ui';
++import { CLS, aviso, boton, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
++import { cargarConCache, invalidarCache } from './lib/cache';
++import { CLAVE_SEDES, esListaSedes } from './lib/sedes-cache';
+ import { encabezadoVista } from './lib/candado';
+ import { erroresDeCampos, mostrarMensaje, pintarErrores, valorDe } from './lib/formulario';
+ import type { CuerpoCrearSede, DetalleModuloPremium, RespuestaCrearSede, SedeResumen, Usuario } from './types/index';
+@@ -34,6 +36,8 @@ export interface ContextoSedes {
+   readonly usuario: Usuario | null;
+   /** El servidor respondió 403 MODULO_PREMIUM_DESHABILITADO: el panel relee el catálogo y pinta el candado de cristal. */
+   readonly alBloquear: (detalle: DetalleModuloPremium) => void;
++  /** Clic en la tarjeta de una sede: el panel guarda su `sede_id` en el estado y abre el CRM de Estudiantes filtrado por esa sucursal. */
++  readonly alElegirSede: (sedeId: number) => void;
+   readonly alSesionExpirada: () => void;
+ }
+ 
+@@ -78,15 +82,18 @@ function restringidaHtml(alcance: AlcanceUsuario): HtmlSeguro {
+ }
+ 
+ function tarjetaSedeHtml(s: SedeResumen): HtmlSeguro {
+-  return html`<li class="${CLS.tarjeta} flex flex-col gap-3 p-4">
+-    <div class="flex items-start gap-3">
+-      <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-white">${icono('building')}</span>
+-      <div class="min-w-0 flex-1">
+-        <h3 class="break-words text-base font-bold text-slate-900">${s.nombre}</h3>
+-        ${s.creado_en ? html`<p class="${CLS.ayuda}">Creada el ${fechaHora(s.creado_en)}</p>` : null}
+-      </div>
+-      ${etiqueta(s.activa ? 'Operativa' : 'Inactiva', s.activa ? 'ok' : 'neutral')}
+-    </div>
++  return html`<li class="${CLS.tarjeta} transition duration-200 hover:shadow-md motion-reduce:transition-none">
++    <button type="button" data-sede-id="${s.id}" aria-label="Ver los estudiantes de ${s.nombre}" class="flex w-full flex-col gap-3 rounded-xl p-4 text-left">
++      <span class="flex items-start gap-3">
++        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-bma-azul text-white">${icono('building')}</span>
++        <span class="min-w-0 flex-1">
++          <span class="block break-words text-base font-bold text-slate-900">${s.nombre}</span>
++          ${s.creado_en ? html`<span class="${CLS.ayuda} block">Creada el ${fechaHora(s.creado_en)}</span>` : null}
++        </span>
++        ${etiqueta(s.activa ? 'Operativa' : 'Inactiva', s.activa ? 'ok' : 'neutral')}
++      </span>
++      <span class="text-sm font-medium text-bma-azul-oscuro">Ver estudiantes de esta sede →</span>
++    </button>
+   </li>`;
+ }
+ 
+@@ -165,11 +172,28 @@ export async function vistaSedesGestion(ctx: ContextoSedes): Promise<void> {
+     montar(ctx.zona, restringidaHtml(alcance)); // sin peticiones: el servidor las rechazaría con 403
+     return;
+   }
++  // Caché instantáneo + refresco en segundo plano: las tarjetas aparecen al momento y se actualizan en silencio si algo cambió.
+   const pintar = async (): Promise<void> => {
+-    const sedes = await bma.get<readonly SedeResumen[]>('/sedes');
+-    if (!ctx.vigente()) return;
+-    montar(ctx.zona, vistaHtml(sedes));
+-    enlazarFormulario(ctx, pintar);
++    await cargarConCache<readonly SedeResumen[]>({
++      clave: CLAVE_SEDES,
++      esValido: esListaSedes,
++      cargar: () => bma.get<readonly SedeResumen[]>('/sedes'),
++      vigente: ctx.vigente,
++      pintar: (sedes) => {
++        montar(ctx.zona, vistaHtml(sedes));
++        enlazarFormulario(ctx, recargar);
++        for (const tarjeta of todos('[data-sede-id]', HTMLButtonElement, ctx.zona)) {
++          tarjeta.addEventListener('click', () => {
++            const id = Number(tarjeta.dataset['sedeId']);
++            if (Number.isInteger(id) && id > 0) ctx.alElegirSede(id);
++          });
++        }
++      },
++    });
++  };
++  const recargar = async (): Promise<void> => {
++    invalidarCache(CLAVE_SEDES); // tras crear una sede el caché quedó viejo
++    await pintar();
+   };
+   await pintar();
+ }
+diff --git a/frontend/src/types/index.ts b/frontend/src/types/index.ts
+index 5fdbe7d..91b5f85 100644
+--- a/frontend/src/types/index.ts
++++ b/frontend/src/types/index.ts
+@@ -41,6 +41,9 @@ export interface EstudianteListado extends Estudiante {
+   readonly representante: string;
+   readonly telefono_representante: string | null;
+   readonly cuotas_vencidas: number;
++  /** Sede del estudiante (NULL = sin sede asignada). */
++  readonly sede_id?: number | null;
++  readonly sede?: string | null;
+ }
+ 
+ export type TipoCuota = 'MATRICULA' | 'MENSUALIDAD' | 'OTRO';
+diff --git a/frontend/tailwind.config.js b/frontend/tailwind.config.js
+index 1bfcb8d..3e1d4b9 100644
+--- a/frontend/tailwind.config.js
++++ b/frontend/tailwind.config.js
+@@ -3,6 +3,12 @@ export default {
+   content: ["./index.html", "./src/**/*.{ts,js}"],
+   theme: {
+     extend: {
++      // Tipografía: Inter (texto) y Outfit (títulos, etiquetas del login y firma). Se cargan desde Google Fonts en admin/index.html;
++      // si no llegan, caen a la pila del sistema sin romper el diseño.
++      fontFamily: {
++        sans: ['Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
++        display: ['Outfit', 'Inter', 'ui-sans-serif', 'system-ui', 'sans-serif'],
++      },
+       // Identidad visual de Brilliant Minds Academy (logotipo oficial + paleta corporativa).
+       // Uso: bg-bma-azul, text-bma-purpura, border-bma-coral, ring-bma-azul, etc.
+       // Cada color expone además `suave` (fondo tenue para estados) y `oscuro` (texto/hover con contraste AA sobre su fondo suave):
+diff --git a/modules/premium/catalogo.js b/modules/premium/catalogo.js
+index e5188bf..bdf7824 100644
+--- a/modules/premium/catalogo.js
++++ b/modules/premium/catalogo.js
+@@ -7,12 +7,12 @@
+ const TOOLTIP_BLOQUEADO = 'Módulo Premium Deshabilitado';
+ 
+ const CATALOGO = Object.freeze([
+-  { codigo: 'IA_ATENCION', nombre: 'Atención al Cliente por IA', precioUsd: 200, vista: 'ia-atencion', rutas: ['/api/premium/ia-atencion'],
++  { codigo: 'IA_ATENCION', nombre: 'Atención al Cliente por IA', precioUsd: 150, vista: 'ia-atencion', rutas: ['/api/premium/ia-atencion'],
+     etiquetas: ['Reclamos', 'Felicitaciones', 'Propuestas'] },
+-  { codigo: 'WHATSAPP_AUTOMATICO', nombre: 'Automatización vía WhatsApp', precioUsd: 150, vista: 'whatsapp-automatico', rutas: ['/api/premium/whatsapp-automatico'] },
+-  { codigo: 'BANCAMIGA', nombre: 'Integración Bancaria (API Bancamiga)', precioUsd: 300, vista: 'bancamiga', rutas: ['/api/premium/bancamiga'] },
+-  { codigo: 'APP_MOVIL', nombre: 'Aplicación Móvil Administrativa', precioUsd: 450, vista: 'app-movil', rutas: ['/api/movil/v1'] },
+-  { codigo: 'FACHADA_WEB', nombre: 'Fachada Web con Scroll-Tour Inmersivo', precioUsd: 550, vista: 'fachada-web', rutas: ['/ir/admisiones'] },
++  { codigo: 'WHATSAPP_AUTOMATICO', nombre: 'Automatización vía WhatsApp', precioUsd: 50, vista: 'whatsapp-automatico', rutas: ['/api/premium/whatsapp-automatico'] },
++  { codigo: 'BANCAMIGA', nombre: 'Integración Bancaria (API Bancamiga)', precioUsd: 250, vista: 'bancamiga', rutas: ['/api/premium/bancamiga'] },
++  { codigo: 'APP_MOVIL', nombre: 'Aplicación Móvil Administrativa', precioUsd: 350, vista: 'app-movil', rutas: ['/api/movil/v1'] },
++  { codigo: 'FACHADA_WEB', nombre: 'Fachada Web con Scroll-Tour Inmersivo', precioUsd: 450, vista: 'fachada-web', rutas: ['/ir/admisiones'] },
+   // Migración 008. MULTI_SEDE_PREMIUM no tiene ruta propia: lo aplica el trigger trg_sedes_limite_base sobre POST /api/sedes
+   // (el Core Base incluye 2 sedes; la 3ª exige el módulo habilitado o en prueba vigente).
+   { codigo: 'MULTI_SEDE_PREMIUM', nombre: 'Expansión Multi-Sede Avanzada (3+ Sedes)', precioUsd: 50, vista: 'multi-sede', rutas: ['/api/sedes'] },
+diff --git a/modules/premium/guard.js b/modules/premium/guard.js
+index 201db6b..813ed54 100644
+--- a/modules/premium/guard.js
++++ b/modules/premium/guard.js
+@@ -15,7 +15,7 @@ const repoSql = {
+   async leerTodos() {
+     return (await ejecutar(
+       `SELECT codigo, nombre, descripcion, precio_usd, habilitado, habilitado_en, prueba_iniciada_en, expira_prueba_en
+-         FROM modulos_premium ORDER BY precio_usd`)).rows;
++         FROM modulos_premium ORDER BY precio_usd, codigo`)).rows;
+   },
+   /** Bloqueo automático de UN módulo cuya prueba venció. El reloj que decide es el de la base (NOW()). Devuelve filas afectadas. */
+   async bloquearVencida(codigo) {
+diff --git a/scripts/importar_este.js b/scripts/importar_este.js
+new file mode 100644
+index 0000000..8a4de8b
+--- /dev/null
++++ b/scripts/importar_este.js
+@@ -0,0 +1,306 @@
++'use strict';
++/**
++ * Ingesta de producción: alumnos de la SEDE ESTE (Fundalara) desde el Excel de la academia.
++ *
++ *   node scripts/importar_este.js --archivo "/ruta/Datos_Academia_BMA_-_Sede_Este.xlsx" [--dry-run] [--vence AAAA-MM-DD] [--monto 25]
++ *   (o IMPORT_ESTE_ARCHIVO=/ruta/archivo.xlsx)
++ *
++ * Los datos de menores y representantes NO viven en el repositorio: el script lee el archivo desde una ruta local y nunca imprime
++ * nombres ni teléfonos (el informe solo cita hoja y fila). Reglas:
++ *  - Cada alumno se ata RÍGIDAMENTE a la sede cuyo nombre es exactamente 'Sede Este' (debe existir: `npm run migrate` + seed o alta en Sedes).
++ *  - Nivel = grupo del bloque de la hoja: Kids 1 A/B/C · Beginner A/B/C · Adultos. Un alumno sin nivel reconocible se omite y se informa.
++ *  - Representante: se crea o reutiliza (mismo nombre + teléfono → una sola ficha para hermanos; un alumno «Adultos» sin representante es el suyo propio). El Excel no trae cédula: se asigna una
++ *    PROVISIONAL determinista «IMP-XXXXXXXXXXXX» (única, estable entre ejecuciones) que la administración debe reemplazar por la real.
++ *    Un representante ya existente conserva sus datos (el correo solo se rellena si estaba vacío).
++ *  - El Excel trae edad, no fecha de nacimiento: se guarda una fecha APROXIMADA (1 de julio de [año de inscripción − edad]) y se informa el conteo.
++ *  - Estudiante 'Activo' y cuota inicial de MATRÍCULA 'Pendiente' (monto = parámetro MATRICULA_USD o --monto; vence hoy + 30 días o --vence),
++ *    creada una sola vez por estudiante: ejecutar el script dos veces no duplica nada.
++ *  - Todo en UNA transacción (todo o nada). --dry-run ejecuta y revierte para ver el informe sin escribir.
++ * SQL siempre con parámetros posicionales ($1, $2, …).
++ */
++require('dotenv').config({ path: require('node:path').resolve(__dirname, '..', '.env') });
++const crypto = require('node:crypto');
++const { ejecutar, conTransaccion, closePool } = require('../config/db');
++const { hoyCaracas } = require('../utils/fechas');
++
++const SEDE_ESTE = 'Sede Este';
++const MAX_NOMBRE = 100;
++const DIAS_VENCIMIENTO_POR_DEFECTO = 30;
++
++// ── Parseo puro (sin base de datos; cubierto por tests/importar-este.test.js con datos sintéticos) ─────────────────────────────
++
++const texto = (v) => {
++  if (v === null || v === undefined) return '';
++  if (typeof v === 'object' && 'text' in v) return String(v.text).trim(); // celdas enriquecidas / hipervínculos de ExcelJS
++  if (typeof v === 'object' && 'result' in v) return String(v.result ?? '').trim(); // fórmulas
++  return String(v).trim();
++};
++
++const ARTICULOS = new Set(['de', 'del', 'la', 'las', 'los', 'y', 'e']);
++
++/** Colapsa espacios, quita caracteres de control y símbolos ajenos a un nombre; pasa a Título si venía todo en mayúsculas o minúsculas. */
++function sanearNombre(crudo) {
++  let s = texto(crudo).normalize('NFC').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/[^\p{L}\p{M}\s'.-]/gu, ' ').replace(/\s+/g, ' ').trim();
++  if (s !== '' && (s === s.toUpperCase() || s === s.toLowerCase())) {
++    s = s.toLowerCase().split(' ').map((p, i) => (i > 0 && ARTICULOS.has(p) ? p : p.charAt(0).toUpperCase() + p.slice(1))).join(' ');
++  }
++  return s.slice(0, MAX_NOMBRE).trim();
++}
++
++/** Nombre completo del representante → { nombres, apellidos }. 1 palabra: apellido «-»; 2: 1+1; 3: 1+2; 4 o más: mitad y mitad. Revisable luego en el CRM. */
++function partirNombreCompleto(crudo) {
++  const p = sanearNombre(crudo).split(' ').filter(Boolean);
++  if (p.length === 0) return null;
++  if (p.length === 1) return { nombres: p[0], apellidos: '-' };
++  const corte = p.length === 2 ? 1 : p.length === 3 ? 1 : Math.ceil(p.length / 2);
++  return { nombres: p.slice(0, corte).join(' '), apellidos: p.slice(corte).join(' ') };
++}
++
++/** Teléfono → solo dígitos, 10–15, sin espacios (CHECK de la base). Acepta «0414-1234567», «+58 414 1234567» y celulares sin el 0 inicial. null si no sirve. */
++function sanearTelefono(crudo) {
++  for (const trozo of texto(crudo).split(/[\/,;]|\sy\s/i)) {
++    let d = trozo.replace(/\D/g, '');
++    if (d.startsWith('58') && d.length === 12) d = `0${d.slice(2)}`;
++    else if (d.length === 10 && d.startsWith('4')) d = `0${d}`;
++    if (d.length >= 10 && d.length <= 15) return d;
++  }
++  return null;
++}
++
++function sanearCorreo(crudo) {
++  const c = texto(crudo).split(/[\s;,]+/)[0]?.toLowerCase() ?? '';
++  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(c) && c.length <= 160 ? c : null;
++}
++
++/** Fecha de inscripción (Date de Excel o texto «AAAA-MM-DD…») → año. */
++function anioDeInscripcion(v, anioPorDefecto) {
++  if (v instanceof Date && !Number.isNaN(v.getTime())) return v.getUTCFullYear();
++  const m = /^(\d{4})-\d{2}-\d{2}/.exec(texto(v));
++  return m ? Number(m[1]) : anioPorDefecto;
++}
++
++/** Edad (número o «7 años») → entero 1–99, o null. */
++function leerEdad(v) {
++  const n = Number.parseInt(texto(v).replace(/\D/g, ''), 10);
++  return Number.isInteger(n) && n >= 1 && n <= 99 ? n : null;
++}
++
++const fechaNacimientoAproximada = (anioInscripcion, edad) => `${anioInscripcion - edad}-07-01`;
++
++/** Cédula PROVISIONAL determinista (≤ 20 caracteres): mismo representante + teléfono → misma cédula en cada ejecución. */
++function cedulaProvisional(nombreCompleto, telefono) {
++  const base = `${nombreCompleto.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase()}|${telefono}`;
++  return `IMP-${crypto.createHash('sha256').update(base).digest('hex').slice(0, 12).toUpperCase()}`;
++}
++
++const INICIO_BLOQUE = /^\s*\d+(?:\.\d+)?\s*\.?\s*(?:mi[eé]rcoles|s[aá]bado|teacher|personalizado)/i;
++
++/** Texto de una celda de grupo → nivel oficial de la Sede Este, o null. */
++function nivelDeTexto(t) {
++  let m = /kids\s*1\s*\(?\s*([abc])\b/i.exec(t);
++  if (m) return `Kids 1 ${m[1].toUpperCase()}`;
++  m = /beginner\s*\(?\s*([abc])\b/i.exec(t);
++  if (m) return `Beginner ${m[1].toUpperCase()}`;
++  if (/adultos?/i.test(t)) return 'Adultos';
++  return null;
++}
++
++function normalizarEncabezado(t) {
++  return texto(t).normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ');
++}
++
++/**
++ * Matriz de una hoja (filas × columnas, índice 0) → alumnos y anomalías. Una hoja se organiza en BLOQUES de grupo: la celda de la columna A
++ * que abre cada bloque («1.Miércoles y viernes», «3.1 Sábado»…) y las siguientes (nivel, profesor, horario) describen a todos los alumnos
++ * hasta el próximo bloque. Devuelve { alumnos: [{ hoja, fila, nivel, apellidos, nombres, edad, anioInscripcion, representante, telefono, correo }], anomalias }.
++ */
++function leerHoja(matriz, nombreHoja, anioPorDefecto) {
++  const anomalias = [];
++  const iEnc = matriz.findIndex((f) => f.some((c) => normalizarEncabezado(c) === 'num') && f.some((c) => normalizarEncabezado(c).startsWith('apellido')));
++  if (iEnc < 0) return { alumnos: [], anomalias: [{ hoja: nombreHoja, fila: 0, motivo: 'no se encontró la fila de encabezados (Num / Apellido(s))' }] };
++  const col = {};
++  matriz[iEnc].forEach((c, i) => {
++    const h = normalizarEncabezado(c);
++    if (h.startsWith('apellido')) col.apellidos = i;
++    else if (h.startsWith('nombre(s)') || h === 'nombre(s)' || h === 'nombres') col.nombres = i;
++    else if (h === 'edad') col.edad = i;
++    else if (h.startsWith('fecha de inscripcion')) col.inscripcion = i;
++    else if (h.startsWith('nombre del representante')) col.representante = i;
++    else if (h.startsWith('telefono')) col.telefono = i;
++    else if (h.startsWith('correo')) col.correo = i;
++  });
++  for (const k of ['apellidos', 'nombres', 'edad', 'representante', 'telefono']) {
++    if (col[k] === undefined) return { alumnos: [], anomalias: [{ hoja: nombreHoja, fila: iEnc + 1, motivo: `falta la columna «${k}»` }] };
++  }
++
++  // 1) bloques de grupo: fila de inicio → nivel (primer texto de la columna A del bloque que nombre un nivel)
++  const bloques = [];
++  for (let i = iEnc + 1; i < matriz.length; i += 1) {
++    const a = texto(matriz[i]?.[0]);
++    if (a === '') continue;
++    if (bloques.length === 0 || INICIO_BLOQUE.test(a)) bloques.push({ desde: i, nivel: null });
++    const b = bloques[bloques.length - 1];
++    b.nivel ??= nivelDeTexto(a);
++  }
++  const nivelDeFila = (i) => {
++    let n = null;
++    for (const b of bloques) if (b.desde <= i) n = b;
++    return n ? n.nivel : null;
++  };
++
++  // 2) alumnos
++  const alumnos = [];
++  for (let i = iEnc + 1; i < matriz.length; i += 1) {
++    const f = matriz[i] ?? [];
++    const apellidos = sanearNombre(f[col.apellidos]);
++    const nombres = sanearNombre(f[col.nombres]);
++    if (apellidos === '' && nombres === '') continue;
++    const fila = i + 1;
++    const falla = (motivo) => anomalias.push({ hoja: nombreHoja, fila, motivo });
++    if (apellidos === '' || nombres === '') { falla('alumno sin nombre o sin apellido'); continue; }
++    const nivel = nivelDeFila(i);
++    if (nivel === null) { falla('sin nivel reconocible en su bloque (¿grupo «Personalizado»?)'); continue; }
++    const edad = leerEdad(f[col.edad]);
++    if (edad === null) { falla('edad ausente o inválida'); continue; }
++    let rep = partirNombreCompleto(f[col.representante]);
++    if (rep === null && nivel === 'Adultos') rep = { nombres, apellidos }; // un adulto es su propio representante
++    if (rep === null) { falla('sin nombre de representante'); continue; }
++    const telefono = sanearTelefono(f[col.telefono]);
++    if (telefono === null) { falla('teléfono del representante ausente o inválido (10–15 dígitos)'); continue; }
++    alumnos.push({
++      hoja: nombreHoja, fila, nivel, apellidos, nombres, edad,
++      anioInscripcion: anioDeInscripcion(col.inscripcion === undefined ? null : f[col.inscripcion], anioPorDefecto),
++      representante: rep, telefono, correo: col.correo === undefined ? null : sanearCorreo(f[col.correo]),
++    });
++  }
++  return { alumnos, anomalias };
++}
++
++// ── Base de datos ($1…$n) ───────────────────────────────────────────────────────────────────────────────────────────────────────
++
++async function importar(tx, alumnos, { vence, monto }) {
++  const sede = (await ejecutar('SELECT id FROM sedes WHERE nombre = $1', [SEDE_ESTE], tx)).rows[0];
++  if (!sede) throw new Error(`No existe la sede «${SEDE_ESTE}». Aplica las migraciones y crea la sede (seed o pantalla Sedes) antes de importar.`);
++  const r = { representantesNuevos: 0, representantesExistentes: 0, estudiantesNuevos: 0, estudiantesExistentes: 0, cuotasNuevas: 0, cuotasExistentes: 0 };
++
++  for (const a of alumnos) {
++    const nombreRep = `${a.representante.nombres} ${a.representante.apellidos}`;
++    const rep = (await ejecutar(
++      `INSERT INTO representantes (nombres, apellidos, cedula, email, telefono)
++       VALUES ($1, $2, $3, $4, $5)
++       ON CONFLICT (cedula) DO UPDATE SET email = COALESCE(representantes.email, EXCLUDED.email)
++       RETURNING id, (xmax = 0) AS creado`,
++      [a.representante.nombres, a.representante.apellidos, cedulaProvisional(nombreRep, a.telefono), a.correo, a.telefono], tx)).rows[0];
++    if (rep.creado) r.representantesNuevos += 1; else r.representantesExistentes += 1;
++
++    const fechaNac = fechaNacimientoAproximada(a.anioInscripcion, a.edad);
++    let est = (await ejecutar(
++      `INSERT INTO estudiantes (representante_id, nombres, apellidos, fecha_nacimiento, grado_solicitado, estatus_academico, sede_id)
++       VALUES ($1, $2, $3, $4::date, $5, 'Activo', $6)
++       ON CONFLICT (representante_id, nombres, apellidos, fecha_nacimiento) DO NOTHING
++       RETURNING id`,
++      [rep.id, a.nombres, a.apellidos, fechaNac, a.nivel, sede.id], tx)).rows[0];
++    if (est) {
++      r.estudiantesNuevos += 1;
++    } else {
++      // Ya existía: se relee su id (no se modifica nada de su ficha).
++      est = (await ejecutar(
++        'SELECT id FROM estudiantes WHERE representante_id = $1 AND nombres = $2 AND apellidos = $3 AND fecha_nacimiento = $4::date',
++        [rep.id, a.nombres, a.apellidos, fechaNac], tx)).rows[0];
++      r.estudiantesExistentes += 1;
++    }
++
++    // Cuota inicial: una sola MATRÍCULA vigente por estudiante (el trigger 006 le hereda la sede).
++    const cuota = (await ejecutar(
++      `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento)
++       SELECT $1, 'MATRICULA', 'Matrícula inicial', $2::numeric, $3::date
++        WHERE NOT EXISTS (SELECT 1 FROM cuotas WHERE estudiante_id = $1 AND tipo = 'MATRICULA' AND estado <> 'Anulada')
++       RETURNING id`,
++      [est.id, monto, vence], tx)).rows[0];
++    if (cuota) r.cuotasNuevas += 1; else r.cuotasExistentes += 1;
++  }
++  return r;
++}
++
++// ── Línea de comandos ───────────────────────────────────────────────────────────────────────────────────────────────────────────
++
++function leerArgumentos(argv, env) {
++  const o = { archivo: env.IMPORT_ESTE_ARCHIVO || '', dryRun: false, vence: '', monto: '' };
++  for (let i = 0; i < argv.length; i += 1) {
++    const a = argv[i];
++    if (a === '--dry-run') o.dryRun = true;
++    else if (a === '--archivo') o.archivo = argv[++i] || '';
++    else if (a === '--vence') o.vence = argv[++i] || '';
++    else if (a === '--monto') o.monto = argv[++i] || '';
++    else throw new Error(`Argumento desconocido: ${a}`);
++  }
++  if (!o.archivo) throw new Error('Indica el Excel con --archivo "/ruta/archivo.xlsx" (o IMPORT_ESTE_ARCHIVO).');
++  if (o.vence && !/^\d{4}-\d{2}-\d{2}$/.test(o.vence)) throw new Error('--vence debe tener el formato AAAA-MM-DD.');
++  if (o.monto && !(Number(o.monto) > 0)) throw new Error('--monto debe ser un número mayor que 0.');
++  return o;
++}
++
++function sumarDias(fechaIso, dias) {
++  const d = new Date(`${fechaIso}T00:00:00Z`);
++  d.setUTCDate(d.getUTCDate() + dias);
++  return d.toISOString().slice(0, 10);
++}
++
++async function leerLibro(ruta, anioPorDefecto) {
++  const ExcelJS = require('exceljs');
++  const libro = new ExcelJS.Workbook();
++  await libro.xlsx.readFile(ruta);
++  const alumnos = [];
++  const anomalias = [];
++  for (const hoja of libro.worksheets) {
++    const matriz = [];
++    hoja.eachRow({ includeEmpty: true }, (fila, n) => {
++      const celdas = [];
++      for (let c = 1; c <= 12; c += 1) celdas.push(fila.getCell(c).value);
++      matriz[n - 1] = celdas;
++    });
++    for (let i = 0; i < matriz.length; i += 1) matriz[i] ??= [];
++    const l = leerHoja(matriz, hoja.name.trim(), anioPorDefecto);
++    alumnos.push(...l.alumnos);
++    anomalias.push(...l.anomalias);
++  }
++  return { alumnos, anomalias };
++}
++
++async function main() {
++  const o = leerArgumentos(process.argv.slice(2), process.env);
++  const hoy = hoyCaracas();
++  const { alumnos, anomalias } = await leerLibro(o.archivo, Number(hoy.slice(0, 4)));
++  const vence = o.vence || sumarDias(hoy, DIAS_VENCIMIENTO_POR_DEFECTO);
++  let resultado;
++  const SENTINELA = new Error('dry-run');
++  try {
++    await conTransaccion(async (tx) => {
++      let monto = Number(o.monto);
++      if (!(monto > 0)) {
++        const p = (await ejecutar(`SELECT valor FROM parametros WHERE clave = 'MATRICULA_USD'`, [], tx)).rows[0];
++        monto = Number(p?.valor);
++      }
++      if (!(monto > 0)) throw new Error('La matrícula no está configurada (MATRICULA_USD <= 0): configúrala en el panel o pasa --monto.');
++      resultado = await importar(tx, alumnos, { vence, monto });
++      if (o.dryRun) throw SENTINELA;
++    });
++  } catch (e) {
++    if (e !== SENTINELA) throw e;
++  }
++  console.log(JSON.stringify({
++    modo: o.dryRun ? 'dry-run (nada se escribió)' : 'importado', sede: SEDE_ESTE, leidos: alumnos.length + anomalias.length,
++    aImportar: alumnos.length, omitidos: anomalias.length, ...resultado,
++    fechasNacimientoAproximadas: alumnos.length, cedulasProvisionales: resultado.representantesNuevos, vencimientoMatricula: vence,
++    omitidosDetalle: anomalias, // solo hoja, fila y motivo: sin datos personales
++  }, null, 2));
++}
++
++module.exports = {
++  sanearNombre, partirNombreCompleto, sanearTelefono, sanearCorreo, leerEdad, fechaNacimientoAproximada, cedulaProvisional, nivelDeTexto,
++  leerHoja, leerArgumentos, importar, SEDE_ESTE,
++};
++
++if (require.main === module) {
++  main().catch((err) => { console.error(err.message); process.exitCode = 1; }).finally(() => closePool());
++}
+diff --git a/services/crm.service.js b/services/crm.service.js
+index 450481c..10aca02 100644
+--- a/services/crm.service.js
++++ b/services/crm.service.js
+@@ -22,19 +22,22 @@ async function resumen(sedeId = null) {
+   };
+ }
+ 
+-async function listar({ estado, q, offset, limite, sedeId = null }) {
++async function listar({ estado, q, offset, limite, sedeId = null, sedeFiltro = null }) {
++  // `sedeId` es el alcance del usuario (entero = atado a esa sede; NULL = consolidado). `sedeFiltro` solo acota al consolidado: nunca ensancha a nadie.
++  const sedeEfectiva = sedeId ?? sedeFiltro;
+   // Escapa los comodines de LIKE (\ % _) y busca sin distinguir mayúsculas (ILIKE; el esquema anterior era insensible por colación).
+   const busqueda = q ? `%${q.replace(/[\\%_]/g, '\\$&')}%` : null;
+-  const filtroParams = [estado || null, busqueda, sedeId];
++  const filtroParams = [estado || null, busqueda, sedeEfectiva];
+   const filtro = `WHERE ($1::text IS NULL OR v.estado_dinamico = $1::text)
+                     AND ($2::text IS NULL OR v.nombres ILIKE $2::text OR v.apellidos ILIKE $2::text OR r.cedula ILIKE $2::text OR r.apellidos ILIKE $2::text)
+                     AND ($3::int IS NULL OR v.sede_id = $3::int)`;
+   const [items, total] = await Promise.all([
+     ejecutar(
+       `SELECT v.id, v.nombres, v.apellidos, v.grado_solicitado, v.estado_dinamico, v.estatus_pago, v.cuotas_vencidas, v.deuda_vencida_usd,
+-              v.proximo_vencimiento,
++              v.proximo_vencimiento, v.sede_id, s.nombre AS sede,
+               r.id AS representante_id, r.nombres || ' ' || r.apellidos AS representante, r.telefono AS telefono_representante
+        FROM vw_estudiantes_estado v JOIN representantes r ON r.id = v.representante_id
++       LEFT JOIN sedes s ON s.id = v.sede_id
+        ${filtro}
+        ORDER BY v.apellidos, v.nombres, v.id
+        LIMIT $4 OFFSET $5`, [...filtroParams, limite, offset]),
+diff --git a/tests/frontend-identidad.test.js b/tests/frontend-identidad.test.js
+index 66b77cf..fc96457 100644
+--- a/tests/frontend-identidad.test.js
++++ b/tests/frontend-identidad.test.js
+@@ -8,7 +8,7 @@ const path = require('node:path');
+ const raiz = path.join(__dirname, '..');
+ const leer = (...p) => fs.readFileSync(path.join(raiz, ...p), 'utf8');
+ 
+-test('el login usa el logotipo BMA sobre tarjeta de cristal y no queda rastro de Astra', () => {
++test('el login usa el logotipo BMA sobre tarjeta de cristal; Astra solo aparece en la firma de autoría (lib/firma.ts)', () => {
+   const admin = leer('frontend', 'src', 'admin.ts');
+   assert.match(admin, /logoCompletoHtml\(/);
+   assert.match(admin, /bg-bma-azul/);
+@@ -34,3 +34,28 @@ test('las sedes del Core Base se llaman Sede Este y Sede Norte (seed y migració
+   assert.doesNotMatch(m, /INSERT\s+INTO\s+sedes/i);
+   assert.doesNotMatch(leer('database', 'migrations', '008_nuevos_premium.sql'), /Acarigua|Barquisimeto/);
+ });
++
++test('rendimiento: esqueleto inmediato, caché SWR en sessionStorage, sin Egresos en el menú y filtro por tarjeta de sede', () => {
++  const admin = leer('frontend', 'src', 'admin.ts');
++  assert.match(admin, /montar\(zona, esqueletoPara\(id\)\)/);
++  assert.match(admin, /const MODULO_EGRESOS_ACTIVO: boolean = false/);
++  assert.match(admin, /alElegirSede: \(sedeId\) =>/);
++  assert.match(admin, /invalidarCache\(\)/);
++  assert.match(leer('frontend', 'src', 'lib', 'cache.ts'), /sessionStorage/);
++  assert.match(leer('frontend', 'src', 'lib', 'esqueleto.ts'), /animate-pulse/);
++  assert.match(leer('frontend', 'src', 'sedes-gestion.ts'), /data-sede-id/);
++});
++
++test('login: red neuronal y firma Astra; niveles fijos de la Sede Este y «Nivel» en lugar de «Grado»', () => {
++  const admin = leer('frontend', 'src', 'admin.ts');
++  assert.match(admin, /montarRedNeuronal\(/);
++  assert.match(admin, /firmaLogin\(\)/);
++  assert.match(admin, /firmaSidebar\(\)/);
++  const firma = leer('frontend', 'src', 'lib', 'firma.ts');
++  assert.match(firma, /Diseñado y desarrollado por Astra Digital Solutions/);
++  assert.match(firma, /Astra Academy Suite v1\.0/);
++  assert.match(firma, /#22D3EE/);
++  assert.match(leer('frontend', 'src', 'invitaciones-modulo.ts'), /\['Kids 1 B', 'Kids 1 A', 'Beginner B', 'Beginner A', 'Adultos', 'Kids 1 C', 'Beginner C'\]/);
++  assert.match(admin, /<th scope="col" class="\$\{CLS\.th\}">Nivel<\/th><th scope="col" class="\$\{CLS\.th\}">Sede<\/th>/);
++  assert.match(leer('frontend', 'tailwind.config.js'), /Outfit/);
++});
+diff --git a/tests/importar-este.test.js b/tests/importar-este.test.js
+new file mode 100644
+index 0000000..6b23dbe
+--- /dev/null
++++ b/tests/importar-este.test.js
+@@ -0,0 +1,66 @@
++'use strict';
++// Parseo de la ingesta de la Sede Este con datos SINTÉTICOS (ningún dato real de alumnos vive en el repositorio).
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const imp = require('../scripts/importar_este.js');
++
++const ENC = ['Grupo / Día', 'Num', 'Apellido(s)', 'Nombre(s)', 'Edad', 'Fecha de Inscripción', 'Nombre del Representante', 'Teléfono de Contacto', 'Correo electronico'];
++const alumno = (a, ap, no, ed, rep, tel, mail) => [a, 1, ap, no, ed, '2026-09-01 00:00:00', rep, tel, mail];
++
++test('sanearTelefono: solo dígitos, 10–15, celular sin 0 inicial, +58 y varios números', () => {
++  assert.equal(imp.sanearTelefono('0414 - 1234567'), '04141234567');
++  assert.equal(imp.sanearTelefono('+58 414 1234567'), '04141234567');
++  assert.equal(imp.sanearTelefono('4141234567'), '04141234567');
++  assert.equal(imp.sanearTelefono('123 / 0412-7654321'), '04127654321');
++  assert.equal(imp.sanearTelefono('sin teléfono'), null);
++  assert.equal(imp.sanearTelefono(''), null);
++});
++
++test('sanearNombre y partirNombreCompleto: espacios, símbolos y mayúsculas', () => {
++  assert.equal(imp.sanearNombre('  ANA   MARÍA  '), 'Ana María');
++  assert.equal(imp.sanearNombre('Luis<script>1'), 'Luis script');
++  assert.deepEqual(imp.partirNombreCompleto('Marta Gil'), { nombres: 'Marta', apellidos: 'Gil' });
++  assert.deepEqual(imp.partirNombreCompleto('Rosa'), { nombres: 'Rosa', apellidos: '-' });
++  assert.deepEqual(imp.partirNombreCompleto('Ana María Pérez Gil'), { nombres: 'Ana María', apellidos: 'Pérez Gil' });
++  assert.equal(imp.partirNombreCompleto('   '), null);
++});
++
++test('correo, edad, fecha aproximada y cédula provisional determinista (≤ 20 caracteres)', () => {
++  assert.equal(imp.sanearCorreo(' Padre@Ejemplo.COM  otro'), 'padre@ejemplo.com');
++  assert.equal(imp.sanearCorreo('no tiene'), null);
++  assert.equal(imp.leerEdad('7 años'), 7);
++  assert.equal(imp.leerEdad('x'), null);
++  assert.equal(imp.fechaNacimientoAproximada(2026, 7), '2019-07-01');
++  const c = imp.cedulaProvisional('Marta Gil', '04141234567');
++  assert.match(c, /^IMP-[0-9A-F]{12}$/);
++  assert.equal(c, imp.cedulaProvisional('MARTA GIL', '04141234567'));
++  assert.notEqual(c, imp.cedulaProvisional('Marta Gil', '04147654321'));
++});
++
++test('leerHoja: nivel por bloque, adulto es su propio representante y anomalías sin datos personales', () => {
++  const m = [
++    [], [],
++    ENC,
++    alumno('1.Miércoles y viernes', 'Prueba Uno', 'Niña', 6, 'Madre Uno', '0414-1111111', 'a@b.co'),
++    alumno('(kids 1 B Sede', 'Prueba Dos', 'Niño', 7, 'Madre Dos', '0414-2222222', null),
++    alumno('2:15 - 4:00', 'Prueba Tres', 'Otro', 8, 'Madre Tres', '0414-3333333', null),
++    alumno('2.2 Miercoles y viernes', 'Prueba Cuatro', 'Peque', 9, 'Madre Cuatro', '0414-4444444', null),
++    alumno('(Beginner B)', 'Prueba Cinco', 'Peque', 10, 'Madre Cinco', '', null),
++    alumno('3.2 Teacher (adultos)', 'Adulto', 'Alguien', 30, '', '0412-5555555', null),
++    alumno('4 Personalizado', 'Sin', 'Nivel', 9, 'Madre Siete', '0414-7777777', null),
++  ];
++  const r = imp.leerHoja(m, 'Hoja', 2026);
++  assert.deepEqual(r.alumnos.map((a) => a.nivel), ['Kids 1 B', 'Kids 1 B', 'Kids 1 B', 'Beginner B', 'Adultos']);
++  assert.equal(r.alumnos[0].telefono, '04141111111');
++  const adulto = r.alumnos[4];
++  assert.deepEqual([adulto.representante.nombres, adulto.representante.apellidos], ['Alguien', 'Adulto']);
++  assert.deepEqual(r.anomalias.map((x) => x.fila), [8, 10]);
++  for (const x of r.anomalias) assert.deepEqual(Object.keys(x).sort(), ['fila', 'hoja', 'motivo']);
++});
++
++test('leerHoja: sin encabezados informa la anomalía; leerArgumentos valida', () => {
++  assert.equal(imp.leerHoja([[1, 2]], 'X', 2026).anomalias.length, 1);
++  assert.throws(() => imp.leerArgumentos([], {}), /--archivo/);
++  assert.throws(() => imp.leerArgumentos(['--archivo', 'a.xlsx', '--vence', '5/12'], {}), /AAAA-MM-DD/);
++  assert.equal(imp.leerArgumentos(['--archivo', 'a.xlsx', '--dry-run'], {}).dryRun, true);
++});
+diff --git a/tests/integracion.pg.test.js b/tests/integracion.pg.test.js
+index 668df61..aa0fa91 100644
+--- a/tests/integracion.pg.test.js
++++ b/tests/integracion.pg.test.js
+@@ -622,15 +622,27 @@ t('exportación: cada hoja se lee por lotes con LIMIT/keyset sin perder ni dupli
+ });
+ 
+ // ── Candados premium ────────────────────────────────────────────────────────────────────────────
++t('012: precios definitivos (idempotente) y el estado de los módulos no se toca', async () => {
++  const sql = fs.readFileSync(path.join(RAIZ, 'database', 'migrations', '012_ajuste_precios.sql'), 'utf8');
++  await db.ejecutar(`UPDATE modulos_premium SET precio_usd = 999 WHERE codigo IN ('APP_MOVIL', 'IA_ATENCION')`);
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE WHERE codigo = 'APP_MOVIL'`);
++  await db.ejecutarScript(sql);
++  await db.ejecutarScript(sql); // idempotente
++  const f = await filas(`SELECT codigo, precio_usd, habilitado FROM modulos_premium WHERE codigo IN ('APP_MOVIL', 'IA_ATENCION', 'FACHADA_WEB', 'BANCAMIGA', 'WHATSAPP_AUTOMATICO') ORDER BY codigo`);
++  assert.deepEqual(f.map((x) => [x.codigo, x.precio_usd, x.habilitado]), [
++    ['APP_MOVIL', 350, true], ['BANCAMIGA', 250, false], ['FACHADA_WEB', 450, false], ['IA_ATENCION', 150, false], ['WHATSAPP_AUTOMATICO', 50, false]]);
++  await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE WHERE codigo = 'APP_MOVIL'`);
++});
++
+ t('premium: 7 módulos sembrados y deshabilitados; el guard bloquea con 403 y se abre al habilitar', async () => {
+   const todos = await svc.guard.guard.repo.leerTodos();
+   assert.deepEqual(todos.map((m) => [m.codigo, m.precio_usd, m.habilitado]), [
+-    ['FACTURACION_MASIVA', 20, false], ['MULTI_SEDE_PREMIUM', 50, false], ['WHATSAPP_AUTOMATICO', 150, false], ['IA_ATENCION', 200, false],
+-    ['BANCAMIGA', 300, false], ['APP_MOVIL', 450, false], ['FACHADA_WEB', 550, false]]);
++    ['FACTURACION_MASIVA', 20, false], ['MULTI_SEDE_PREMIUM', 50, false], ['WHATSAPP_AUTOMATICO', 50, false], ['IA_ATENCION', 150, false],
++    ['BANCAMIGA', 250, false], ['APP_MOVIL', 350, false], ['FACHADA_WEB', 450, false]]);
+   let resultado;
+   const g = svc.guard.crearGuard({ ttlMs: 0 });
+   await g.requireModulo('BANCAMIGA')({}, {}, (e) => { resultado = e; });
+-  assert.deepEqual([resultado.status, resultado.codigo, resultado.detalles.precio_usd], [403, 'MODULO_PREMIUM_DESHABILITADO', 300]);
++  assert.deepEqual([resultado.status, resultado.codigo, resultado.detalles.precio_usd], [403, 'MODULO_PREMIUM_DESHABILITADO', 250]);
+   await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'BANCAMIGA'`);
+   await g.requireModulo('BANCAMIGA')({}, {}, (e) => { resultado = e; });
+   assert.equal(resultado, undefined);
+@@ -777,6 +789,11 @@ t('multi-sede: CRM, tablero, cuotas y mensualidades se filtran por sede; sede NU
+   assert.deepEqual(await nombresDe(sedeB), ['IsoB', 'IsoC']);
+   assert.deepEqual(await nombresDe(null), ['IsoA', 'IsoB', 'IsoC', 'IsoG']);
+   assert.equal((await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId: sedeA })).total, 1, 'el conteo respeta la sede');
++  // Filtro por tarjeta de sede (consolidado): acota; el alcance de un usuario de sede manda y `sedeFiltro` jamás lo ensancha.
++  const filtrados = (await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId: null, sedeFiltro: sedeB })).items;
++  assert.deepEqual(filtrados.map((x) => x.nombres).sort(), ['IsoB', 'IsoC']);
++  assert.ok(filtrados.every((x) => x.sede_id === sedeB && typeof x.sede === 'string'), 'cada fila trae sede_id y el nombre de la sede');
++  assert.deepEqual((await svc.crm.listar({ q: 'Iso', offset: 0, limite: 50, sedeId: sedeA, sedeFiltro: sedeB })).items.map((x) => x.nombres), ['IsoA']);
+ 
+   assert.equal((await svc.crm.resumen(sedeA)).morosos, 1);
+   assert.equal((await svc.crm.resumen(sedeB)).morosos, 1);
+diff --git a/tests/premium-008.test.js b/tests/premium-008.test.js
+index 7bcd0f1..d1b5360 100644
+--- a/tests/premium-008.test.js
++++ b/tests/premium-008.test.js
+@@ -23,12 +23,15 @@ test('catálogo: MULTI_SEDE_PREMIUM (US$ 50) y FACTURACION_MASIVA (US$ 20) con l
+ });
+ 
+ test('008: cada módulo del catálogo tiene su código en alguna migración (003 o 008) con el mismo precio', () => {
+-  const todas = fs.readdirSync(path.join(RAIZ, 'database', 'migrations')).filter((f) => f.endsWith('.sql'))
+-    .map((f) => fs.readFileSync(path.join(RAIZ, 'database', 'migrations', f), 'utf8')).join('\n');
++  const dir = path.join(RAIZ, 'database', 'migrations');
++  const todas = fs.readdirSync(dir).filter((f) => f.endsWith('.sql') && !f.startsWith('012_'))
++    .map((f) => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
++  // 012_ajuste_precios.sql fija los precios definitivos y manda sobre los sembrados por 003/008 (que usan DO NOTHING).
++  const ajustes = new Map([...fs.readFileSync(path.join(dir, '012_ajuste_precios.sql'), 'utf8').matchAll(/\('([A-Z_]+)',\s+([0-9]+\.[0-9]{2})::numeric\)/g)].map((x) => [x[1], Number(x[2])]));
+   for (const m of CATALOGO) {
+     const fila = new RegExp(`\\('${m.codigo}',[\\s\\S]*?([0-9]+\\.[0-9]{2})\\)`).exec(todas);
+     assert.ok(fila, `${m.codigo} sin INSERT en las migraciones`);
+-    assert.equal(Number(fila[1]), m.precioUsd, `${m.codigo}: precio del catálogo = precio sembrado`);
++    assert.equal(ajustes.get(m.codigo) ?? Number(fila[1]), m.precioUsd, `${m.codigo}: precio del catálogo = precio vigente (012 sobre 003/008)`);
+   }
+ });
+ 
+-- 
+2.43.0
+

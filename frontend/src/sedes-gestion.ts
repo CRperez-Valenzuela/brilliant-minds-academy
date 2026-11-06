@@ -15,7 +15,9 @@ import { html, montar, type HtmlSeguro } from './lib/html';
 import { icono } from './lib/icons';
 import { fechaHora, usd } from './lib/format';
 import { alcanceDe, type AlcanceUsuario } from './lib/alcance';
-import { CLS, aviso, boton, conBotonOcupado, etiqueta, notificar, obtener } from './lib/ui';
+import { CLS, aviso, boton, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
+import { cargarConCache, invalidarCache } from './lib/cache';
+import { CLAVE_SEDES, esListaSedes } from './lib/sedes-cache';
 import { encabezadoVista } from './lib/candado';
 import { erroresDeCampos, mostrarMensaje, pintarErrores, valorDe } from './lib/formulario';
 import type { CuerpoCrearSede, DetalleModuloPremium, RespuestaCrearSede, SedeResumen, Usuario } from './types/index';
@@ -34,6 +36,8 @@ export interface ContextoSedes {
   readonly usuario: Usuario | null;
   /** El servidor respondió 403 MODULO_PREMIUM_DESHABILITADO: el panel relee el catálogo y pinta el candado de cristal. */
   readonly alBloquear: (detalle: DetalleModuloPremium) => void;
+  /** Clic en la tarjeta de una sede: el panel guarda su `sede_id` en el estado y abre el CRM de Estudiantes filtrado por esa sucursal. */
+  readonly alElegirSede: (sedeId: number) => void;
   readonly alSesionExpirada: () => void;
 }
 
@@ -78,15 +82,18 @@ function restringidaHtml(alcance: AlcanceUsuario): HtmlSeguro {
 }
 
 function tarjetaSedeHtml(s: SedeResumen): HtmlSeguro {
-  return html`<li class="${CLS.tarjeta} flex flex-col gap-3 p-4">
-    <div class="flex items-start gap-3">
-      <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-900 text-white">${icono('building')}</span>
-      <div class="min-w-0 flex-1">
-        <h3 class="break-words text-base font-bold text-slate-900">${s.nombre}</h3>
-        ${s.creado_en ? html`<p class="${CLS.ayuda}">Creada el ${fechaHora(s.creado_en)}</p>` : null}
-      </div>
-      ${etiqueta(s.activa ? 'Operativa' : 'Inactiva', s.activa ? 'ok' : 'neutral')}
-    </div>
+  return html`<li class="${CLS.tarjeta} transition duration-200 hover:shadow-md motion-reduce:transition-none">
+    <button type="button" data-sede-id="${s.id}" aria-label="Ver los estudiantes de ${s.nombre}" class="flex w-full flex-col gap-3 rounded-xl p-4 text-left">
+      <span class="flex items-start gap-3">
+        <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-bma-azul text-white">${icono('building')}</span>
+        <span class="min-w-0 flex-1">
+          <span class="block break-words text-base font-bold text-slate-900">${s.nombre}</span>
+          ${s.creado_en ? html`<span class="${CLS.ayuda} block">Creada el ${fechaHora(s.creado_en)}</span>` : null}
+        </span>
+        ${etiqueta(s.activa ? 'Operativa' : 'Inactiva', s.activa ? 'ok' : 'neutral')}
+      </span>
+      <span class="text-sm font-medium text-bma-azul-oscuro">Ver estudiantes de esta sede →</span>
+    </button>
   </li>`;
 }
 
@@ -165,11 +172,28 @@ export async function vistaSedesGestion(ctx: ContextoSedes): Promise<void> {
     montar(ctx.zona, restringidaHtml(alcance)); // sin peticiones: el servidor las rechazaría con 403
     return;
   }
+  // Caché instantáneo + refresco en segundo plano: las tarjetas aparecen al momento y se actualizan en silencio si algo cambió.
   const pintar = async (): Promise<void> => {
-    const sedes = await bma.get<readonly SedeResumen[]>('/sedes');
-    if (!ctx.vigente()) return;
-    montar(ctx.zona, vistaHtml(sedes));
-    enlazarFormulario(ctx, pintar);
+    await cargarConCache<readonly SedeResumen[]>({
+      clave: CLAVE_SEDES,
+      esValido: esListaSedes,
+      cargar: () => bma.get<readonly SedeResumen[]>('/sedes'),
+      vigente: ctx.vigente,
+      pintar: (sedes) => {
+        montar(ctx.zona, vistaHtml(sedes));
+        enlazarFormulario(ctx, recargar);
+        for (const tarjeta of todos('[data-sede-id]', HTMLButtonElement, ctx.zona)) {
+          tarjeta.addEventListener('click', () => {
+            const id = Number(tarjeta.dataset['sedeId']);
+            if (Number.isInteger(id) && id > 0) ctx.alElegirSede(id);
+          });
+        }
+      },
+    });
+  };
+  const recargar = async (): Promise<void> => {
+    invalidarCache(CLAVE_SEDES); // tras crear una sede el caché quedó viejo
+    await pintar();
   };
   await pintar();
 }
