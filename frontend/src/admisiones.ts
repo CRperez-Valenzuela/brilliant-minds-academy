@@ -9,6 +9,7 @@ import './styles/main.css';
 import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
 import { html, montar, raw, type HtmlSeguro } from './lib/html';
 import { icono } from './lib/icons';
+import { cabeceraDualHtml, firmaPublica } from './lib/firma';
 import { bs, edadEnAnios, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
 import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
 import { esConfigInvitacion } from './types/index';
@@ -582,9 +583,13 @@ function archivoHtml(def: DefArchivo): HtmlSeguro {
   </div>`;
 }
 
-/** Número de paso (1–5) en un círculo: guía el orden de la planilla sin depender del color. */
+/**
+ * Encabezado de cada una de las 5 secciones: banda púrpura de marca (`bg-bma-purpura` #8C59A4) a todo el ancho de la tarjeta, con texto
+ * blanco (5.15:1, AA). Los márgenes negativos anulan el `p-6` de la tarjeta para que la banda quede a ras de sus bordes. El número de paso
+ * (1–5) va en un círculo blanco con texto púrpura oscuro: guía el orden de la planilla sin depender del color.
+ */
 function encabezadoSeccion(id: string, numero: number, titulo: string): HtmlSeguro {
-  return html`<h2 id="t-${id}" class="mb-4 flex items-center gap-3 text-base font-bold text-slate-900"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-bma-azul text-xs font-bold text-white" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
+  return html`<h2 id="t-${id}" class="-mx-6 -mt-6 mb-4 flex items-center gap-3 rounded-t-[11px] border-b border-bma-purpura-oscuro bg-bma-purpura px-6 py-3 text-base font-bold text-white"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs font-bold text-bma-purpura-oscuro" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
 }
 
 /** Agrupa campos consecutivos con el mismo `grupo` (un `<fieldset>` por grupo); los campos sin grupo van sueltos. */
@@ -631,8 +636,8 @@ const seccionPorId = (id: string): DefSeccion => SECCIONES.find((s) => s.id === 
 
 function esqueleto(): HtmlSeguro {
   return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
-    <header class="flex items-center gap-4">
-      <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-bma-azul text-white">${icono('school', 'h-6 w-6')}</span>
+    <header class="flex flex-col gap-4">
+      ${cabeceraDualHtml()}
       <div>
         <h1 id="titulo-pagina" tabindex="-1" class="${CLS.titulo}">Inscripción de nuevos estudiantes</h1>
         <p class="${CLS.subtitulo}">Brilliant Minds Academy · Planilla de inscripción</p>
@@ -657,6 +662,8 @@ function esqueleto(): HtmlSeguro {
       <button id="enviar" type="submit" class="${boton(CLS.btnPrimario, 'w-full py-3 text-base')}">${icono('upload', 'h-5 w-5')}<span>Enviar inscripción</span></button>
       <p class="text-center text-xs text-slate-600">Los campos con <span aria-hidden="true">*</span><span class="sr-only">asterisco</span> son obligatorios.</p>
     </form>
+
+    ${firmaPublica()}
   </div>`;
 }
 

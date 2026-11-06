@@ -1,0 +1,296 @@
+diff --git a/CAMBIOS_BMA_MARCA_UNIFICADA_ASTRA.md b/CAMBIOS_BMA_MARCA_UNIFICADA_ASTRA.md
+new file mode 100644
+index 0000000..45d5703
+--- /dev/null
++++ b/CAMBIOS_BMA_MARCA_UNIFICADA_ASTRA.md
+@@ -0,0 +1,31 @@
++# CAMBIOS BMA · Marca unificada y logotipo metálico de Astra
++
++Rama `development`, base `e28fa45` (incluye el asset `frontend/src/assets/astra-logo.png`, 631×624, RGBA).
++Parche: `bma-marca-unificada-astra.patch`.
++
++## Archivos modificados
++
++| Archivo | Cambio |
++| --- | --- |
++| `frontend/src/lib/firma.ts` | Sustituye el marcador «A» cian (SVG inline, `#22D3EE`) por el isotipo metálico `astra-logo.png`. `firmaLogin()` y `firmaSidebar()` lo renderizan sobre pastilla `slate-900` (contraste). En el sidebar contraído la pastilla pasa de 32 a 40 px. Nuevos exports: `cabeceraDualHtml()` (logo BMA a la izquierda, isotipo Astra a la derecha), `firmaPublica()` («Desarrollado por Astra Digital Solutions») y las constantes `NOMBRE_ASTRA` y `TEXTO_AUTORIA_PUBLICA`. Se elimina `CYAN_TECNOLOGICO`. |
++| `frontend/src/types/assets.d.ts` | Declara `*.png` para que `import astraLogo from '…png'` compile en modo estricto. |
++| `frontend/src/admisiones.ts` | Cabecera con `cabeceraDualHtml()` (reemplaza el icono de escuela). Los 5 encabezados de sección (Estudiante, Representantes, Autorizados, Documentos, Pago) usan una banda uniforme `bg-bma-purpura` con texto blanco (5.15:1, AA) y número de paso en círculo blanco. Pie con `firmaPublica()`. |
++| `frontend/src/portal.ts` | Misma cabecera dual y mismo pie. «Moroso» pasa de tono `warn` a `bad` (`bg-bma-coral-suave` + `text-bma-coral-oscuro`, 6.01:1). La tarjeta «Total pendiente» adopta ese mismo par cuando hay cuotas vencidas. |
++| `tests/frontend-identidad.test.js` | Actualiza la aserción del cian (ya no existe) y añade un test de la marca unificada. |
++
++## Archivos creados
++
++- `CAMBIOS_BMA_MARCA_UNIFICADA_ASTRA.md` (este resumen)
++- `bma-marca-unificada-astra.patch`
++
++## Verificación realizada
++
++- `tsc --noEmit` estricto sobre `frontend/src/**`: sin errores y sin `any` nuevos. Solo falla `vite.config.ts` por falta de `vite` y `@types/node` en el entorno de trabajo; el error es idéntico sin mis cambios.
++- `node --test tests/frontend-identidad.test.js`: 6/6 correctos.
++- Base de datos: no se tocó SQL, migraciones ni backend. Los parámetros posicionales `$1…`, el manejo de excepciones JSON y el Core Base no se ven afectados, y no se introdujo código MSSQL.
++
++## Pendiente de tu lado
++
++1. `public/` es la salida compilada de Vite y **no se regeneró** (no hay `vite`/`tailwindcss` instalados y el entorno no permite instalarlos). Tras aplicar el parche: `npm run frontend:install && npm run frontend:build`.
++2. Revisión visual en navegador: el parche se comprobó por código y tipos, no renderizado.
++3. Optimización opcional: `astra-logo.png` pesa 283 KB y se muestra a 32–48 px. Una copia WebP de unos 256 px (como `bma-isotipo.webp`) reduciría la carga en móvil. Las instancias de pie ya cargan con `loading="lazy"`.
+diff --git a/frontend/src/admisiones.ts b/frontend/src/admisiones.ts
+index 2dd27eb..ed3ebed 100644
+--- a/frontend/src/admisiones.ts
++++ b/frontend/src/admisiones.ts
+@@ -9,6 +9,7 @@ import './styles/main.css';
+ import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
+ import { html, montar, raw, type HtmlSeguro } from './lib/html';
+ import { icono } from './lib/icons';
++import { cabeceraDualHtml, firmaPublica } from './lib/firma';
+ import { bs, edadEnAnios, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
+ import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
+ import { esConfigInvitacion } from './types/index';
+@@ -582,9 +583,13 @@ function archivoHtml(def: DefArchivo): HtmlSeguro {
+   </div>`;
+ }
+ 
+-/** Número de paso (1–5) en un círculo: guía el orden de la planilla sin depender del color. */
++/**
++ * Encabezado de cada una de las 5 secciones: banda púrpura de marca (`bg-bma-purpura` #8C59A4) a todo el ancho de la tarjeta, con texto
++ * blanco (5.15:1, AA). Los márgenes negativos anulan el `p-6` de la tarjeta para que la banda quede a ras de sus bordes. El número de paso
++ * (1–5) va en un círculo blanco con texto púrpura oscuro: guía el orden de la planilla sin depender del color.
++ */
+ function encabezadoSeccion(id: string, numero: number, titulo: string): HtmlSeguro {
+-  return html`<h2 id="t-${id}" class="mb-4 flex items-center gap-3 text-base font-bold text-slate-900"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-bma-azul text-xs font-bold text-white" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
++  return html`<h2 id="t-${id}" class="-mx-6 -mt-6 mb-4 flex items-center gap-3 rounded-t-[11px] border-b border-bma-purpura-oscuro bg-bma-purpura px-6 py-3 text-base font-bold text-white"><span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-xs font-bold text-bma-purpura-oscuro" aria-hidden="true">${numero}</span><span>${titulo}</span></h2>`;
+ }
+ 
+ /** Agrupa campos consecutivos con el mismo `grupo` (un `<fieldset>` por grupo); los campos sin grupo van sueltos. */
+@@ -631,8 +636,8 @@ const seccionPorId = (id: string): DefSeccion => SECCIONES.find((s) => s.id ===
+ 
+ function esqueleto(): HtmlSeguro {
+   return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
+-    <header class="flex items-center gap-4">
+-      <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-bma-azul text-white">${icono('school', 'h-6 w-6')}</span>
++    <header class="flex flex-col gap-4">
++      ${cabeceraDualHtml()}
+       <div>
+         <h1 id="titulo-pagina" tabindex="-1" class="${CLS.titulo}">Inscripción de nuevos estudiantes</h1>
+         <p class="${CLS.subtitulo}">Brilliant Minds Academy · Planilla de inscripción</p>
+@@ -657,6 +662,8 @@ function esqueleto(): HtmlSeguro {
+       <button id="enviar" type="submit" class="${boton(CLS.btnPrimario, 'w-full py-3 text-base')}">${icono('upload', 'h-5 w-5')}<span>Enviar inscripción</span></button>
+       <p class="text-center text-xs text-slate-600">Los campos con <span aria-hidden="true">*</span><span class="sr-only">asterisco</span> son obligatorios.</p>
+     </form>
++
++    ${firmaPublica()}
+   </div>`;
+ }
+ 
+diff --git a/frontend/src/lib/firma.ts b/frontend/src/lib/firma.ts
+index 7a93c10..714d5b4 100644
+--- a/frontend/src/lib/firma.ts
++++ b/frontend/src/lib/firma.ts
+@@ -1,28 +1,66 @@
+ /**
+- * Firma de autoría de Astra Digital Solutions (pie del login y base del sidebar). Texto + isotipo «A» en Cyan Tecnológico (#22D3EE).
+- * El isotipo es un SVG inline decorativo (`aria-hidden`); el texto visible es el nombre accesible.
++ * Firma de autoría de Astra Digital Solutions: pie del login, base del sidebar, cabecera dual y pie de la planilla pública y del portal.
++ *
++ * ÚNICO punto del frontend que conoce la marca Astra. Usa el isotipo oficial en metal cepillado (`src/assets/astra-logo.png`, 631×624 con
++ * canal alfa); Vite lo emite con hash en /assets. El metal va siempre sobre una pastilla slate-900 (el mismo recurso de contraste que usaba
++ * el marcador «A» cian anterior), de modo que las luces del cepillado no se pierdan sobre superficies blancas.
++ *
++ * Las clases las pasa quien llama, escritas literalmente en su propio archivo: Tailwind solo genera las utilidades que ve escritas tal
++ * cual en el código fuente (componerlas con `${…}` impediría que se generaran en producción).
+  */
+ import { html, type HtmlSeguro } from './html';
++import { logoCompletoHtml } from './marca';
++import isotipoMetalico from '../assets/astra-logo.png';
+ 
++export const NOMBRE_ASTRA = 'Astra Digital Solutions';
+ export const TEXTO_AUTORIA = 'Diseñado y desarrollado por Astra Digital Solutions';
++export const TEXTO_AUTORIA_PUBLICA = 'Desarrollado por Astra Digital Solutions';
+ export const TEXTO_SUITE = 'Astra Academy Suite v1.0';
+-export const CYAN_TECNOLOGICO = '#22D3EE';
+ 
+-/** Isotipo «A»: dos diagonales y un travesaño, trazo redondeado. */
+-function isotipoAstra(clases: string): HtmlSeguro {
+-  return html`<svg viewBox="0 0 24 24" fill="none" stroke="${CYAN_TECNOLOGICO}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false" class="${clases}"><path d="M4 20 12 4l8 16"/><path d="M7.6 14h8.8"/></svg>`;
++/** Dimensiones intrínsecas del PNG: reservan el espacio antes de cargar (sin saltos de maquetación). */
++const DIM_ASTRA = { ancho: 631, alto: 624 } as const;
++
++/**
++ * Isotipo metálico de Astra. `object-contain` conserva la proporción (casi cuadrada) sea cual sea la caja que defina quien llama.
++ * - `decorativo`: junto a un texto que ya nombra la marca (pies de página) → `alt=""` para que el lector de pantalla no lo repita.
++ * - `perezoso`: carga diferida para las instancias fuera del primer pantallazo (pies de página).
++ */
++function isotipoAstra(clases: string, decorativo: boolean, perezoso: boolean): HtmlSeguro {
++  const alt = decorativo ? '' : NOMBRE_ASTRA;
++  return html`<img src="${isotipoMetalico}" alt="${alt}" width="${DIM_ASTRA.ancho}" height="${DIM_ASTRA.alto}" decoding="async" loading="${perezoso ? 'lazy' : 'eager'}" class="${clases}">`;
+ }
+ 
+-/** Pie de la tarjeta del login. El cian va sobre una pastilla slate-900 (contraste ≈ 11:1); el texto va en slate-700. */
++/** Pie de la tarjeta del login. El metal va sobre una pastilla slate-900; el texto va en slate-700. */
+ export function firmaLogin(): HtmlSeguro {
+   return html`<footer class="mt-8 flex items-center justify-center gap-2 border-t border-slate-200 pt-4 text-center font-display text-xs font-medium tracking-wide text-slate-700">
+-    ${isotipoAstra('h-5 w-5 shrink-0 rounded bg-slate-900 p-0.5')}<span>${TEXTO_AUTORIA}</span>
++    ${isotipoAstra('h-8 w-8 shrink-0 rounded bg-slate-900 object-contain p-1', true, true)}<span>${TEXTO_AUTORIA}</span>
+   </footer>`;
+ }
+ 
+-/** Base del sidebar: «Astra Academy Suite v1.0» (colapsado: solo el isotipo). */
++/**
++ * Base del sidebar: «Astra Academy Suite v1.0». Colapsado (`data-collapsed=true` en el ancestro `group/sb`): el texto pasa a `sr-only`,
++ * la fila se centra y la pastilla crece de 32 a 40 px para que el isotipo sea el protagonista del rail de 80 px.
++ */
+ export function firmaSidebar(): HtmlSeguro {
+   return html`<div class="flex items-center gap-2 border-t border-slate-200 px-4 py-3 font-display text-xs font-medium tracking-wide text-slate-700 group-data-[collapsed=true]/sb:justify-center group-data-[collapsed=true]/sb:px-0" title="${TEXTO_SUITE}">
+-    ${isotipoAstra('h-6 w-6 shrink-0 rounded bg-slate-900 p-1')}<span class="min-w-0 truncate group-data-[collapsed=true]/sb:sr-only">${TEXTO_SUITE}</span>
++    ${isotipoAstra('h-8 w-8 shrink-0 rounded bg-slate-900 object-contain p-1 transition-[width,height] duration-200 motion-reduce:transition-none group-data-[collapsed=true]/sb:h-10 group-data-[collapsed=true]/sb:w-10', true, true)}<span class="min-w-0 truncate group-data-[collapsed=true]/sb:sr-only">${TEXTO_SUITE}</span>
+   </div>`;
+ }
++
++/**
++ * Cabecera dual de las vistas públicas (planilla de admisión y portal del representante): logotipo oficial multicolor de BMA a la
++ * izquierda e isotipo metálico de Astra en la esquina derecha, como sello sutil de autoría tecnológica.
++ */
++export function cabeceraDualHtml(): HtmlSeguro {
++  return html`<div class="flex items-center justify-between gap-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
++    ${logoCompletoHtml('h-auto w-24 shrink-0 sm:w-28', true)}
++    <span class="flex shrink-0 items-center rounded-lg bg-slate-900 p-1.5" title="${TEXTO_AUTORIA_PUBLICA}">${isotipoAstra('h-10 w-10 object-contain sm:h-12 sm:w-12', false, false)}</span>
++  </div>`;
++}
++
++/** Pie de la planilla pública y del portal: «Desarrollado por Astra Digital Solutions» con el isotipo integrado. */
++export function firmaPublica(): HtmlSeguro {
++  return html`<footer class="flex items-center justify-center gap-2 border-t border-slate-200 pt-4 text-center text-xs font-medium text-slate-700">
++    ${isotipoAstra('h-8 w-8 shrink-0 rounded bg-slate-900 object-contain p-1', true, true)}<span>${TEXTO_AUTORIA_PUBLICA}</span>
++  </footer>`;
++}
+diff --git a/frontend/src/portal.ts b/frontend/src/portal.ts
+index 7dfefd3..d23c527 100644
+--- a/frontend/src/portal.ts
++++ b/frontend/src/portal.ts
+@@ -9,6 +9,7 @@ import './styles/main.css';
+ import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
+ import { html, montar, type HtmlSeguro } from './lib/html';
+ import { icono } from './lib/icons';
++import { cabeceraDualHtml, firmaPublica } from './lib/firma';
+ import { bs, esVencida, fechaCorta, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
+ import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, etiquetaEstado, notificar, obtener, todos } from './lib/ui';
+ import type {
+@@ -76,7 +77,8 @@ function bannerEstado(d: EstadoCuentaPortal, pendientes: readonly CuotaPortal[])
+     case 'Pendiente por Validación Administrativa':
+       return aviso('info', 'La administración está validando la inscripción y el pago de la matrícula. Te avisaremos por WhatsApp.', 'Inscripción en validación');
+     case 'Moroso':
+-      return aviso('warn', `Tienes ${vencidas.length} ${vencidas.length === 1 ? 'cuota vencida' : 'cuotas vencidas'}. Registra tu pago para regularizar la cuenta.`, 'Cuenta con saldo vencido');
++      // Tono «bad» = bg-bma-coral-suave + text-bma-coral-oscuro (6.01:1, AA): la morosidad es un saldo vencido, no una simple advertencia.
++      return aviso('bad', `Tienes ${vencidas.length} ${vencidas.length === 1 ? 'cuota vencida' : 'cuotas vencidas'}. Registra tu pago para regularizar la cuenta.`, 'Cuenta con saldo vencido');
+     default:
+       return pendientes.length === 0
+         ? aviso('ok', 'No tienes cuotas pendientes. ¡Gracias por estar al día!', 'Cuenta al día')
+@@ -129,6 +131,11 @@ function cuotaHtml(c: CuotaPortal): HtmlSeguro {
+ function vistaListo(d: EstadoCuentaPortal): HtmlSeguro {
+   const abiertas = cuotasAbiertas(d.cuotas);
+   const porPagar = abiertas.filter((c) => c.estado === 'Pendiente');
++  // Con cuotas vencidas, la tarjeta del saldo pendiente adopta el par auditado coral-suave / coral-oscuro (6.01:1, AA).
++  const hayVencidas = porPagar.some((c) => esVencida(c.fecha_vencimiento));
++  const claseTotal = hayVencidas ? 'rounded-xl border border-bma-coral/50 bg-bma-coral-suave shadow-sm' : CLS.tarjeta;
++  const textoEtiquetaTotal = hayVencidas ? 'text-bma-coral-oscuro' : 'text-slate-700';
++  const textoMontoTotal = hayVencidas ? 'text-bma-coral-oscuro' : 'text-slate-900';
+   return html`
+     <section class="${CLS.tarjetaCristal} p-6" aria-labelledby="t-estudiante">
+       <p class="text-sm text-slate-600">Estudiante</p>
+@@ -139,9 +146,9 @@ function vistaListo(d: EstadoCuentaPortal): HtmlSeguro {
+     </section>
+     ${bannerEstado(d, abiertas)}
+     ${porPagar.length > 0
+-      ? html`<section class="${CLS.tarjeta} flex flex-wrap items-center justify-between gap-4 p-6" aria-label="Total pendiente">
+-          <span class="text-sm font-medium text-slate-700">Total pendiente de pago</span>
+-          <span class="text-xl font-bold text-slate-900">${usd(sumarMonto(porPagar.map((c) => c.monto_usd)))} <span class="text-base font-semibold text-slate-700">≈ ${bs(sumarMonto(porPagar.map((c) => c.monto_bs)))}</span></span>
++      ? html`<section class="${claseTotal} flex flex-wrap items-center justify-between gap-4 p-6" aria-label="Total pendiente">
++          <span class="text-sm font-medium ${textoEtiquetaTotal}">Total pendiente de pago</span>
++          <span class="text-xl font-bold ${textoMontoTotal}">${usd(sumarMonto(porPagar.map((c) => c.monto_usd)))} <span class="text-base font-semibold ${textoEtiquetaTotal}">≈ ${bs(sumarMonto(porPagar.map((c) => c.monto_bs)))}</span></span>
+         </section>`
+       : null}
+     <section class="${CLS.tarjeta} p-6" aria-labelledby="t-cuentas">
+@@ -156,17 +163,18 @@ function vistaListo(d: EstadoCuentaPortal): HtmlSeguro {
+ 
+ function esqueleto(): HtmlSeguro {
+   return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
+-    <header class="flex flex-wrap items-center justify-between gap-4">
+-      <div class="flex items-center gap-4">
+-        <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-900 text-white">${icono('wallet', 'h-6 w-6')}</span>
++    <header class="flex flex-col gap-4">
++      ${cabeceraDualHtml()}
++      <div class="flex flex-wrap items-center justify-between gap-4">
+         <div>
+           <h1 class="${CLS.titulo}">Portal del representante</h1>
+           <p class="${CLS.subtitulo}">Brilliant Minds Academy</p>
+         </div>
++        <button type="button" id="actualizar" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">${icono('refresh', 'h-4 w-4')}<span>Actualizar</span></button>
+       </div>
+-      <button type="button" id="actualizar" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">${icono('refresh', 'h-4 w-4')}<span>Actualizar</span></button>
+     </header>
+     <div id="contenido" class="flex flex-col gap-6"></div>
++    <div class="mt-auto">${firmaPublica()}</div>
+   </div>`;
+ }
+ 
+diff --git a/frontend/src/types/assets.d.ts b/frontend/src/types/assets.d.ts
+index abe0578..4982a9b 100644
+--- a/frontend/src/types/assets.d.ts
++++ b/frontend/src/types/assets.d.ts
+@@ -6,3 +6,7 @@ declare module '*.webp' {
+   const url: string;
+   export default url;
+ }
++declare module '*.png' {
++  const url: string;
++  export default url;
++}
+diff --git a/tests/frontend-identidad.test.js b/tests/frontend-identidad.test.js
+index fc96457..98faf03 100644
+--- a/tests/frontend-identidad.test.js
++++ b/tests/frontend-identidad.test.js
+@@ -54,8 +54,42 @@ test('login: red neuronal y firma Astra; niveles fijos de la Sede Este y «Nivel
+   const firma = leer('frontend', 'src', 'lib', 'firma.ts');
+   assert.match(firma, /Diseñado y desarrollado por Astra Digital Solutions/);
+   assert.match(firma, /Astra Academy Suite v1\.0/);
+-  assert.match(firma, /#22D3EE/);
++  // El marcador «A» cian fue sustituido por el isotipo oficial en metal cepillado.
++  assert.doesNotMatch(firma, /#22D3EE|CYAN_TECNOLOGICO|<svg/);
++  assert.match(firma, /from '\.\.\/assets\/astra-logo\.png'/);
+   assert.match(leer('frontend', 'src', 'invitaciones-modulo.ts'), /\['Kids 1 B', 'Kids 1 A', 'Beginner B', 'Beginner A', 'Adultos', 'Kids 1 C', 'Beginner C'\]/);
+   assert.match(admin, /<th scope="col" class="\$\{CLS\.th\}">Nivel<\/th><th scope="col" class="\$\{CLS\.th\}">Sede<\/th>/);
+   assert.match(leer('frontend', 'tailwind.config.js'), /Outfit/);
+ });
++
++test('marca unificada: asset de Astra, cabecera dual, encabezados púrpura y pie de autoría en las vistas públicas', () => {
++  assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'src', 'assets', 'astra-logo.png')), true);
++  assert.match(leer('frontend', 'src', 'types', 'assets.d.ts'), /declare module '\*\.png'/);
++  const firma = leer('frontend', 'src', 'lib', 'firma.ts');
++  assert.match(firma, /Desarrollado por Astra Digital Solutions/);
++  assert.match(firma, /export function cabeceraDualHtml\(/);
++  assert.match(firma, /export function firmaPublica\(/);
++  assert.match(firma, /group-data-\[collapsed=true\]\/sb:h-10/); // el isotipo crece en el rail contraído del sidebar
++
++  const planilla = leer('frontend', 'src', 'admisiones.ts');
++  assert.match(planilla, /cabeceraDualHtml\(\)/);
++  assert.match(planilla, /firmaPublica\(\)/);
++  const encabezado = /function encabezadoSeccion[\s\S]*?\n}/.exec(planilla)?.[0] ?? '';
++  assert.match(encabezado, /bg-bma-purpura[ "]/);
++  assert.match(encabezado, /text-white/);
++  assert.doesNotMatch(encabezado, /bg-bma-azul/);
++  // Las 5 secciones (estudiante, representante, autorizadas, documentos, pago) pasan por el mismo encabezado.
++  assert.equal((planilla.match(/encabezadoSeccion\(/g) ?? []).length, 3); // definición + seccionHtml + documentos
++  for (const n of [1, 2, 3, 5]) assert.match(planilla, new RegExp(`seccionPorId\\('[a-z]+'\\), ${n}\\)`));
++  assert.match(planilla, /encabezadoSeccion\('documentos', 4,/);
++
++  const portal = leer('frontend', 'src', 'portal.ts');
++  assert.match(portal, /cabeceraDualHtml\(\)/);
++  assert.match(portal, /firmaPublica\(\)/);
++  assert.match(portal, /case 'Moroso':[\s\S]*?return aviso\('bad'/);
++  assert.match(portal, /bg-bma-coral-suave/);
++  assert.match(portal, /text-bma-coral-oscuro/);
++
++  // Astra vive solo en firma.ts y en las vistas públicas que la importan por nombre de función; ni marca.ts ni ui.ts la conocen.
++  for (const f of ['lib/marca.ts', 'lib/ui.ts']) assert.doesNotMatch(leer('frontend', 'src', f), /astra/i);
++});

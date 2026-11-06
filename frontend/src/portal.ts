@@ -9,6 +9,7 @@ import './styles/main.css';
 import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
 import { html, montar, type HtmlSeguro } from './lib/html';
 import { icono } from './lib/icons';
+import { cabeceraDualHtml, firmaPublica } from './lib/firma';
 import { bs, esVencida, fechaCorta, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
 import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, etiquetaEstado, notificar, obtener, todos } from './lib/ui';
 import type {
@@ -76,7 +77,8 @@ function bannerEstado(d: EstadoCuentaPortal, pendientes: readonly CuotaPortal[])
     case 'Pendiente por Validación Administrativa':
       return aviso('info', 'La administración está validando la inscripción y el pago de la matrícula. Te avisaremos por WhatsApp.', 'Inscripción en validación');
     case 'Moroso':
-      return aviso('warn', `Tienes ${vencidas.length} ${vencidas.length === 1 ? 'cuota vencida' : 'cuotas vencidas'}. Registra tu pago para regularizar la cuenta.`, 'Cuenta con saldo vencido');
+      // Tono «bad» = bg-bma-coral-suave + text-bma-coral-oscuro (6.01:1, AA): la morosidad es un saldo vencido, no una simple advertencia.
+      return aviso('bad', `Tienes ${vencidas.length} ${vencidas.length === 1 ? 'cuota vencida' : 'cuotas vencidas'}. Registra tu pago para regularizar la cuenta.`, 'Cuenta con saldo vencido');
     default:
       return pendientes.length === 0
         ? aviso('ok', 'No tienes cuotas pendientes. ¡Gracias por estar al día!', 'Cuenta al día')
@@ -129,6 +131,11 @@ function cuotaHtml(c: CuotaPortal): HtmlSeguro {
 function vistaListo(d: EstadoCuentaPortal): HtmlSeguro {
   const abiertas = cuotasAbiertas(d.cuotas);
   const porPagar = abiertas.filter((c) => c.estado === 'Pendiente');
+  // Con cuotas vencidas, la tarjeta del saldo pendiente adopta el par auditado coral-suave / coral-oscuro (6.01:1, AA).
+  const hayVencidas = porPagar.some((c) => esVencida(c.fecha_vencimiento));
+  const claseTotal = hayVencidas ? 'rounded-xl border border-bma-coral/50 bg-bma-coral-suave shadow-sm' : CLS.tarjeta;
+  const textoEtiquetaTotal = hayVencidas ? 'text-bma-coral-oscuro' : 'text-slate-700';
+  const textoMontoTotal = hayVencidas ? 'text-bma-coral-oscuro' : 'text-slate-900';
   return html`
     <section class="${CLS.tarjetaCristal} p-6" aria-labelledby="t-estudiante">
       <p class="text-sm text-slate-600">Estudiante</p>
@@ -139,9 +146,9 @@ function vistaListo(d: EstadoCuentaPortal): HtmlSeguro {
     </section>
     ${bannerEstado(d, abiertas)}
     ${porPagar.length > 0
-      ? html`<section class="${CLS.tarjeta} flex flex-wrap items-center justify-between gap-4 p-6" aria-label="Total pendiente">
-          <span class="text-sm font-medium text-slate-700">Total pendiente de pago</span>
-          <span class="text-xl font-bold text-slate-900">${usd(sumarMonto(porPagar.map((c) => c.monto_usd)))} <span class="text-base font-semibold text-slate-700">≈ ${bs(sumarMonto(porPagar.map((c) => c.monto_bs)))}</span></span>
+      ? html`<section class="${claseTotal} flex flex-wrap items-center justify-between gap-4 p-6" aria-label="Total pendiente">
+          <span class="text-sm font-medium ${textoEtiquetaTotal}">Total pendiente de pago</span>
+          <span class="text-xl font-bold ${textoMontoTotal}">${usd(sumarMonto(porPagar.map((c) => c.monto_usd)))} <span class="text-base font-semibold ${textoEtiquetaTotal}">≈ ${bs(sumarMonto(porPagar.map((c) => c.monto_bs)))}</span></span>
         </section>`
       : null}
     <section class="${CLS.tarjeta} p-6" aria-labelledby="t-cuentas">
@@ -156,17 +163,18 @@ function vistaListo(d: EstadoCuentaPortal): HtmlSeguro {
 
 function esqueleto(): HtmlSeguro {
   return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
-    <header class="flex flex-wrap items-center justify-between gap-4">
-      <div class="flex items-center gap-4">
-        <span class="flex h-12 w-12 items-center justify-center rounded-xl bg-slate-900 text-white">${icono('wallet', 'h-6 w-6')}</span>
+    <header class="flex flex-col gap-4">
+      ${cabeceraDualHtml()}
+      <div class="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 class="${CLS.titulo}">Portal del representante</h1>
           <p class="${CLS.subtitulo}">Brilliant Minds Academy</p>
         </div>
+        <button type="button" id="actualizar" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">${icono('refresh', 'h-4 w-4')}<span>Actualizar</span></button>
       </div>
-      <button type="button" id="actualizar" class="${boton(CLS.btnSecundario, CLS.btnPeq)}">${icono('refresh', 'h-4 w-4')}<span>Actualizar</span></button>
     </header>
     <div id="contenido" class="flex flex-col gap-6"></div>
+    <div class="mt-auto">${firmaPublica()}</div>
   </div>`;
 }
 
