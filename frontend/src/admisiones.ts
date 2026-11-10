@@ -9,7 +9,8 @@ import './styles/main.css';
 import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
 import { html, montar, raw, type HtmlSeguro } from './lib/html';
 import { icono } from './lib/icons';
-import { cabeceraDualHtml, firmaPublica } from './lib/firma';
+import { firmaPublica } from './lib/firma';
+import { cabeceraIsotipoHtml } from './lib/marca';
 import { bs, edadEnAnios, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
 import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
 import { esConfigInvitacion } from './types/index';
@@ -637,7 +638,7 @@ const seccionPorId = (id: string): DefSeccion => SECCIONES.find((s) => s.id === 
 function esqueleto(): HtmlSeguro {
   return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
     <header class="flex flex-col gap-4">
-      ${cabeceraDualHtml()}
+      ${cabeceraIsotipoHtml()}
       <div>
         <h1 id="titulo-pagina" tabindex="-1" class="${CLS.titulo}">Inscripción de nuevos estudiantes</h1>
         <p class="${CLS.subtitulo}">Brilliant Minds Academy · Planilla de inscripción</p>

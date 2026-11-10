@@ -23,6 +23,7 @@ import { cargarConCache, invalidarCache, type Guarda } from './lib/cache';
 import { esqueletoPara } from './lib/esqueleto';
 import { montarRedNeuronal } from './lib/red-neuronal';
 import { firmaLogin, firmaSidebar } from './lib/firma';
+import { iniciarIntroLogin, type IntroLogin } from './login-animation';
 import { CLAVE_SEDES, esListaSedes } from './lib/sedes-cache';
 import { alcanceDe } from './lib/alcance';
 import type {
@@ -190,16 +191,25 @@ function liberarRed(): void {
   detenerRed = null;
 }
 
+/** Intro de marca del login en curso (si la hay): se cancela al volver a pintar el login o al entrar al panel. */
+let introLogin: IntroLogin | null = null;
+
+function liberarIntro(): void {
+  introLogin?.cancelar();
+  introLogin = null;
+}
+
 function mostrarLogin(mensaje?: string): void {
   detenerTablero();
   liberarRed();
+  liberarIntro();
   ticketVista += 1;
   document.body.className = 'text-slate-900';
   montar(
     obtener('#app', HTMLElement),
-    html`<main class="relative flex min-h-screen items-center justify-center overflow-hidden bg-bma-azul px-4 py-12">
+    html`<main id="login-pantalla" class="relative flex min-h-screen items-center justify-center overflow-hidden bg-bma-azul px-4 py-12">
       <canvas id="red-neuronal" aria-hidden="true" class="pointer-events-none absolute inset-0 h-full w-full"></canvas>
-      <section class="${CLS.loginTarjeta} relative z-10" aria-labelledby="login-titulo">
+      <section data-intro-revelar class="${CLS.loginTarjeta} relative z-10" aria-labelledby="login-titulo">
         <header class="mb-8 flex flex-col items-center text-center">
           ${logoCompletoHtml('h-auto w-48 sm:w-56', true)}
           <h1 id="login-titulo" class="sr-only">Brilliant Minds Academy · Panel administrativo</h1>
@@ -227,7 +237,13 @@ function mostrarLogin(mensaje?: string): void {
     ev.preventDefault();
     void alIniciarSesion(form);
   });
-  obtener('#login-email', HTMLInputElement).focus();
+  // Intro de marca (una vez por carga de página; omitida con «reducir movimiento»). Mientras dura, el formulario está `inert`:
+  // el foco va al correo cuando la pantalla queda lista, salvo que la intro se haya cancelado porque el login ya no está en pantalla.
+  const intro = iniciarIntroLogin(obtener('#login-pantalla', HTMLElement));
+  introLogin = intro;
+  void intro.lista.then((lista) => {
+    if (lista && introLogin === intro) buscar('#login-email', HTMLInputElement)?.focus();
+  });
 }
 
 async function alIniciarSesion(form: HTMLFormElement): Promise<void> {
@@ -347,6 +363,7 @@ async function arrancar(): Promise<void> {
 
   document.body.className = 'text-slate-900';
   liberarRed();
+  liberarIntro();
   montar(obtener('#app', HTMLElement), shellHtml());
   const shell = obtener('#shell', HTMLElement);
   shell.addEventListener('click', (ev) => {
