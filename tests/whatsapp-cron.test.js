@@ -7,8 +7,11 @@ const path = require('node:path');
 const { AppError, e } = require('../errors/AppError');
 const { crearCronWhatsapp, msHastaProximaEjecucion, bcvDelCiclo } = require('../cron/whatsappCron');
 const { crearWhatsappService } = require('../services/whatsapp.service');
+const { MODO_PREVENTIVA } = require('../services/notificaciones.service');
 
-const HORA = Date.parse('2026-10-23T12:00:00-04:00');
+// 30-oct-2026: faltan 2 días para el mes entrante (toca PREVENTIVA) y ya pasó el día 11 (toca MOROSIDAD): el ciclo corre ambos bloques.
+const HORA = Date.parse('2026-10-30T12:00:00-04:00');
+const en = (dia) => Date.parse(`${dia}T12:00:00-04:00`);
 const CONFIG = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: 400, morosidadCadaDias: 7, maxFallosSeguidos: 5, arrendamientoMin: 120 };
 const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
 
@@ -17,9 +20,11 @@ const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
  * junto con las pausas (`esperar`), para comprobar el orden secuencial y el delay.
  * `leasePerdido` = el UPDATE de renovación no encuentra nuestra fila (otra instancia tomó el lease); `renovarFalla` = ese UPDATE lanza.
  */
-function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { habilitado: true }, configurado = true, lease = true, leasePerdido = false, renovarFalla = false, config = {} } = {}) {
+function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { habilitado: true }, configurado = true, lease = true, leasePerdido = false, renovarFalla = false, config = {}, hora = HORA } = {}) {
   const eventos = [];
   const sql = [];
+  const alertas = [];
+  let consultasGuard = 0;
   const db = {
     ejecutar: async (texto, params) => {
       sql.push({ texto, params });
@@ -32,10 +37,12 @@ function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { hab
       return rs();
     },
   };
-  const guard = { evaluar: async () => modulo };
+  const guard = { evaluar: async () => { consultasGuard += 1; return modulo; } };
   const notificaciones = {
     VENTANA_PREVENTIVA: { min: 3, max: 5 },
-    generarAlerta: async ({ tipo, estudianteId, enviar, usuarioId }) => {
+    generarAlerta: async (args) => {
+      const { tipo, estudianteId, enviar, usuarioId } = args;
+      alertas.push(args);
       eventos.push(`envio:${tipo}:${estudianteId}`);
       assert.equal(enviar, true);
       assert.equal(usuarioId, null, 'el bot no se atribuye a ningún usuario del panel');
@@ -50,12 +57,12 @@ function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { hab
     whatsapp: { configurado: () => configurado },
     config: { ...CONFIG, ...config },
     esperar: async (ms) => { pausas.push(ms); eventos.push(`pausa:${ms}`); },
-    ahora: () => HORA, log: () => {}, logError: () => {},
+    ahora: () => hora, log: () => {}, logError: () => {},
   });
-  return { bot, eventos, pausas, sql };
+  return { bot, eventos, pausas, sql, alertas, guardConsultado: () => consultasGuard };
 }
 
-const prev = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, cuota_id: estudiante_id * 10, fecha_vencimiento: '2026-10-27' }));
+const prev = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, cuota_id: estudiante_id * 10, fecha_vencimiento: '2026-11-10' }));
 const mor = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, vencida_desde: '2026-10-01' }));
 // Falla de Meta NO clasificada como del destinatario ni sistémica (131000 = «error desconocido»): cuenta para el cortafuegos, como siempre.
 const metaFalla = () => new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131000: error desconocido', meta_codigo: 131000, http_status: 500, clase: 'DESCONOCIDA' });
@@ -180,9 +187,11 @@ test('las consultas masivas son PostgreSQL con parámetros posicionales y reglas
   const p = sql.find((s) => /DISTINCT ON/.test(s.texto));
   const m = sql.find((s) => /GROUP BY v\.id/.test(s.texto));
   // null = ámbito «sin sede» (no hay sedes en este doble). Los 4 últimos de cada consulta: estado «en vuelo» (H4), estado a enfriar y umbrales (H1).
-  assert.deepEqual(p.params, ['2026-10-23', 3, 5, 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
-  assert.deepEqual(m.params, ['2026-10-23', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
-  assert.match(p.texto, /BETWEEN \(\$1::date \+ \$2::int\) AND \(\$1::date \+ \$3::int\)/);
+  // Preventiva: $2/$3 son las fechas de la ventana de pago del mes entrante (1 y 10 de noviembre), no desplazamientos en días.
+  assert.deepEqual(p.params, ['2026-10-30', '2026-11-01', '2026-11-10', 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
+  assert.deepEqual(m.params, ['2026-10-30', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
+  assert.match(p.texto, /c\.fecha_vencimiento >= \$1::date AND c\.fecha_vencimiento BETWEEN \$2::date AND \$3::date/);
+  assert.doesNotMatch(p.texto, /\$1::date \+ \$\d::int/, 'la ventana ya no es «hoy + N días»');
   assert.match(p.texto, /NOT EXISTS[\s\S]*n\.cuota_id = p\.cuota_id/, 'una PREVENTIVA por cuota');
   assert.match(m.texto, /c\.estado = \$4::text AND c\.fecha_vencimiento < \$1::date/, 'solo cuotas vencidas en Pendiente (no En Revisión)');
   assert.match(m.texto, /n\.creado_en > NOW\(\) - \(\$2::int \* INTERVAL '1 day'\)/);
@@ -311,4 +320,70 @@ test('el bot usa el servicio de notificaciones real (cero lógica de envío dupl
   const server = fs.readFileSync(path.join(raiz, 'server.js'), 'utf8');
   assert.match(server, /cronWhatsapp\.iniciar\(\)/);
   assert.match(server, /cronWhatsapp\.detener\(\)/);
+});
+
+// ───────────────────────── Regla de los 10 días (calendario de cobranza) ─────────────────────────
+
+test('regla de los 10 días: en la ventana de pago (días 1–10) el ciclo se omite sin tocar la base, el candado premium ni WhatsApp', async () => {
+  for (const dia of ['2026-11-01', '2026-11-05', '2026-11-10']) {
+    const { bot, eventos, sql, guardConsultado } = armar({ preventivas: prev(1), morosos: mor(2), hora: en(dia) });
+    const r = await bot.ejecutarCiclo();
+    assert.deepEqual([r.estado, r.motivo], ['OMITIDO', 'FUERA_DE_CALENDARIO_COBRANZA'], dia);
+    assert.deepEqual(r.calendario, { preventiva: false, morosidad: false }, dia);
+    assert.equal(eventos.length, 0, `${dia}: nada se envía`);
+    assert.equal(sql.length, 0, `${dia}: ni siquiera toma el arrendamiento`);
+    assert.equal(guardConsultado(), 0, `${dia}: ni consulta el módulo premium`);
+  }
+});
+
+test('morosidad: arranca el día 11 (no el 10) y dura hasta fin de mes; esos días NO hay preventiva ni se consulta', async () => {
+  for (const dia of ['2026-11-11', '2026-11-18', '2026-11-28']) {
+    const { bot, eventos, sql } = armar({ preventivas: prev(1), morosos: mor(2), hora: en(dia) });
+    const r = await bot.ejecutarCiclo();
+    assert.equal(r.estado, 'COMPLETADO', dia);
+    assert.deepEqual(r.calendario, { preventiva: false, morosidad: true }, dia);
+    assert.deepEqual(eventos, ['envio:MOROSIDAD:2'], dia);
+    assert.deepEqual([r.preventiva.candidatos, r.morosidad.candidatos], [0, 1], dia);
+    assert.ok(!sql.some((q) => /DISTINCT ON/.test(q.texto)), `${dia}: no se ejecuta la consulta de preventivas`);
+  }
+});
+
+test('preventiva: solo 1 o 2 días antes del inicio del mes entrante (29–30 en noviembre, 30–31 en octubre, 27–28 en febrero)', async () => {
+  const casos = [
+    ['2026-11-28', false], ['2026-11-29', true], ['2026-11-30', true],
+    ['2026-10-29', false], ['2026-10-30', true], ['2026-10-31', true],
+    ['2027-02-26', false], ['2027-02-27', true], ['2027-02-28', true],
+    ['2026-12-30', true], ['2026-12-31', true], // el mes entrante es enero del año siguiente
+  ];
+  for (const [dia, toca] of casos) {
+    const { bot, eventos, sql } = armar({ preventivas: prev(1), hora: en(dia) });
+    const r = await bot.ejecutarCiclo();
+    assert.equal(r.calendario.preventiva, toca, dia);
+    assert.deepEqual(eventos, toca ? ['envio:PREVENTIVA:1'] : [], dia);
+    assert.equal(sql.some((q) => /DISTINCT ON/.test(q.texto)), toca, `${dia}: la consulta de preventivas solo corre los días que tocan`);
+  }
+});
+
+test('la ventana que recibe la consulta preventiva es la de pago del mes entrante (días 1 a 10), también al cruzar de año', async () => {
+  for (const [dia, desde, hasta] of [['2026-11-30', '2026-12-01', '2026-12-10'], ['2026-12-31', '2027-01-01', '2027-01-10'], ['2027-02-28', '2027-03-01', '2027-03-10']]) {
+    const { bot, sql } = armar({ preventivas: prev(1), hora: en(dia) });
+    await bot.ejecutarCiclo();
+    const p = sql.find((q) => /DISTINCT ON/.test(q.texto));
+    assert.deepEqual(p.params.slice(0, 3), [dia, desde, hasta]);
+  }
+});
+
+test('el bot pide al servicio el modo MES_ENTRANTE: la preventiva se valida con la regla de los 10 días, no con la ventana manual de 3–5 días', async () => {
+  const { bot, alertas } = armar({ preventivas: prev(1), morosos: mor(2) });
+  await bot.ejecutarCiclo();
+  assert.equal(alertas.length, 2);
+  assert.ok(alertas.every((a) => a.modoPreventiva === MODO_PREVENTIVA.MES_ENTRANTE));
+  assert.equal(MODO_PREVENTIVA.MES_ENTRANTE, 'MES_ENTRANTE');
+});
+
+test('los dos últimos días del mes corren ambos bloques: preventivas primero y luego morosidad, sin mezclar ámbitos', async () => {
+  const { bot, eventos } = armar({ preventivas: prev(1), morosos: mor(2), hora: en('2026-11-30') });
+  const r = await bot.ejecutarCiclo();
+  assert.deepEqual(eventos.filter((x) => x.startsWith('envio')), ['envio:PREVENTIVA:1', 'envio:MOROSIDAD:2']);
+  assert.deepEqual(r.calendario, { preventiva: true, morosidad: true });
 });

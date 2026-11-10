@@ -1,0 +1,1504 @@
+From e0ff79d3aeb025717b11646f6c0762d41ca3b7b2 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Mon, 9 Nov 2026 22:20:55 -0400
+Subject: [PATCH] =?UTF-8?q?feat:=20intro=20animada=20de=20login,=20planill?=
+ =?UTF-8?q?a=20con=20isotipo=20BMA=20y=20cobranza=20con=20regla=20de=20los?=
+ =?UTF-8?q?=2010=20d=C3=ADas?=
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+- Login: isotipo 0→100 %, texto del logo abierto desde el centro y tarjeta glass revelada.
+- Planilla pública: solo isotipo BMA en la cabecera; Astra pequeño en el pie.
+- Cron WhatsApp: preventiva en los 2 últimos días del mes (cuotas del 1 al 10 del mes entrante), mora desde el día 11.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01P7rPe1yowwH4c45He2rLLK
+---
+ CAMBIOS_BMA_INTRO_COBRANZA.md      |  43 ++++++
+ cron/whatsappCron.js               |  66 ++++++---
+ frontend/src/admin.ts              |  23 +++-
+ frontend/src/admisiones.ts         |   5 +-
+ frontend/src/lib/marca.ts          |  14 ++
+ frontend/src/login-animation.ts    | 207 +++++++++++++++++++++++++++++
+ frontend/src/styles/main.css       | 114 ++++++++++++++++
+ services/notificaciones.service.js |  45 ++++++-
+ tests/calendario-cobranza.test.js  |  63 +++++++++
+ tests/frontend-identidad.test.js   |  51 ++++++-
+ tests/integracion.pg.test.js       | 103 ++++++++------
+ tests/multisede.test.js            |   3 +
+ tests/notificaciones.test.js       |  65 ++++++++-
+ tests/whatsapp-cron.test.js        |  95 +++++++++++--
+ utils/calendario-cobranza.js       |  80 +++++++++++
+ 15 files changed, 886 insertions(+), 91 deletions(-)
+ create mode 100644 CAMBIOS_BMA_INTRO_COBRANZA.md
+ create mode 100644 frontend/src/login-animation.ts
+ create mode 100644 tests/calendario-cobranza.test.js
+ create mode 100644 utils/calendario-cobranza.js
+
+diff --git a/CAMBIOS_BMA_INTRO_COBRANZA.md b/CAMBIOS_BMA_INTRO_COBRANZA.md
+new file mode 100644
+index 0000000..c95bb5e
+--- /dev/null
++++ b/CAMBIOS_BMA_INTRO_COBRANZA.md
+@@ -0,0 +1,43 @@
++# CAMBIOS_BMA_INTRO_COBRANZA — Intro animada de login, planilla limpia y cobranza «regla de los 10 días»
++
++**Proyecto:** Brilliant Minds Academy · **Base:** `development` @ `6859c06` (ancla pedida `0390b25` es ancestro) · **Agente:** Arquitecto Principal, Astra Digital Solutions
++**Motor de datos:** PostgreSQL / Supabase. Consultas con parámetros posicionales (`$1…$13`) y casts `::date` / `::int` / `::text`; sin residuos de MSSQL. TypeScript estricto, **0 usos de `any`**.
++
++## Archivos creados
++| Archivo | Para qué |
++|---|---|
++| `frontend/src/login-animation.ts` | Intro del login: isotipo 0→100 % desde el centro (cubic-bezier), el texto del logo se abre del medio a los lados (`clip-path`/ancho) y se revela la tarjeta glass. Omitible (clic/Esc/Enter/Espacio), respeta `prefers-reduced-motion`, una vez por carga, formulario `inert` mientras dura. |
++| `utils/calendario-cobranza.js` | Calendario puro de la regla de los 10 días (sin BD): ventana de pago días 1–10, preventiva a 1–2 días del mes entrante, mora desde el día 11. |
++| `tests/calendario-cobranza.test.js` | 8 pruebas (meses de 28/29/30/31 días, diciembre→enero, fechas inválidas). |
++
++## Archivos modificados
++| Archivo | Cambio |
++|---|---|
++| `frontend/src/styles/main.css` | Bloque CSS de la intro (fases por `data-fase`, fundidos, revelado de tarjeta). |
++| `frontend/src/admin.ts` | Integra la intro en el login (`<main id="login-pantalla">`, foco tras la intro). |
++| `frontend/src/lib/marca.ts` | `cabeceraIsotipoHtml()`: solo el isotipo circular de BMA. |
++| `frontend/src/admisiones.ts` | Cabecera de la planilla pública sin logo de Astra (solo isotipo BMA). Astra queda pequeño en el pie (`firmaPublica`, ya existente). Cabeceras de sección siguen uniformes en `bg-bma-purpura`. |
++| `cron/whatsappCron.js` | Regla de los 10 días (ver abajo). |
++| `services/notificaciones.service.js` | Modo `MES_ENTRANTE` solo para el bot; el envío manual (3–5 días) no cambia. |
++| `tests/whatsapp-cron.test.js`, `notificaciones.test.js`, `frontend-identidad.test.js`, `multisede.test.js`, `integracion.pg.test.js` | Actualizadas al nuevo calendario (reloj inyectado) + pruebas nuevas. |
++
++## Regla de los 10 días (cron)
++- **Preventiva:** solo los 2 últimos días de cada mes real (29–30 en meses de 30 días, 30–31 en los de 31, 27–28 en febrero; 28–29 bisiesto). Candidatas: cuotas `Pendiente` con vencimiento entre el día 1 y el 10 del mes entrante; el mensaje lleva el enlace seguro con token del portal.
++- **Morosidad:** solo desde el día 11; toda cuota vencida del mes sin pago aprobado ni en revisión → mensaje masivo. Días 1–10 el ciclo se omite (`FUERA_DE_CALENDARIO_COBRANZA`).
++- SQL preventiva: `fecha_vencimiento >= $1::date AND BETWEEN $2::date AND $3::date`.
++
++## Verificación realizada
++| Verificación | Resultado |
++|---|---|
++| `node --test tests/*.test.js` | 170 pasan, 1 falla: `importar-este.test.js` (falla también en `HEAD` sin mis cambios) |
++| Integración contra **PostgreSQL 16 real** | **58/58** (línea base 58/58) |
++| `tsc` estricto (7.0.2) sobre `frontend/src/**` | 0 errores; 0 `any` |
++| Intro en Chromium | tiempos, centrado, omitir, reduced-motion, cancelación, móvil 390×844 |
++
++## Pendiente de tu lado
++1. `public/` **no se regeneró**: `npm run frontend:install && npm run frontend:build` (los PNG pesan 420 KB / 309 KB / 283 KB; se emiten con hash).
++2. «1–2 días antes»: se interpretó como los **dos últimos días reales del mes** (tu texto decía «29 o 30»; en meses de 31 días son 30 y 31). Ajustable en `DIAS_ANTES_PREVENTIVA`.
++3. Las cuotas mensuales deben generarse con vencimiento el día 10 (o antes) para entrar en la ventana.
++4. Una cuota «En Revisión» vencida sigue siendo «Moroso» en la vista del Core, pero no recibe mensaje.
++5. La cadencia de recordatorios de mora (por defecto semanal) es configurable (`morosidadCadaDias`).
++6. `public/admisiones/index.html` es salida de build; no se tocó.
+diff --git a/cron/whatsappCron.js b/cron/whatsappCron.js
+index ec800d1..71561f6 100644
+--- a/cron/whatsappCron.js
++++ b/cron/whatsappCron.js
+@@ -2,18 +2,22 @@
+ /**
+  * Bot de envío masivo automático — módulo premium WHATSAPP_AUTOMATICO.
+  *
+- * Una vez al día (hora de Caracas, WHATSAPP_CRON_HORA) barre la base (sede por sede, y al final los estudiantes sin sede) y despacha por la API de WhatsApp, de forma SECUENCIAL
+- * y con una pausa de 1,5 s entre envíos (anti-baneo de Meta):
+- *   1) PREVENTIVA : estudiantes Activos cuya próxima cuota Pendiente vence en 3–5 días (VENTANA_PREVENTIVA).
+- *   2) MOROSIDAD  : estudiantes Morosos con cuotas vencidas en estado 'Pendiente' (las que ya tienen una referencia
+- *                   'En Revisión' no se cobran de nuevo).
+- * Cada alerta pasa por notificaciones.generarAlerta({ enviar: true }): la misma lógica ya probada del envío manual (reglas de
+- * ventana, tasa BCV, enlace del portal, plantilla) que deja la fila en notificaciones_whatsapp como ENVIADA o FALLIDA.
++ * Una vez al día (hora de Caracas, WHATSAPP_CRON_HORA) el bot se despierta, mira el calendario y —solo si hoy toca— barre la base (sede por sede, y al final los estudiantes sin sede) y despacha por la API de WhatsApp, de forma SECUENCIAL
++ * y con una pausa de 1,5 s entre envíos (anti-baneo de Meta).
++ *
++ * «Regla de los 10 días» (utils/calendario-cobranza.js): la mensualidad se paga SOLO del día 1 al 10 de cada mes.
++ *   1) PREVENTIVA : 1 o 2 días antes del inicio del mes entrante (los dos últimos días del mes). Estudiantes Activos con una cuota
++ *                   Pendiente que vence en la ventana de pago del mes que llega (días 1–10); el mensaje lleva el enlace seguro con token del portal.
++ *   2) MOROSIDAD  : a partir del día 11. Estudiantes Morosos con cuotas vencidas en estado 'Pendiente' (las que ya tienen una referencia
++ *                   'En Revisión' no se cobran de nuevo). Durante los días 1–10 no se declara ni se cobra mora.
++ *   Los demás días el ciclo termina enseguida como 'OMITIDO' (FUERA_DE_CALENDARIO_COBRANZA) sin tocar la base: es seguro lanzarlo a diario.
++ * Cada alerta pasa por notificaciones.generarAlerta({ enviar: true }): la misma lógica ya probada del envío manual (tasa BCV, enlace
++ * del portal, plantilla; la preventiva se valida en modo MES_ENTRANTE) que deja la fila en notificaciones_whatsapp como ENVIADA o FALLIDA.
+  *
+  * Garantías del ciclo:
+  *   - Candado premium: si el módulo no está habilitado (o su prueba de 15 días venció) el ciclo no envía nada.
+- *   - Idempotente: una PREVENTIVA se envía una sola vez por cuota; la MOROSIDAD no se repite al mismo estudiante antes de
+- *     WHATSAPP_CRON_MOROSIDAD_CADA_DIAS (7). Relanzar el ciclo el mismo día no duplica mensajes.
++ *   - Idempotente: una PREVENTIVA se envía una sola vez por cuota (los dos días de su ventana sirven de reintento si algo falló el primero);
++ *     la MOROSIDAD no se repite al mismo estudiante antes de WHATSAPP_CRON_MOROSIDAD_CADA_DIAS (7). Relanzar el ciclo el mismo día no duplica mensajes.
+  *   - Sin duplicados por caídas (H4): una fila 'GENERADA' creada por el bot (creado_por NULL) se trata como «en vuelo». Si el
+  *     proceso murió (o falló el UPDATE a 'ENVIADA') después de llamar a Meta, esa fila bloquea el reenvío en vez de duplicarlo.
+  *     Las 'GENERADA' creadas por un usuario del panel (borradores para enviar a mano) NO bloquean.
+@@ -38,12 +42,15 @@ const os = require('node:os');
+ const cfg = require('../config/env');
+ const { ejecutar, closePool } = require('../config/db');
+ const { hoyCaracas, aFechaSql } = require('../utils/fechas');
++const { calendarioCobranza } = require('../utils/calendario-cobranza');
+ const { guard: guardGlobal } = require('../modules/premium/guard');
+ const notificacionesGlobal = require('../services/notificaciones.service');
+ const { bcv: bcvGlobal } = require('../services/bcv.service');
+ const { whatsapp: whatsappGlobal, CLASE_FALLA } = require('../services/whatsapp.service');
+ 
+ const MODULO = 'WHATSAPP_AUTOMATICO';
++// Constante del servicio real (no de la instancia inyectada): los dobles de prueba solo sustituyen el envío, no esta regla.
++const { MODO_PREVENTIVA } = notificacionesGlobal;
+ const CLAVE_LEASE = 'WHATSAPP_CRON_LEASE';
+ const OFFSET_CARACAS_MS = 4 * 3600_000;
+ const MS_DIA = 86_400_000;
+@@ -54,6 +61,8 @@ const ENFRIAMIENTO = Object.freeze({ dias: 7, maxFallidas: 3 });
+ 
+ // Errores de reglas de negocio: el estado del estudiante cambió entre la consulta masiva y el envío → se omite sin contar como fallo.
+ const CODIGOS_OMITIR = new Set(['ESTADO_NO_APLICA', 'SIN_CUOTA_PROXIMA', 'FUERA_DE_VENTANA_PREVENTIVA', 'ESTUDIANTE_NO_MOROSO', 'PAGO_EN_REVISION', 'NO_ENCONTRADO']);
++// Motivo con el que el ciclo se omite cuando hoy no es día de preventiva (1–2 días antes del mes entrante) ni de morosidad (desde el día 11).
++const MOTIVO_FUERA_DE_CALENDARIO = 'FUERA_DE_CALENDARIO_COBRANZA';
+ // Fallas sistémicas: reintentar con el siguiente estudiante fallaría igual → se corta el ciclo.
+ const CODIGOS_ABORTAR = new Set(['TASA_BCV_DESACTUALIZADA', 'TASA_BCV_NO_DISPONIBLE', 'WHATSAPP_NO_CONFIGURADO']);
+ 
+@@ -62,8 +71,9 @@ const esperarReal = (ms) => new Promise((resolve) => { setTimeout(resolve, ms);
+ // ───────────────────────── Consultas masivas (PostgreSQL, parámetros posicionales) ─────────────────────────
+ 
+ /**
+- * Activos con la próxima cuota Pendiente (>= hoy) dentro de la ventana [hoy+min, hoy+max] y sin PREVENTIVA ya enviada para esa cuota.
+- * Misma definición de "próxima cuota" que notificaciones.prepararPreventiva: la de menor vencimiento ≥ hoy por estudiante.
++ * Activos con una cuota Pendiente que vence dentro de la ventana de pago del mes entrante [$2, $3] (días 1 a 10) y sin PREVENTIVA ya enviada
++ * para esa cuota. Por estudiante se toma la de menor vencimiento dentro de la ventana, igual que notificaciones.prepararPreventivaMesEntrante.
++ * `$1` (hoy) se conserva como guarda: jamás se avisa de un vencimiento ya pasado.
+  *   · «Ya enviada» incluye la fila 'GENERADA' creada por el bot ($10, creado_por NULL): está «en vuelo» o quedó huérfana tras una caída
+  *     entre la llamada a Meta y el UPDATE a 'ENVIADA'; reenviar duplicaría el mensaje (H4). Los borradores 'GENERADA' del panel no cuentan.
+  *   · Enfriamiento: se excluye al estudiante con >= $13 filas $11 ('FALLIDA') de este tipo en los últimos $12 días (H1).
+@@ -74,12 +84,12 @@ const SQL_CANDIDATOS_PREVENTIVA = `
+       SELECT DISTINCT ON (c.estudiante_id) c.estudiante_id, c.id AS cuota_id, c.fecha_vencimiento
+         FROM cuotas c
+         JOIN vw_estudiantes_estado v ON v.id = c.estudiante_id
+-       WHERE c.estado = $5::text AND c.fecha_vencimiento >= $1::date AND v.estado_dinamico = $6::text
++       WHERE c.estado = $5::text AND c.fecha_vencimiento >= $1::date AND c.fecha_vencimiento BETWEEN $2::date AND $3::date
++         AND v.estado_dinamico = $6::text
+          AND (($9::int IS NOT NULL AND v.sede_id = $9::int) OR ($9::int IS NULL AND v.sede_id IS NULL))
+        ORDER BY c.estudiante_id, c.fecha_vencimiento, c.id
+     ) p
+-   WHERE p.fecha_vencimiento BETWEEN ($1::date + $2::int) AND ($1::date + $3::int)
+-     AND NOT EXISTS (SELECT 1 FROM notificaciones_whatsapp n
++   WHERE NOT EXISTS (SELECT 1 FROM notificaciones_whatsapp n
+                       WHERE n.cuota_id = p.cuota_id AND n.tipo = $7::text
+                         AND (n.estado = $8::text OR (n.estado = $10::text AND n.creado_por IS NULL)))
+      AND (SELECT COUNT(*) FROM notificaciones_whatsapp f
+@@ -90,7 +100,7 @@ const SQL_CANDIDATOS_PREVENTIVA = `
+ 
+ /**
+  * Morosos con al menos una cuota vencida en estado Pendiente (si todas están En Revisión no aparecen) y sin cobro ENVIADO
+- * dentro de los últimos N días. Igual que en la preventiva: la 'GENERADA' del bot ($9) cuenta como cobro en vuelo dentro de esa misma
++ * dentro de los últimos N días. Solo se consulta a partir del día 11 de cada mes (ejecutarCiclo): la ventana de pago (días 1–10) no genera mora. Igual que en la preventiva: la 'GENERADA' del bot ($9) cuenta como cobro en vuelo dentro de esa misma
+  * ventana (H4) y el estudiante con >= $12 'FALLIDA' ($10) de MOROSIDAD en los últimos $11 días queda en enfriamiento (H1).
+  */
+ const SQL_CANDIDATOS_MOROSIDAD = `
+@@ -111,12 +121,14 @@ const SQL_CANDIDATOS_MOROSIDAD = `
+    LIMIT $3::int`;
+ 
+ /**
++ * `ventana` = { desde, hasta } ('YYYY-MM-DD'): la ventana de pago del mes entrante (ver calendarioCobranza). Solo tiene sentido llamarla
++ * los días de preventiva; la comprobación del calendario la hace ejecutarCiclo().
+  * `sedeId` entero → solo los estudiantes de esa sede; `null` → solo los que NO tienen sede asignada (datos anteriores a la
+  * migración multi-sede). Cada sede se procesa por separado: ver ejecutarCiclo().
+  */
+ async function candidatosPreventiva({ hoy, ventana, limite, sedeId = null, enfriamiento = ENFRIAMIENTO, db = { ejecutar } }) {
+   const r = await db.ejecutar(SQL_CANDIDATOS_PREVENTIVA, [
+-    aFechaSql(hoy), ventana.min, ventana.max, limite, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', sedeId,
++    aFechaSql(hoy), aFechaSql(ventana.desde), aFechaSql(ventana.hasta), limite, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', sedeId,
+     'GENERADA', 'FALLIDA', enfriamiento.dias, enfriamiento.maxFallidas]);
+   return r.rows;
+ }
+@@ -240,7 +252,7 @@ function crearCronWhatsapp({
+       const parcial = resumen[item.tipo.toLowerCase()];
+       try {
+         const r = await notificaciones.generarAlerta(
+-          { tipo: item.tipo, estudianteId: item.estudiante_id, enviar: true, usuarioId: null },
++          { tipo: item.tipo, estudianteId: item.estudiante_id, enviar: true, usuarioId: null, modoPreventiva: MODO_PREVENTIVA.MES_ENTRANTE },
+           { bcvSvc: bcvCiclo });
+         estado.llamoAMeta = true;
+         estado.fallosSeguidos = 0;
+@@ -272,14 +284,23 @@ function crearCronWhatsapp({
+   /** Un ciclo completo. Nunca lanza por un envío individual; sí propaga errores de infraestructura (base caída) al planificador. */
+   async function ejecutarCiclo() {
+     const inicio = ahora();
++    const fecha = hoyCaracas(inicio);
++    // Regla de los 10 días: qué bloques tocan hoy (hora de Caracas). Es aritmética pura: no consulta la base ni toma el arrendamiento.
++    const calendario = calendarioCobranza(fecha);
+     const resumen = {
+-      estado: 'COMPLETADO', motivo: null, abortado: null, fecha: hoyCaracas(inicio),
++      estado: 'COMPLETADO', motivo: null, abortado: null, fecha,
++      calendario: { preventiva: calendario.preventiva, morosidad: calendario.morosidad },
+       preventiva: { candidatos: 0, enviadas: 0, fallidas: 0, omitidas: 0 },
+       morosidad: { candidatos: 0, enviadas: 0, fallidas: 0, omitidas: 0 },
+       por_sede: [],
+       duracion_ms: 0,
+     };
+ 
++    if (!calendario.preventiva && !calendario.morosidad) {
++      log(`Ciclo omitido: ${fecha} no es día de preventiva (1–2 días antes del mes entrante) ni de morosidad (desde el día 11).`);
++      return { ...resumen, estado: 'OMITIDO', motivo: MOTIVO_FUERA_DE_CALENDARIO };
++    }
++
+     const modulo = await guard.evaluar(MODULO, { fresco: true });
+     if (!modulo.habilitado) {
+       log(`Ciclo omitido: módulo ${MODULO} deshabilitado (${modulo.motivo || 'sin motivo'}).`);
+@@ -297,7 +318,7 @@ function crearCronWhatsapp({
+     }
+ 
+     try {
+-      const hoy = resumen.fecha;
++      const hoy = fecha;
+       const limite = config.maxEnviosPorCiclo;
+       // Multi-sede: cada sede activa se despacha por separado (Preventiva y luego Morosidad) y al final los estudiantes sin
+       // sede. Los contadores del resumen son la suma de todos los ámbitos; el detalle va en `por_sede`.
+@@ -306,8 +327,9 @@ function crearCronWhatsapp({
+       const estado = { intentos: 0, llamoAMeta: false, fallosSeguidos: 0, titular };
+       for (const ambito of ambitos) {
+         if (resumen.abortado) break;
+-        const preventivas = await candidatosPreventiva({ hoy, ventana: notificaciones.VENTANA_PREVENTIVA, limite, sedeId: ambito.sedeId, db });
+-        const morosos = await candidatosMorosidad({ hoy, cadaDias: config.morosidadCadaDias, limite, sedeId: ambito.sedeId, db });
++        // Solo se consulta el bloque que toca hoy: en los días 11–28 no hay preventiva y los dos últimos días del mes corren ambos.
++        const preventivas = calendario.preventiva ? await candidatosPreventiva({ hoy, ventana: calendario.ventana, limite, sedeId: ambito.sedeId, db }) : [];
++        const morosos = calendario.morosidad ? await candidatosMorosidad({ hoy, cadaDias: config.morosidadCadaDias, limite, sedeId: ambito.sedeId, db }) : [];
+         resumen.preventiva.candidatos += preventivas.length;
+         resumen.morosidad.candidatos += morosos.length;
+         resumen.por_sede.push({ sede_id: ambito.sedeId, sede: ambito.nombre, preventiva: preventivas.length, morosidad: morosos.length });
+@@ -358,7 +380,7 @@ function crearCronWhatsapp({
+ 
+ const cron = crearCronWhatsapp();
+ 
+-module.exports = { crearCronWhatsapp, cron, msHastaProximaEjecucion, bcvDelCiclo, candidatosPreventiva, candidatosMorosidad, MODULO, CLAVE_LEASE, ENFRIAMIENTO };
++module.exports = { crearCronWhatsapp, cron, msHastaProximaEjecucion, bcvDelCiclo, candidatosPreventiva, candidatosMorosidad, MODULO, CLAVE_LEASE, ENFRIAMIENTO, MOTIVO_FUERA_DE_CALENDARIO };
+ 
+ // Ejecución directa: `node cron/whatsappCron.js` (un ciclo) o `node cron/whatsappCron.js --daemon` (planificador propio).
+ if (require.main === module) {
+diff --git a/frontend/src/admin.ts b/frontend/src/admin.ts
+index 91dad74..2a2d026 100644
+--- a/frontend/src/admin.ts
++++ b/frontend/src/admin.ts
+@@ -23,6 +23,7 @@ import { cargarConCache, invalidarCache, type Guarda } from './lib/cache';
+ import { esqueletoPara } from './lib/esqueleto';
+ import { montarRedNeuronal } from './lib/red-neuronal';
+ import { firmaLogin, firmaSidebar } from './lib/firma';
++import { iniciarIntroLogin, type IntroLogin } from './login-animation';
+ import { CLAVE_SEDES, esListaSedes } from './lib/sedes-cache';
+ import { alcanceDe } from './lib/alcance';
+ import type {
+@@ -190,16 +191,25 @@ function liberarRed(): void {
+   detenerRed = null;
+ }
+ 
++/** Intro de marca del login en curso (si la hay): se cancela al volver a pintar el login o al entrar al panel. */
++let introLogin: IntroLogin | null = null;
++
++function liberarIntro(): void {
++  introLogin?.cancelar();
++  introLogin = null;
++}
++
+ function mostrarLogin(mensaje?: string): void {
+   detenerTablero();
+   liberarRed();
++  liberarIntro();
+   ticketVista += 1;
+   document.body.className = 'text-slate-900';
+   montar(
+     obtener('#app', HTMLElement),
+-    html`<main class="relative flex min-h-screen items-center justify-center overflow-hidden bg-bma-azul px-4 py-12">
++    html`<main id="login-pantalla" class="relative flex min-h-screen items-center justify-center overflow-hidden bg-bma-azul px-4 py-12">
+       <canvas id="red-neuronal" aria-hidden="true" class="pointer-events-none absolute inset-0 h-full w-full"></canvas>
+-      <section class="${CLS.loginTarjeta} relative z-10" aria-labelledby="login-titulo">
++      <section data-intro-revelar class="${CLS.loginTarjeta} relative z-10" aria-labelledby="login-titulo">
+         <header class="mb-8 flex flex-col items-center text-center">
+           ${logoCompletoHtml('h-auto w-48 sm:w-56', true)}
+           <h1 id="login-titulo" class="sr-only">Brilliant Minds Academy · Panel administrativo</h1>
+@@ -227,7 +237,13 @@ function mostrarLogin(mensaje?: string): void {
+     ev.preventDefault();
+     void alIniciarSesion(form);
+   });
+-  obtener('#login-email', HTMLInputElement).focus();
++  // Intro de marca (una vez por carga de página; omitida con «reducir movimiento»). Mientras dura, el formulario está `inert`:
++  // el foco va al correo cuando la pantalla queda lista, salvo que la intro se haya cancelado porque el login ya no está en pantalla.
++  const intro = iniciarIntroLogin(obtener('#login-pantalla', HTMLElement));
++  introLogin = intro;
++  void intro.lista.then((lista) => {
++    if (lista && introLogin === intro) buscar('#login-email', HTMLInputElement)?.focus();
++  });
+ }
+ 
+ async function alIniciarSesion(form: HTMLFormElement): Promise<void> {
+@@ -347,6 +363,7 @@ async function arrancar(): Promise<void> {
+ 
+   document.body.className = 'text-slate-900';
+   liberarRed();
++  liberarIntro();
+   montar(obtener('#app', HTMLElement), shellHtml());
+   const shell = obtener('#shell', HTMLElement);
+   shell.addEventListener('click', (ev) => {
+diff --git a/frontend/src/admisiones.ts b/frontend/src/admisiones.ts
+index ed3ebed..140630f 100644
+--- a/frontend/src/admisiones.ts
++++ b/frontend/src/admisiones.ts
+@@ -9,7 +9,8 @@ import './styles/main.css';
+ import { bma, BmaApiError, mensajeDeError } from './api/bmaClient';
+ import { html, montar, raw, type HtmlSeguro } from './lib/html';
+ import { icono } from './lib/icons';
+-import { cabeceraDualHtml, firmaPublica } from './lib/firma';
++import { firmaPublica } from './lib/firma';
++import { cabeceraIsotipoHtml } from './lib/marca';
+ import { bs, edadEnAnios, horaConSegundos, hoyCaracas, nombreMetodo, tasa as formatoTasa, usd } from './lib/format';
+ import { CLS, aviso, boton, buscar, conBotonOcupado, etiqueta, notificar, obtener, todos } from './lib/ui';
+ import { esConfigInvitacion } from './types/index';
+@@ -637,7 +638,7 @@ const seccionPorId = (id: string): DefSeccion => SECCIONES.find((s) => s.id ===
+ function esqueleto(): HtmlSeguro {
+   return html`<div class="mx-auto flex min-h-screen max-w-3xl flex-col gap-6 px-4 py-8">
+     <header class="flex flex-col gap-4">
+-      ${cabeceraDualHtml()}
++      ${cabeceraIsotipoHtml()}
+       <div>
+         <h1 id="titulo-pagina" tabindex="-1" class="${CLS.titulo}">Inscripción de nuevos estudiantes</h1>
+         <p class="${CLS.subtitulo}">Brilliant Minds Academy · Planilla de inscripción</p>
+diff --git a/frontend/src/lib/marca.ts b/frontend/src/lib/marca.ts
+index 42e95ba..a8b7180 100644
+--- a/frontend/src/lib/marca.ts
++++ b/frontend/src/lib/marca.ts
+@@ -5,6 +5,7 @@
+  * importan para que Vite los emita con hash (caché inmutable de /assets):
+  *   · bma-logo.webp    → logotipo completo (isotipo + nombre + lema), recortado a su contenido y reducido a 800 px de ancho.
+  *   · bma-isotipo.webp → solo el círculo con la estrella, cuadrado de 256 px: es la versión del menú lateral contraído.
++ *   · bma-isotipo.png  → el mismo isotipo en alta resolución (2167×2099): cabecera de la planilla pública de admisión.
+  * Ambos conservan el canal alfa de la marca (sin fondo), así que se ven bien sobre superficies blancas o azul muy tenue.
+  *
+  * Las clases las pasa quien llama, escritas literalmente en su propio archivo: Tailwind solo genera las utilidades que ve
+@@ -13,12 +14,14 @@
+ import { html, type HtmlSeguro } from './html';
+ import logoCompleto from '../assets/bma-logo.webp';
+ import isotipo from '../assets/bma-isotipo.webp';
++import isotipoGrande from '../assets/bma-isotipo.png';
+ 
+ export const NOMBRE_ACADEMIA = 'Brilliant Minds Academy';
+ 
+ /** Dimensiones intrínsecas de cada archivo: reservan el espacio antes de cargar (sin saltos de maquetación). */
+ const DIM_LOGO = { ancho: 800, alto: 735 } as const;
+ const DIM_ISOTIPO = { ancho: 256, alto: 256 } as const;
++const DIM_ISOTIPO_GRANDE = { ancho: 2167, alto: 2099 } as const;
+ 
+ /** Logotipo oficial completo. `prioritario` solo para el que está en el primer pantallazo (login). */
+ export function logoCompletoHtml(clases: string, prioritario = false): HtmlSeguro {
+@@ -29,3 +32,14 @@ export function logoCompletoHtml(clases: string, prioritario = false): HtmlSegur
+ export function isotipoHtml(clases: string): HtmlSeguro {
+   return html`<img src="${isotipo}" alt="${NOMBRE_ACADEMIA}" width="${DIM_ISOTIPO.ancho}" height="${DIM_ISOTIPO.alto}" decoding="async" class="${clases}">`;
+ }
++
++/**
++ * Cabecera de la planilla pública de admisión: el isotipo circular de BMA es el ÚNICO logotipo y va centrado, para darle todo el protagonismo
++ * a la academia. Misma tarjeta blanca que la cabecera del portal, de modo que las dos vistas públicas comparten superficie.
++ * El nombre de la academia lo dan el `alt` de la imagen y el título que sigue en la planilla.
++ */
++export function cabeceraIsotipoHtml(): HtmlSeguro {
++  return html`<div class="flex items-center justify-center rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
++    <img src="${isotipoGrande}" alt="${NOMBRE_ACADEMIA}" width="${DIM_ISOTIPO_GRANDE.ancho}" height="${DIM_ISOTIPO_GRANDE.alto}" decoding="async" fetchpriority="high" class="h-20 w-auto object-contain sm:h-24">
++  </div>`;
++}
+diff --git a/frontend/src/login-animation.ts b/frontend/src/login-animation.ts
+new file mode 100644
+index 0000000..543d63a
+--- /dev/null
++++ b/frontend/src/login-animation.ts
+@@ -0,0 +1,207 @@
++/**
++ * Intro de marca del login (splash): el isotipo de BMA nace del centro de la pantalla y, a continuación, el texto del logotipo se forma
++ * desde el medio hacia los laterales. Al terminar, el velo se desvanece y se revela la tarjeta de cristal del formulario.
++ *
++ * Reparto de responsabilidades:
++ *   · styles/main.css (bloque «Intro de marca del login») pone TODO el movimiento: escala, desaceleración (cubic-bezier), máscara `clip-path`
++ *     y fundidos. Cada fase es un estado (`data-fase`) y el CSS anima las transiciones entre ellos.
++ *   · Este módulo solo orquesta: espera a que las imágenes estén decodificadas, cambia de fase a su hora, ofrece omitir la intro y deja la
++ *     pantalla lista (sin `inert`, sin velo). Los tiempos viven aquí (`MS`) y se publican al CSS como variables, así no pueden desincronizarse.
++ *
++ * Reglas de comportamiento:
++ *   · Se reproduce UNA vez por carga de página: cerrar sesión o una sesión expirada dentro de la misma página no la repiten.
++ *   · `prefers-reduced-motion: reduce` → no hay intro (no se crea el velo); el login aparece al instante.
++ *   · Mientras dura, el formulario está `inert` (ni foco de teclado ni lectores de pantalla); el velo es decorativo (`aria-hidden`).
++ *   · Se puede omitir con un clic/toque o con Escape, Enter o Espacio.
++ *   · Cancelable: si la pantalla se sustituye (p. ej. se entra al panel) se retira el velo y se restaura todo sin esperar.
++ *
++ * El texto del logotipo y el isotipo son los activos oficiales (`src/assets/bma-texto.png`, `src/assets/bma-isotipo.png`); Vite los emite con hash.
++ * Las clases las escribe aquí literalmente: el CSS de la intro es plano (fuera de `@layer`), así que no depende de que Tailwind las detecte.
++ */
++import { html, montar } from './lib/html';
++import isotipoBma from './assets/bma-isotipo.png';
++import textoBma from './assets/bma-texto.png';
++
++/** Dimensiones intrínsecas de cada PNG: reservan el espacio antes de cargar (sin saltos de maquetación). */
++const DIM_ISOTIPO = { ancho: 2167, alto: 2099 } as const;
++const DIM_TEXTO = { ancho: 4111, alto: 698 } as const;
++
++/** Duraciones en ms. Se publican al CSS como `--intro-ms-*`; el CSS no las repite. */
++const MS = {
++  isotipo: 700, // escala 0 → 100 % con desaceleración
++  texto: 800, // el texto se abre desde el centro (y el isotipo sube para dejarle sitio)
++  pausa: 450, // la marca completa se queda a la vista antes de despedirse
++  salida: 450, // el velo se desvanece
++  tarjeta: 600, // la tarjeta del formulario se revela
++  retrasoTarjeta: 150, // la tarjeta empieza cuando los logotipos del velo ya casi se han apagado (sin doble exposición)
++} as const;
++
++/** Si las imágenes tardan más que esto en decodificarse (red lenta), la intro arranca igualmente. */
++const MS_MAX_CARGA = 1500;
++
++type Fase = 'preparando' | 'isotipo' | 'texto' | 'salida';
++type Estado = 'activa' | 'saltada' | 'saliendo' | 'cancelada' | 'terminada';
++
++export interface IntroLogin {
++  /** Resuelve `true` cuando el login quedó listo para usarse (intro completa, omitida o inexistente); `false` si se canceló. */
++  readonly lista: Promise<boolean>;
++  /** Retira el velo y restaura la pantalla de inmediato. Idempotente. */
++  cancelar(): void;
++}
++
++/** Una vez por carga de página (estado en memoria: una recarga completa vuelve a mostrarla). */
++let yaMostrada = false;
++
++const INTRO_OMITIDA: IntroLogin = { lista: Promise.resolve(true), cancelar: () => undefined };
++
++function prefiereMenosMovimiento(): boolean {
++  return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
++}
++
++/** Espera `maxMs` como mucho a que todas las imágenes estén decodificadas; una que falle no bloquea la intro. */
++async function imagenesListas(imagenes: readonly HTMLImageElement[], maxMs: number): Promise<void> {
++  const decodificadas = Promise.all(imagenes.map((img) => img.decode().catch(() => undefined)));
++  const limite = new Promise<void>((resolver) => {
++    window.setTimeout(resolver, maxMs);
++  });
++  await Promise.race([decodificadas, limite]);
++}
++
++/** Espera cancelable: `despertar()` resuelve de inmediato la espera en curso (omitir / cancelar). */
++function crearEspera(): { esperar(ms: number): Promise<void>; despertar(): void } {
++  let pendiente: { readonly id: number; readonly resolver: () => void } | null = null;
++  return {
++    esperar: (ms) =>
++      new Promise<void>((resolver) => {
++        const id = window.setTimeout(() => {
++          pendiente = null;
++          resolver();
++        }, ms);
++        pendiente = { id, resolver };
++      }),
++    despertar: () => {
++      if (!pendiente) return;
++      const { id, resolver } = pendiente;
++      pendiente = null;
++      window.clearTimeout(id);
++      resolver();
++    },
++  };
++}
++
++function crearVelo(): HTMLElement {
++  const velo = document.createElement('div');
++  velo.className = 'intro-login';
++  velo.dataset['fase'] = 'preparando' satisfies Fase;
++  velo.setAttribute('aria-hidden', 'true');
++  velo.style.setProperty('--intro-ms-isotipo', `${MS.isotipo}ms`);
++  velo.style.setProperty('--intro-ms-texto', `${MS.texto}ms`);
++  velo.style.setProperty('--intro-ms-salida', `${MS.salida}ms`);
++  // Imágenes decorativas (`alt=""`): el nombre de la academia lo da el <h1> de la tarjeta del formulario.
++  montar(
++    velo,
++    html`<img class="intro-login__isotipo" src="${isotipoBma}" alt="" width="${DIM_ISOTIPO.ancho}" height="${DIM_ISOTIPO.alto}" decoding="async" fetchpriority="high">
++    <img class="intro-login__texto" src="${textoBma}" alt="" width="${DIM_TEXTO.ancho}" height="${DIM_TEXTO.alto}" decoding="async" fetchpriority="high">`,
++  );
++  return velo;
++}
++
++/**
++ * Reproduce la intro sobre la pantalla de login ya montada.
++ * @param pantalla Contenedor del login (el `<main>`); debe contener un elemento `[data-intro-revelar]` (la tarjeta que se revela).
++ */
++export function iniciarIntroLogin(pantalla: HTMLElement): IntroLogin {
++  if (yaMostrada || prefiereMenosMovimiento()) return INTRO_OMITIDA;
++  yaMostrada = true;
++
++  const velo = crearVelo();
++  const imagenes = Array.from(velo.querySelectorAll('img'));
++  const espera = crearEspera();
++  const escuchas = new AbortController();
++  let estado: Estado = 'activa';
++  // Se resuelve al omitir o cancelar: corta también la espera de carga de imágenes (que no pasa por `espera`).
++  let avisarCorte: () => void = () => undefined;
++  const corte = new Promise<void>((resolver) => {
++    avisarCorte = resolver;
++  });
++  // Lectura a través de una función: TypeScript estrecha `estado` tras cada asignación y no vería los cambios hechos por omitir()/cancelar().
++  const estaEn = (...posibles: readonly Estado[]): boolean => posibles.includes(estado);
++
++  const poner = (fase: Fase): void => {
++    velo.dataset['fase'] = fase;
++  };
++
++  /** Retira el velo y devuelve la pantalla a su estado normal. Seguro de llamar más de una vez. */
++  const limpiar = (): void => {
++    escuchas.abort();
++    velo.remove();
++    pantalla.inert = false;
++    delete pantalla.dataset['intro'];
++    pantalla.style.removeProperty('--intro-ms-tarjeta');
++    pantalla.style.removeProperty('--intro-retraso-tarjeta');
++  };
++
++  const omitir = (): void => {
++    if (!estaEn('activa')) return;
++    estado = 'saltada';
++    avisarCorte();
++    espera.despertar();
++  };
++
++  pantalla.inert = true;
++  pantalla.dataset['intro'] = 'activa';
++  pantalla.style.setProperty('--intro-ms-tarjeta', `${MS.tarjeta}ms`);
++  pantalla.style.setProperty('--intro-retraso-tarjeta', `${MS.retrasoTarjeta}ms`);
++  document.body.append(velo);
++  velo.addEventListener('pointerdown', omitir, { signal: escuchas.signal });
++  document.addEventListener(
++    'keydown',
++    (ev) => {
++      if (ev.key === 'Escape' || ev.key === 'Enter' || ev.key === ' ') omitir();
++    },
++    { signal: escuchas.signal },
++  );
++
++  const reproducir = async (): Promise<boolean> => {
++    await Promise.race([imagenesListas(imagenes, MS_MAX_CARGA), corte]);
++    // Fuerza un recálculo de estilos para que la fase 'preparando' se pinte antes de la primera transición.
++    void velo.offsetWidth;
++    const pasos: readonly { readonly fase: Fase; readonly ms: number }[] = [
++      { fase: 'isotipo', ms: MS.isotipo },
++      { fase: 'texto', ms: MS.texto + MS.pausa },
++    ];
++    for (const paso of pasos) {
++      if (!estaEn('activa')) break;
++      poner(paso.fase);
++      await espera.esperar(paso.ms);
++    }
++    if (estaEn('cancelada')) return false;
++    // Salida (por fin de la secuencia o por omisión): el velo se desvanece y la tarjeta se revela. La pantalla sigue `inert` hasta que
++    // termina la revelación: si se retirase `data-intro` antes, la tarjeta saltaría de golpe a opaca a mitad de su animación.
++    estado = 'saliendo';
++    poner('salida');
++    pantalla.dataset['intro'] = 'revelar';
++    await espera.esperar(MS.retrasoTarjeta + MS.tarjeta);
++    if (estaEn('cancelada')) return false;
++    estado = 'terminada';
++    limpiar();
++    return true;
++  };
++
++  // Un splash decorativo jamás debe dejar el login bloqueado: ante cualquier fallo inesperado se retira el velo y se sigue.
++  const lista = reproducir().catch(() => {
++    estado = 'terminada';
++    limpiar();
++    return true;
++  });
++  return {
++    lista,
++    cancelar: () => {
++      if (estaEn('cancelada', 'terminada')) return;
++      estado = 'cancelada';
++      avisarCorte();
++      espera.despertar();
++      limpiar();
++    },
++  };
++}
+diff --git a/frontend/src/styles/main.css b/frontend/src/styles/main.css
+index ca73b71..9379282 100644
+--- a/frontend/src/styles/main.css
++++ b/frontend/src/styles/main.css
+@@ -52,3 +52,117 @@
+     @apply border-bma-coral/50 bg-bma-coral-suave text-bma-coral-oscuro;
+   }
+ }
++
++/*
++ * ───────────────────────── Intro de marca del login (src/login-animation.ts) ─────────────────────────
++ * CSS plano, FUERA de `@layer`: Tailwind no lo purga y los @keyframes siempre se emiten. El módulo TypeScript solo cambia `data-fase` en el
++ * velo (preparando → isotipo → texto → salida) y publica las duraciones como `--intro-ms-*`; aquí vive todo el movimiento.
++ *
++ *   isotipo : escala 0 → 100 % desde el centro de la pantalla, con desaceleración suave (cubic-bezier tipo «expo out»).
++ *   texto   : el logotipo con nombre y lema se abre desde el MEDIO hacia los LATERALES con una máscara `clip-path: inset()`; a la vez el
++ *             isotipo sube para dejarle sitio (nace en el centro exacto de la pantalla y termina como remate del conjunto).
++ *   salida  : el velo se desvanece y la tarjeta de cristal del formulario se revela (`[data-intro-revelar]`).
++ *
++ * Los activos oficiales tienen colores propios (el texto lleva «Academy» en azul), por eso el velo es claro y no el azul institucional.
++ * El movimiento se omite por completo con `prefers-reduced-motion` (lo decide el módulo: ni siquiera se crea el velo).
++ */
++.intro-login {
++  --intro-sep: clamp(1rem, 3vw, 1.75rem); /* separación entre isotipo y texto */
++  --intro-iso: clamp(6.5rem, 22vw, 10rem); /* ancho del isotipo */
++  --intro-txt: min(82vw, 30rem); /* ancho del texto del logotipo */
++  /* Lo que baja el isotipo para nacer en el centro EXACTO de la pantalla: mitad de (separación + alto del texto). El alto del texto es su
++     ancho × 698/4111 (proporción del PNG), de ahí el 0.1698. */
++  --intro-desfase: calc((var(--intro-sep) + var(--intro-txt) * 0.1698) / 2);
++  position: fixed;
++  inset: 0;
++  z-index: 50; /* por debajo de los avisos flotantes (z-[60]) */
++  display: flex;
++  flex-direction: column;
++  align-items: center;
++  justify-content: center;
++  gap: var(--intro-sep);
++  background: radial-gradient(ellipse at center, #ffffff 0%, #f8fafc 65%, #e9eef5 100%);
++  opacity: 1;
++  transition: opacity var(--intro-ms-salida, 450ms) ease-out;
++}
++
++.intro-login__isotipo {
++  width: var(--intro-iso);
++  height: auto;
++  opacity: 0;
++  transform: translateY(var(--intro-desfase)) scale(0);
++  transform-origin: center;
++  user-select: none;
++  will-change: transform, opacity;
++}
++
++.intro-login__texto {
++  width: var(--intro-txt);
++  height: auto;
++  clip-path: inset(0 50% 0 50%); /* cerrado: una línea vertical en el centro */
++  user-select: none;
++  will-change: clip-path;
++}
++
++/* 1 · El isotipo crece de 0 a 100 % en el centro, frenando al final. */
++.intro-login[data-fase='isotipo'] .intro-login__isotipo {
++  opacity: 1;
++  transform: translateY(var(--intro-desfase)) scale(1);
++  transition:
++    transform var(--intro-ms-isotipo, 700ms) cubic-bezier(0.16, 1, 0.3, 1),
++    opacity calc(var(--intro-ms-isotipo, 700ms) * 0.35) ease-out;
++}
++
++/* 2 · El texto se abre del centro a los lados y el isotipo sube a su sitio. «salida» conserva el estado final (y cubre la omisión). */
++.intro-login:is([data-fase='texto'], [data-fase='salida']) .intro-login__isotipo {
++  opacity: 1;
++  transform: translateY(0) scale(1);
++  transition: transform var(--intro-ms-texto, 800ms) cubic-bezier(0.22, 1, 0.36, 1);
++}
++
++.intro-login:is([data-fase='texto'], [data-fase='salida']) .intro-login__texto {
++  clip-path: inset(0 0 0 0);
++  transition: clip-path var(--intro-ms-texto, 800ms) cubic-bezier(0.22, 1, 0.36, 1);
++}
++
++/* 3 · El velo se desvanece (y deja de capturar clics) mientras la tarjeta se revela. Los logotipos se apagan ANTES que el fondo (45 % del
++   tiempo): así no se superponen con el logotipo de la tarjeta que aparece debajo (doble exposición). */
++.intro-login[data-fase='salida'] {
++  opacity: 0;
++  pointer-events: none;
++}
++
++.intro-login[data-fase='salida'] .intro-login__isotipo {
++  opacity: 0;
++  transition:
++    transform var(--intro-ms-texto, 800ms) cubic-bezier(0.22, 1, 0.36, 1),
++    opacity calc(var(--intro-ms-salida, 450ms) * 0.45) ease-out;
++}
++
++.intro-login[data-fase='salida'] .intro-login__texto {
++  opacity: 0;
++  transition:
++    clip-path var(--intro-ms-texto, 800ms) cubic-bezier(0.22, 1, 0.36, 1),
++    opacity calc(var(--intro-ms-salida, 450ms) * 0.45) ease-out;
++}
++
++/* La tarjeta del formulario espera oculta; `backwards` la mantiene oculta durante el retraso y, al terminar, el estilo normal coincide con el
++   fotograma final (por eso el módulo quita `data-intro` solo cuando la animación ya acabó). */
++[data-intro='activa'] [data-intro-revelar] {
++  opacity: 0;
++}
++
++[data-intro='revelar'] [data-intro-revelar] {
++  animation: intro-tarjeta-revelar var(--intro-ms-tarjeta, 600ms) cubic-bezier(0.16, 1, 0.3, 1) var(--intro-retraso-tarjeta, 100ms) backwards;
++}
++
++@keyframes intro-tarjeta-revelar {
++  from {
++    opacity: 0;
++    transform: translateY(1.25rem) scale(0.97);
++  }
++  to {
++    opacity: 1;
++    transform: none;
++  }
++}
+diff --git a/services/notificaciones.service.js b/services/notificaciones.service.js
+index bd1c079..18d48d0 100644
+--- a/services/notificaciones.service.js
++++ b/services/notificaciones.service.js
+@@ -3,6 +3,7 @@ const { ejecutar } = require('../config/db');
+ const cfg = require('../config/env');
+ const { e } = require('../errors/AppError');
+ const { hoyCaracas, diasEntre, aFechaSql } = require('../utils/fechas');
++const { DIAS_ANTES_PREVENTIVA, diasParaMesEntrante, esDiaPreventivo, ventanaPagoMesEntrante } = require('../utils/calendario-cobranza');
+ const { usdABs, sumar } = require('../utils/dinero');
+ const { bcv } = require('./bcv.service');
+ const { whatsapp } = require('./whatsapp.service');
+@@ -11,7 +12,15 @@ const portal = require('./portal.service');
+ const { plantillaPreventiva, plantillaMorosidad } = require('./plantillas.whatsapp');
+ 
+ const ACADEMIA = process.env.ACADEMIA_NOMBRE || 'Brilliant Minds Academy';
++/** Envío MANUAL desde el panel: la preventiva solo se acepta de 3 a 5 días antes del vencimiento de la próxima cuota. */
+ const VENTANA_PREVENTIVA = { min: 3, max: 5 };
++/**
++ * Regla de la alerta PREVENTIVA.
++ *   · MANUAL        (por defecto): ventana de 3 a 5 días antes del vencimiento. Es la del botón del panel; no cambia.
++ *   · MES_ENTRANTE  : «regla de los 10 días» del bot de cobranza. Solo vale 1 o 2 días antes del inicio del mes entrante y se refiere a la
++ *                     cuota Pendiente que vence dentro de su ventana de pago (días 1 a 10). Ver utils/calendario-cobranza.js.
++ */
++const MODO_PREVENTIVA = Object.freeze({ MANUAL: 'MANUAL', MES_ENTRANTE: 'MES_ENTRANTE' });
+ 
+ async function cargarEstudiante(id, sedeId = null) {
+   const r = await ejecutar(
+@@ -43,6 +52,31 @@ async function prepararPreventiva(est, hoy) {
+   return { cuotaId: c.id, concepto: c.concepto, montoUsd: Number(c.monto_usd), fechaVencimiento: c.fecha_vencimiento, diasRestantes: dias };
+ }
+ 
++/**
++ * Alerta preventiva del bot (modo MES_ENTRANTE): solo 1 o 2 días antes del inicio del mes entrante, y sobre la primera cuota Pendiente cuyo
++ * vencimiento cae en la ventana de pago de ese mes (días 1 a 10). Misma consulta de «próxima cuota» que usa el cron para elegir candidatos.
++ */
++async function prepararPreventivaMesEntrante(est, hoy) {
++  if (est.estado_dinamico !== 'Activo') {
++    throw e.reglaNegocio('ESTADO_NO_APLICA', `La alerta preventiva solo aplica a estudiantes Activos (estado actual: ${est.estado_dinamico}).`);
++  }
++  if (!esDiaPreventivo(hoy)) {
++    const faltan = diasParaMesEntrante(hoy);
++    throw e.reglaNegocio('FUERA_DE_VENTANA_PREVENTIVA',
++      `La alerta preventiva automática se envía ${DIAS_ANTES_PREVENTIVA.min} o ${DIAS_ANTES_PREVENTIVA.max} días antes del inicio del mes entrante (faltan ${faltan}).`,
++      { dias_para_mes_entrante: faltan });
++  }
++  const { desde, hasta } = ventanaPagoMesEntrante(hoy);
++  const r = await ejecutar(
++    `SELECT id, concepto, monto_usd, fecha_vencimiento
++     FROM cuotas WHERE estudiante_id = $1 AND estado = 'Pendiente' AND fecha_vencimiento BETWEEN $2::date AND $3::date
++     ORDER BY fecha_vencimiento, id LIMIT 1`,
++    [est.id, aFechaSql(desde), aFechaSql(hasta)]);
++  if (!r.rowCount) throw e.reglaNegocio('SIN_CUOTA_PROXIMA', 'El estudiante no tiene una cuota pendiente en la ventana de pago del mes entrante.');
++  const c = r.rows[0];
++  return { cuotaId: c.id, concepto: c.concepto, montoUsd: Number(c.monto_usd), fechaVencimiento: c.fecha_vencimiento, diasRestantes: diasEntre(hoy, c.fecha_vencimiento) };
++}
++
+ /** Alerta por morosidad: solo si el estudiante está Moroso y tiene deuda vencida sin referencia en revisión. */
+ async function prepararMorosidad(est, hoy) {
+   if (est.estado_dinamico !== 'Moroso') {
+@@ -60,13 +94,16 @@ async function prepararMorosidad(est, hoy) {
+ }
+ 
+ /**
+- * Genera (y opcionalmente envía) una alerta MANUAL-INDIVIDUAL. La tasa BCV se consulta en ese instante
++ * Genera (y opcionalmente envía) una alerta INDIVIDUAL: la del panel (`modoPreventiva` MANUAL) o la que despacha el bot (MES_ENTRANTE para
++ * la preventiva; la morosidad no depende del modo). La tasa BCV se consulta en ese instante
+  * (`fresca: true`); si no se logra obtener, NO se genera nada (503) para no cobrar con una tasa vieja.
+  */
+-async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId, sedeId = null }, { bcvSvc = bcv, waSvc = whatsapp, ahora = Date.now } = {}) {
++async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId, sedeId = null, modoPreventiva = MODO_PREVENTIVA.MANUAL }, { bcvSvc = bcv, waSvc = whatsapp, ahora = Date.now } = {}) {
++  if (!Object.values(MODO_PREVENTIVA).includes(modoPreventiva)) throw new TypeError(`[notificaciones] modoPreventiva desconocido: ${modoPreventiva}`);
+   const hoy = hoyCaracas(ahora());
+   const est = await cargarEstudiante(estudianteId, sedeId);
+-  const datos = tipo === 'PREVENTIVA' ? await prepararPreventiva(est, hoy) : await prepararMorosidad(est, hoy);
++  const prepararPreventivaSegunModo = modoPreventiva === MODO_PREVENTIVA.MES_ENTRANTE ? prepararPreventivaMesEntrante : prepararPreventiva;
++  const datos = tipo === 'PREVENTIVA' ? await prepararPreventivaSegunModo(est, hoy) : await prepararMorosidad(est, hoy);
+ 
+   const tasa = await bcvSvc.obtenerTasa({ fresca: true });
+   if (tasa.desactualizada) {
+@@ -122,4 +159,4 @@ async function historial({ estudianteId, offset, limite, sedeId = null }) {
+   return { items: items.rows, total: total.rows[0].n };
+ }
+ 
+-module.exports = { generarAlerta, historial, VENTANA_PREVENTIVA };
++module.exports = { generarAlerta, historial, VENTANA_PREVENTIVA, MODO_PREVENTIVA };
+diff --git a/tests/calendario-cobranza.test.js b/tests/calendario-cobranza.test.js
+new file mode 100644
+index 0000000..0c62133
+--- /dev/null
++++ b/tests/calendario-cobranza.test.js
+@@ -0,0 +1,63 @@
++'use strict';
++// «Regla de los 10 días»: la mensualidad se paga solo del día 1 al 10; preventiva 1–2 días antes del mes entrante; mora desde el día 11.
++const test = require('node:test');
++const assert = require('node:assert/strict');
++const {
++  DIA_FIN_VENTANA_PAGO, DIA_INICIO_MOROSIDAD, DIAS_ANTES_PREVENTIVA,
++  inicioMesEntrante, diasParaMesEntrante, ventanaPagoMesEntrante, esDiaPreventivo, esDiaMorosidad, calendarioCobranza,
++} = require('../utils/calendario-cobranza');
++
++test('constantes de negocio: ventana de pago hasta el día 10, mora desde el 11, preventiva a 1–2 días del mes entrante', () => {
++  assert.equal(DIA_FIN_VENTANA_PAGO, 10);
++  assert.equal(DIA_INICIO_MOROSIDAD, 11);
++  assert.deepEqual({ ...DIAS_ANTES_PREVENTIVA }, { min: 1, max: 2 });
++  assert.ok(Object.isFrozen(DIAS_ANTES_PREVENTIVA));
++});
++
++test('inicioMesEntrante: primer día del mes siguiente, saltando de diciembre a enero del año siguiente', () => {
++  assert.equal(inicioMesEntrante('2026-10-05'), '2026-11-01');
++  assert.equal(inicioMesEntrante('2026-11-30'), '2026-12-01');
++  assert.equal(inicioMesEntrante('2026-12-31'), '2027-01-01');
++  assert.equal(inicioMesEntrante('2028-02-29'), '2028-03-01');
++});
++
++test('ventana de pago del mes entrante: del día 1 al día 10, ambos inclusive', () => {
++  assert.deepEqual(ventanaPagoMesEntrante('2026-10-30'), { desde: '2026-11-01', hasta: '2026-11-10' });
++  assert.deepEqual(ventanaPagoMesEntrante('2026-12-31'), { desde: '2027-01-01', hasta: '2027-01-10' });
++});
++
++test('preventiva: los DOS últimos días de cada mes, sea cual sea su longitud (28, 29, 30 o 31 días)', () => {
++  const dias = (...lista) => lista.map((d) => [d, esDiaPreventivo(d)]);
++  assert.deepEqual(dias('2026-11-28', '2026-11-29', '2026-11-30'), [['2026-11-28', false], ['2026-11-29', true], ['2026-11-30', true]]); // 30 días: 29 y 30
++  assert.deepEqual(dias('2026-10-29', '2026-10-30', '2026-10-31'), [['2026-10-29', false], ['2026-10-30', true], ['2026-10-31', true]]); // 31 días: 30 y 31
++  assert.deepEqual(dias('2027-02-26', '2027-02-27', '2027-02-28'), [['2027-02-26', false], ['2027-02-27', true], ['2027-02-28', true]]); // febrero común
++  assert.deepEqual(dias('2028-02-27', '2028-02-28', '2028-02-29'), [['2028-02-27', false], ['2028-02-28', true], ['2028-02-29', true]]); // febrero bisiesto
++  assert.equal(diasParaMesEntrante('2026-10-31'), 1);
++  assert.equal(diasParaMesEntrante('2026-10-30'), 2);
++});
++
++test('preventiva: ningún día del mes que no sea de los dos últimos dispara el aviso (recorre un mes completo)', () => {
++  const dispara = [];
++  for (let d = 1; d <= 30; d += 1) if (esDiaPreventivo(`2026-11-${String(d).padStart(2, '0')}`)) dispara.push(d);
++  assert.deepEqual(dispara, [29, 30]);
++});
++
++test('morosidad: nunca en la ventana de pago (días 1–10) y todos los días desde el 11 hasta fin de mes', () => {
++  const con = [];
++  for (let d = 1; d <= 31; d += 1) if (esDiaMorosidad(`2026-10-${String(d).padStart(2, '0')}`)) con.push(d);
++  assert.deepEqual(con, Array.from({ length: 21 }, (_, i) => i + 11)); // 11 … 31
++  assert.equal(esDiaMorosidad('2026-11-10'), false);
++  assert.equal(esDiaMorosidad('2026-11-11'), true);
++});
++
++test('calendarioCobranza resume qué toca hoy: ventana de pago = nada; día 11–28 = solo mora; últimos 2 días = ambos', () => {
++  assert.deepEqual(calendarioCobranza('2026-11-05'), { preventiva: false, morosidad: false, ventana: { desde: '2026-12-01', hasta: '2026-12-10' } });
++  assert.deepEqual(calendarioCobranza('2026-11-20'), { preventiva: false, morosidad: true, ventana: { desde: '2026-12-01', hasta: '2026-12-10' } });
++  assert.deepEqual(calendarioCobranza('2026-11-29'), { preventiva: true, morosidad: true, ventana: { desde: '2026-12-01', hasta: '2026-12-10' } });
++});
++
++test('una fecha inválida es un error de programación (TypeError), no un día «que no toca» silencioso', () => {
++  for (const mala of ['2026-02-30', '2026-13-01', 'ayer', '', undefined, null]) {
++    assert.throws(() => calendarioCobranza(mala), TypeError, String(mala));
++  }
++});
+diff --git a/tests/frontend-identidad.test.js b/tests/frontend-identidad.test.js
+index 98faf03..f5f4e5d 100644
+--- a/tests/frontend-identidad.test.js
++++ b/tests/frontend-identidad.test.js
+@@ -13,9 +13,39 @@ test('el login usa el logotipo BMA sobre tarjeta de cristal; Astra solo aparece
+   assert.match(admin, /logoCompletoHtml\(/);
+   assert.match(admin, /bg-bma-azul/);
+   assert.match(leer('frontend', 'src', 'lib', 'ui.ts'), /bg-white\/90[^']*shadow-2xl[^']*backdrop-blur-md|backdrop-blur-md/);
+-  assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'src', 'login-animation.ts')), false);
+-  assert.doesNotMatch(admin, /login-animation|montarAnimacionLogin/);
+-  for (const f of ['admin.ts', 'lib/marca.ts', 'lib/ui.ts']) assert.doesNotMatch(leer('frontend', 'src', f), /astra/i);
++  // La intro de marca (isotipo + texto) vive en su propio módulo y el login solo la orquesta: ver el test «intro de marca del login».
++  assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'src', 'login-animation.ts')), true);
++  assert.match(admin, /from '\.\/login-animation'/);
++  assert.match(admin, /iniciarIntroLogin\(/);
++  for (const f of ['admin.ts', 'lib/marca.ts', 'lib/ui.ts', 'login-animation.ts']) assert.doesNotMatch(leer('frontend', 'src', f), /astra/i);
++});
++
++test('intro de marca del login: isotipo desde el centro, texto con clip-path, tarjeta de cristal al final y accesible', () => {
++  const ts = leer('frontend', 'src', 'login-animation.ts');
++  const css = leer('frontend', 'src', 'styles', 'main.css');
++  // Activos oficiales, importados para que Vite los emita con hash.
++  assert.match(ts, /from '\.\/assets\/bma-isotipo\.png'/);
++  assert.match(ts, /from '\.\/assets\/bma-texto\.png'/);
++  for (const f of ['bma-isotipo.png', 'bma-texto.png']) assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'src', 'assets', f)), true, f);
++  // Orden de la secuencia: isotipo → texto → salida (la tarjeta se revela al final).
++  assert.match(ts, /fase: 'isotipo'[\s\S]*fase: 'texto'/);
++  assert.match(ts, /poner\('salida'\)/);
++  // CSS: escala 0 → 1 con desaceleración, texto con máscara clip-path desde el centro y la tarjeta oculta hasta la revelación.
++  assert.match(css, /\.intro-login__isotipo \{[^}]*scale\(0\)/);
++  assert.match(css, /\.intro-login\[data-fase='isotipo'\] \.intro-login__isotipo \{[^}]*scale\(1\)[^}]*cubic-bezier/);
++  assert.match(css, /\.intro-login__texto \{[^}]*clip-path: inset\(0 50% 0 50%\)/);
++  assert.match(css, /clip-path: inset\(0 0 0 0\)/);
++  assert.match(css, /\[data-intro='activa'\] \[data-intro-revelar\] \{[^}]*opacity: 0/);
++  assert.match(css, /@keyframes intro-tarjeta-revelar/);
++  assert.match(leer('frontend', 'src', 'admin.ts'), /<section data-intro-revelar class="\$\{CLS\.loginTarjeta\}/); // la tarjeta glassmorphic es lo que se revela
++  // Accesibilidad y robustez: reducir movimiento, formulario inerte durante la intro, velo decorativo, omitible y una sola vez por página.
++  assert.match(ts, /prefers-reduced-motion: reduce/);
++  assert.match(ts, /pantalla\.inert = true/);
++  assert.match(ts, /setAttribute\('aria-hidden', 'true'\)/);
++  assert.match(ts, /'Escape'/);
++  assert.match(ts, /let yaMostrada = false/);
++  // Sin `any` ni supresiones de tipos en el módulo.
++  assert.doesNotMatch(ts, /:\s*any\b|\bas any\b|<any>|@ts-ignore|@ts-expect-error/);
+ });
+ 
+ test('el lienzo azul solo aplica al panel admin y las cabeceras de tabla son moradas', () => {
+@@ -62,7 +92,7 @@ test('login: red neuronal y firma Astra; niveles fijos de la Sede Este y «Nivel
+   assert.match(leer('frontend', 'tailwind.config.js'), /Outfit/);
+ });
+ 
+-test('marca unificada: asset de Astra, cabecera dual, encabezados púrpura y pie de autoría en las vistas públicas', () => {
++test('marca unificada: cabecera dual solo en el portal, planilla con solo el isotipo BMA, encabezados púrpura y pie con Astra en ambas', () => {
+   assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'src', 'assets', 'astra-logo.png')), true);
+   assert.match(leer('frontend', 'src', 'types', 'assets.d.ts'), /declare module '\*\.png'/);
+   const firma = leer('frontend', 'src', 'lib', 'firma.ts');
+@@ -72,8 +102,19 @@ test('marca unificada: asset de Astra, cabecera dual, encabezados púrpura y pie
+   assert.match(firma, /group-data-\[collapsed=true\]\/sb:h-10/); // el isotipo crece en el rail contraído del sidebar
+ 
+   const planilla = leer('frontend', 'src', 'admisiones.ts');
+-  assert.match(planilla, /cabeceraDualHtml\(\)/);
++  // La planilla ya NO usa la cabecera dual: su cabecera lleva solo el isotipo circular de BMA y Astra queda únicamente en el pie.
++  assert.doesNotMatch(planilla, /cabeceraDualHtml/);
++  assert.match(planilla, /cabeceraIsotipoHtml\(\)/);
+   assert.match(planilla, /firmaPublica\(\)/);
++  const cabeceraPlanilla = /<header class="flex flex-col gap-4">[\s\S]*?<\/header>/.exec(planilla)?.[0] ?? '';
++  assert.match(cabeceraPlanilla, /cabeceraIsotipoHtml\(\)/);
++  assert.doesNotMatch(cabeceraPlanilla, /astra|firma|cabeceraDual|logoCompletoHtml/i);
++  assert.doesNotMatch(planilla, /astra-logo/); // el metal de Astra solo se importa desde lib/firma.ts
++  assert.ok(planilla.indexOf('${firmaPublica()}') > planilla.indexOf('<form id="planilla"'), 'el pie con Astra va después de la planilla');
++  const marcaTs = leer('frontend', 'src', 'lib', 'marca.ts');
++  assert.match(marcaTs, /export function cabeceraIsotipoHtml\(/);
++  assert.match(marcaTs, /from '\.\.\/assets\/bma-isotipo\.png'/);
++  assert.equal((marcaTs.match(/<img /g) ?? []).length, 3, 'logo completo, isotipo del sidebar e isotipo grande de la planilla: ningún otro logotipo en marca.ts');
+   const encabezado = /function encabezadoSeccion[\s\S]*?\n}/.exec(planilla)?.[0] ?? '';
+   assert.match(encabezado, /bg-bma-purpura[ "]/);
+   assert.match(encabezado, /text-white/);
+diff --git a/tests/integracion.pg.test.js b/tests/integracion.pg.test.js
+index aa0fa91..4b735ab 100644
+--- a/tests/integracion.pg.test.js
++++ b/tests/integracion.pg.test.js
+@@ -31,6 +31,17 @@ let db; let svc; let admin;
+ const t = (nombre, fn) => test(nombre, { skip: omitir }, fn);
+ 
+ // ── utilidades ──────────────────────────────────────────────────────────────────────────────────
++/**
++ * Reloj del bot de cobranza en los tests: el ÚLTIMO día del mes en curso (siempre es día preventivo y de morosidad) y, como mes entrante,
++ * el siguiente. La vista vw_estudiantes_estado usa el día real, así que las cuotas del mes entrante siguen siendo futuras para ella y
++ * las morosas se siembran respecto al día real (svc.hoy()), no a este reloj.
++ */
++function relojCobranza() {
++  const [anio, mes] = svc.hoy().split('-').map(Number);
++  const hoy = new Date(Date.UTC(anio, mes, 0)).toISOString().slice(0, 10);
++  const ventana = require('../utils/calendario-cobranza').ventanaPagoMesEntrante(hoy);
++  return { hoy, ahora: () => Date.parse(`${hoy}T12:00:00-04:00`), ventana, dia: (n) => `${ventana.desde.slice(0, 8)}${String(n).padStart(2, '0')}` };
++}
+ const sumarDias = (f, n) => { const d = new Date(`${f}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
+ const bcvFalso = { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false, capturadaEn: new Date() }) };
+ const filas = async (texto, p = []) => (await db.ejecutar(texto, p)).rows;
+@@ -1033,34 +1044,37 @@ t('bloquearVencidas() (catálogo del panel) converge la base y deja intactos los
+ });
+ 
+ // ── Bot de WhatsApp automático (ciclo completo contra la base real) ─────────────────────────────
+-t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en revisión), envío secuencial con pausa, ENVIADA/FALLIDA reales, idempotencia y arrendamiento', async () => {
++t('cron WhatsApp: selección masiva (ventana de pago del mes entrante, días 1–10, morosos sin pago en revisión), envío secuencial con pausa, ENVIADA/FALLIDA reales, idempotencia y arrendamiento', async () => {
+   const { crearCronWhatsapp, candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
+   const { activarPrueba } = require('../modules/premium/prueba.service');
+-  const hoy = svc.hoy();
++  const reloj = relojCobranza();
++  const { hoy } = reloj;
++  const real = svc.hoy(); // la vista de morosidad usa el día real
+   const extraCuota = (estId, concepto, vence, estado) => db.ejecutar(
+     `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento, estado) VALUES ($1, 'OTRO', $2, 10, $3, $4)`, [estId, concepto, vence, estado]);
+ 
+-  const d3 = await sembrar({ vence: sumarDias(hoy, 3), nombres: 'CronD3', apellidos: 'Borde' });
+-  const d5 = await sembrar({ vence: sumarDias(hoy, 5), nombres: 'CronD5', apellidos: 'Borde' });
+-  const d2 = await sembrar({ vence: sumarDias(hoy, 2), nombres: 'CronD2', apellidos: 'Cerca' });
+-  const d6 = await sembrar({ vence: sumarDias(hoy, 6), nombres: 'CronD6', apellidos: 'Lejos' });
+-  const proxima = await sembrar({ vence: sumarDias(hoy, 1), nombres: 'CronProxima', apellidos: 'Uno' }); // su próxima cuota vence mañana…
+-  await extraCuota(proxima.estId, 'Otra cuota +4', sumarDias(hoy, 4), 'Pendiente'); // …así que la de +4 NO cuenta (misma regla que el envío manual)
+-  const pendVal = await sembrar({ estatus: 'Pendiente por Validación Administrativa', vence: sumarDias(hoy, 4), nombres: 'CronPendVal', apellidos: 'X' });
+-  const fuera = await sembrar({ estatus: 'Fuera de la Academia', vence: sumarDias(hoy, 4), nombres: 'CronFuera', apellidos: 'X' });
+-  const moroso = await sembrar({ vence: sumarDias(hoy, -6), monto: 30, nombres: 'CronMoroso', apellidos: 'Normal' });
+-  const fallida = await sembrar({ vence: sumarDias(hoy, -2), monto: 12, nombres: 'CronFallona', apellidos: 'Meta' });
+-  const soloRevision = await sembrar({ vence: sumarDias(hoy, -9), estadoCuota: 'En Revisión', nombres: 'CronRevision', apellidos: 'Total' });
+-  const mixto = await sembrar({ vence: sumarDias(hoy, -9), monto: 20, nombres: 'CronMixto', apellidos: 'Parcial' });
+-  await extraCuota(mixto.estId, 'Vencida en revisión', sumarDias(hoy, -3), 'En Revisión');
++  const d3 = await sembrar({ vence: reloj.dia(1), nombres: 'CronD3', apellidos: 'Borde' }); // primer día de la ventana (inclusive)
++  const d5 = await sembrar({ vence: reloj.dia(10), nombres: 'CronD5', apellidos: 'Borde' }); // último día de la ventana (inclusive)
++  const d2 = await sembrar({ vence: hoy, nombres: 'CronD2', apellidos: 'Cerca' }); // todavía es el mes en curso: no es del mes entrante
++  const d6 = await sembrar({ vence: reloj.dia(11), nombres: 'CronD6', apellidos: 'Lejos' }); // día 11: ya fuera de la ventana de pago
++  const proxima = await sembrar({ vence: hoy, nombres: 'CronProxima', apellidos: 'Uno' }); // una cuota del mes en curso…
++  await extraCuota(proxima.estId, 'Mensualidad mes entrante', reloj.dia(4), 'Pendiente'); // …y la del mes entrante: esa es la que se avisa (una sola vez)
++  const pendVal = await sembrar({ estatus: 'Pendiente por Validación Administrativa', vence: reloj.dia(3), nombres: 'CronPendVal', apellidos: 'X' });
++  const fuera = await sembrar({ estatus: 'Fuera de la Academia', vence: reloj.dia(3), nombres: 'CronFuera', apellidos: 'X' });
++  const moroso = await sembrar({ vence: sumarDias(real, -6), monto: 30, nombres: 'CronMoroso', apellidos: 'Normal' });
++  const fallida = await sembrar({ vence: sumarDias(real, -2), monto: 12, nombres: 'CronFallona', apellidos: 'Meta' });
++  const soloRevision = await sembrar({ vence: sumarDias(real, -9), estadoCuota: 'En Revisión', nombres: 'CronRevision', apellidos: 'Total' });
++  const mixto = await sembrar({ vence: sumarDias(real, -9), monto: 20, nombres: 'CronMixto', apellidos: 'Parcial' });
++  await extraCuota(mixto.estId, 'Vencida en revisión', sumarDias(real, -3), 'En Revisión');
+ 
+   const lim = 1000;
+   const ids = (rows) => rows.map((r) => r.estudiante_id);
+-  const ventana = svc.notif.VENTANA_PREVENTIVA;
++  const ventana = reloj.ventana;
+   const prev = ids(await candidatosPreventiva({ hoy, ventana, limite: lim }));
+-  for (const incluido of [d3, d5]) assert.ok(prev.includes(incluido.estId), 'bordes 3 y 5 días incluidos');
+-  for (const excluido of [d2, d6, proxima, pendVal, fuera, moroso, soloRevision]) assert.ok(!prev.includes(excluido.estId));
+-  assert.ok(prev.indexOf(d3.estId) < prev.indexOf(d5.estId), 'orden por vencimiento');
++  for (const incluido of [d3, d5, proxima]) assert.ok(prev.includes(incluido.estId), 'bordes día 1 y día 10 incluidos; con varias cuotas cuenta la de la ventana');
++  for (const excluido of [d2, d6, pendVal, fuera, moroso, soloRevision]) assert.ok(!prev.includes(excluido.estId));
++  assert.equal(prev.filter((id) => id === proxima.estId).length, 1, 'un candidato por estudiante');
++  assert.ok(prev.indexOf(d3.estId) < prev.indexOf(proxima.estId) && prev.indexOf(proxima.estId) < prev.indexOf(d5.estId), 'orden por vencimiento');
+ 
+   const mor = ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim }));
+   for (const incluido of [moroso, fallida, mixto]) assert.ok(mor.includes(incluido.estId));
+@@ -1077,11 +1091,10 @@ t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en re
+   } };
+   const bcvFresco = { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false, capturadaEn: new Date() }) };
+   const notificaciones = {
+-    VENTANA_PREVENTIVA: ventana,
+-    generarAlerta: (a, deps) => svc.notif.generarAlerta(a, { bcvSvc: deps.bcvSvc, waSvc: waFalso }),
++    generarAlerta: (a, deps) => svc.notif.generarAlerta(a, { bcvSvc: deps.bcvSvc, waSvc: waFalso, ahora: reloj.ahora }),
+   };
+   const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: lim, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
+-  const armar = () => crearCronWhatsapp({ db, guard: guardReal, notificaciones, bcv: bcvFresco, whatsapp: waFalso, config,
++  const armar = () => crearCronWhatsapp({ db, guard: guardReal, notificaciones, bcv: bcvFresco, whatsapp: waFalso, config, ahora: reloj.ahora,
+     esperar: async (ms) => { pausas.push(ms); }, log: () => {}, logError: () => {} });
+ 
+   // 1) Módulo bloqueado → no envía nada
+@@ -1095,12 +1108,12 @@ t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en re
+   assert.ok(pausas.length > 0 && pausas.every((ms) => ms === 1500));
+   assert.equal(pausas.length, r.preventiva.enviadas + r.morosidad.enviadas + r.morosidad.fallidas + r.preventiva.fallidas - 1, 'una pausa entre cada par de envíos consecutivos');
+   const estado = async (est) => filas(`SELECT tipo, estado, error, creado_por FROM notificaciones_whatsapp WHERE estudiante_id = $1 ORDER BY id`, [est.estId]);
+-  for (const e of [d3, d5]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado, x.creado_por]), [['PREVENTIVA', 'ENVIADA', null]]);
++  for (const e of [d3, d5, proxima]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado, x.creado_por]), [['PREVENTIVA', 'ENVIADA', null]]);
+   for (const e of [moroso, mixto]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado]), [['MOROSIDAD', 'ENVIADA']]);
+   const filaFallida = await estado(fallida);
+   assert.deepEqual(filaFallida.map((x) => [x.tipo, x.estado]), [['MOROSIDAD', 'FALLIDA']]);
+   assert.match(filaFallida[0].error, /131047/);
+-  for (const e of [d2, d6, proxima, pendVal, fuera, soloRevision]) assert.equal((await estado(e)).length, 0, 'no candidatos → ninguna notificación');
++  for (const e of [d2, d6, pendVal, fuera, soloRevision]) assert.equal((await estado(e)).length, 0, 'no candidatos → ninguna notificación');
+   assert.match(enviados.find((x) => /CronMixto/.test(x)), /US\$ 20\.00/, 'solo se cobra la cuota Pendiente, no la que está en revisión');
+ 
+   // 3) Idempotencia: relanzar el mismo día no duplica (la FALLIDA sí se reintenta)
+@@ -1133,19 +1146,20 @@ t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en re
+ 
+ t('cron WhatsApp por sede: cada sede activa se despacha por separado (Preventiva → Morosidad), después los estudiantes sin sede; una sede desactivada no recibe nada', async () => {
+   const { crearCronWhatsapp, candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
+-  const hoy = svc.hoy();
+-  const ventana = svc.notif.VENTANA_PREVENTIVA;
+-  const pA = await sembrar({ sedeId: sedeA, nombres: 'SdPrevA', vence: sumarDias(hoy, 4) });
+-  const mA = await sembrar({ sedeId: sedeA, nombres: 'SdMorA', vence: sumarDias(hoy, -3) });
+-  const pB = await sembrar({ sedeId: sedeB, nombres: 'SdPrevB', vence: sumarDias(hoy, 5) });
+-  const mB = await sembrar({ sedeId: sedeB, nombres: 'SdMorB', vence: sumarDias(hoy, -1) });
+-  const lejos = await sembrar({ sedeId: sedeA, nombres: 'SdLejos', vence: sumarDias(hoy, 20) });
+-  const libre = await sembrar({ nombres: 'SdSinSede', vence: sumarDias(hoy, 4) });
++  const reloj = relojCobranza();
++  const { hoy, ventana } = reloj;
++  const real = svc.hoy();
++  const pA = await sembrar({ sedeId: sedeA, nombres: 'SdPrevA', vence: reloj.dia(3) });
++  const mA = await sembrar({ sedeId: sedeA, nombres: 'SdMorA', vence: sumarDias(real, -3) });
++  const pB = await sembrar({ sedeId: sedeB, nombres: 'SdPrevB', vence: reloj.dia(4) });
++  const mB = await sembrar({ sedeId: sedeB, nombres: 'SdMorB', vence: sumarDias(real, -1) });
++  const lejos = await sembrar({ sedeId: sedeA, nombres: 'SdLejos', vence: sumarDias(ventana.hasta, 5) });
++  const libre = await sembrar({ nombres: 'SdSinSede', vence: reloj.dia(3) });
+   // Esta es una sede más allá de las 2 del Core Base: la migración 008 exige MULTI_SEDE_PREMIUM (se restablece justo después).
+   await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
+   const cerrada = (await svc.sedes.crear({ nombre: 'Sede Cerrada Cron' })).id;
+   await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
+-  const enCerrada = await sembrar({ sedeId: cerrada, nombres: 'SdCerrada', vence: sumarDias(hoy, 4) });
++  const enCerrada = await sembrar({ sedeId: cerrada, nombres: 'SdCerrada', vence: reloj.dia(3) });
+   await svc.sedes.cambiarActiva(cerrada, false);
+ 
+   // Consultas masivas: el ámbito es exacto (sede entera, o solo "sin sede" con NULL).
+@@ -1161,10 +1175,10 @@ t('cron WhatsApp por sede: cada sede activa se despacha por separado (Preventiva
+   // Ciclo completo con el candado real (módulo contratado) y servicios dobles que registran el orden.
+   await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
+   const llamadas = []; const pausas = [];
+-  const notificaciones = { VENTANA_PREVENTIVA: ventana, generarAlerta: async (a) => { llamadas.push([a.tipo, a.estudianteId]); return { notificacion_id: 0 }; } };
++  const notificaciones = { generarAlerta: async (a) => { llamadas.push([a.tipo, a.estudianteId]); return { notificacion_id: 0 }; } };
+   const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: lim, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
+   const cron = crearCronWhatsapp({ db, guard: svc.guard.crearGuard({ ttlMs: 0 }), notificaciones, whatsapp: { configurado: () => true }, bcv: { obtenerTasa: async () => ({}) },
+-    config, esperar: async (ms) => { pausas.push(ms); }, log: () => {}, logError: () => {} });
++    config, ahora: reloj.ahora, esperar: async (ms) => { pausas.push(ms); }, log: () => {}, logError: () => {} });
+   const r = await cron.ejecutarCiclo();
+   assert.equal(r.estado, 'COMPLETADO');
+   const mios = new Map([[pA.estId, 'pA'], [mA.estId, 'mA'], [pB.estId, 'pB'], [mB.estId, 'mB'], [lejos.estId, 'lejos'], [libre.estId, 'libre'], [enCerrada.estId, 'cerrada']]);
+@@ -1272,8 +1286,9 @@ t('migración 010: es idempotente (reaplicarla no falla ni duplica restricciones
+ // ── Bot de WhatsApp: de-duplicación con GENERADA «en vuelo» (H4) y enfriamiento por FALLIDA (H1), con el SQL real ──
+ t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo», la del panel no; y 3 FALLIDA del mismo tipo en 7 días enfrían al estudiante', async () => {
+   const { candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
+-  const hoy = svc.hoy();
+-  const ventana = svc.notif.VENTANA_PREVENTIVA;
++  const reloj = relojCobranza();
++  const { hoy, ventana } = reloj;
++  const real = svc.hoy();
+   const lim = 100000;
+   const adminId = (await uno('SELECT id FROM usuarios_admin LIMIT 1')).id;
+   // Inserta una notificación con la antigüedad pedida; `creadoPor` null = la creó el bot.
+@@ -1283,8 +1298,8 @@ t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo»,
+   const ids = (rows) => rows.map((r) => r.estudiante_id);
+   const preventivas = async () => ids(await candidatosPreventiva({ hoy, ventana, limite: lim }));
+   const morosos = async () => ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim }));
+-  const moroso = (n) => sembrar({ vence: sumarDias(hoy, -6), nombres: `H4Mor${n}`, apellidos: 'Cron' });
+-  const prev = (n) => sembrar({ vence: sumarDias(hoy, 4), nombres: `H4Prev${n}`, apellidos: 'Cron' });
++  const moroso = (n) => sembrar({ vence: sumarDias(real, -6), nombres: `H4Mor${n}`, apellidos: 'Cron' });
++  const prev = (n) => sembrar({ vence: reloj.dia(3), nombres: `H4Prev${n}`, apellidos: 'Cron' });
+ 
+   // ── H4 · MOROSIDAD ──
+   const [m1, m2, m3, m4, m5] = [await moroso(1), await moroso(2), await moroso(3), await moroso(4), await moroso(5)];
+@@ -1295,7 +1310,7 @@ t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo»,
+   const mor = await morosos();
+   assert.deepEqual([m1, m2, m3, m4, m5].map((m) => mor.includes(m.estId)), [true, false, true, true, false]);
+ 
+-  // ── H4 · PREVENTIVA (una por cuota, sin ventana temporal) ──
++  // ── H4 · PREVENTIVA (una por cuota, dentro de la ventana de pago del mes entrante) ──
+   const [p1, p2, p3, p4] = [await prev(1), await prev(2), await prev(3), await prev(4)];
+   await nota(p2, 'PREVENTIVA', 'GENERADA', { dias: 1, cuota: p2.cuotaId });                      // bot, el ciclo de ayer: huérfana tras una caída → bloquea el reenvío
+   await nota(p3, 'PREVENTIVA', 'GENERADA', { creadoPor: adminId, cuota: p3.cuotaId });           // panel → NO bloquea
+@@ -1326,12 +1341,12 @@ t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo»,
+ 
+ t('cron WhatsApp H3 (BD real): si otra instancia toma el arrendamiento a mitad del ciclo, la renovación lo detecta y el ciclo se aborta sin enviar más; el lease ajeno no se borra', async () => {
+   const { crearCronWhatsapp, CLAVE_LEASE } = require('../cron/whatsappCron');
+-  const hoy = svc.hoy();
+-  for (let i = 0; i < 30; i += 1) await sembrar({ vence: sumarDias(hoy, -3), nombres: `H3Lease${i}`, apellidos: 'Congelado' });
++  const reloj = relojCobranza();
++  const real = svc.hoy();
++  for (let i = 0; i < 30; i += 1) await sembrar({ vence: sumarDias(real, -3), nombres: `H3Lease${i}`, apellidos: 'Congelado' });
+   await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
+   const llamadas = [];
+   const notificaciones = {
+-    VENTANA_PREVENTIVA: svc.notif.VENTANA_PREVENTIVA,
+     generarAlerta: async (a) => {
+       llamadas.push(a.estudianteId);
+       // Tras el 5.º envío «otra instancia» toma el lease: es lo que ocurre si este proceso se congela más que `arrendamientoMin`.
+@@ -1341,7 +1356,7 @@ t('cron WhatsApp H3 (BD real): si otra instancia toma el arrendamiento a mitad d
+   };
+   const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: 100000, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
+   const cron = crearCronWhatsapp({ db, guard: svc.guard.crearGuard({ ttlMs: 0 }), notificaciones, whatsapp: { configurado: () => true }, bcv: { obtenerTasa: async () => ({}) },
+-    config, esperar: async () => {}, log: () => {}, logError: () => {} });
++    config, ahora: reloj.ahora, esperar: async () => {}, log: () => {}, logError: () => {} });
+   try {
+     const r = await cron.ejecutarCiclo();
+     assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'LEASE_PERDIDO']);
+diff --git a/tests/multisede.test.js b/tests/multisede.test.js
+index 37b4966..04f59d6 100644
+--- a/tests/multisede.test.js
++++ b/tests/multisede.test.js
+@@ -50,6 +50,9 @@ test('cron por sede: SQL posicional ($n) con alcance de sede; recorre cada sede
+     db, notificaciones, guard: { evaluar: async () => ({ habilitado: true }) }, whatsapp: { configurado: () => true },
+     bcv: { obtenerTasa: async () => ({}) }, config: { delayMs: 0, maxEnviosPorCiclo: 50, morosidadCadaDias: 7, maxFallosSeguidos: 5, arrendamientoMin: 120, hora: '08:00' },
+     esperar: async () => undefined, log: () => undefined, logError: () => undefined,
++    // Reloj fijo: con la «regla de los 10 días» el ciclo solo corre la preventiva en los 2 últimos días del mes y la mora desde el día 11.
++    // 30-oct-2026 activa ambos bloques; sin fijarlo, este test dependería del día en que se ejecuta.
++    ahora: () => Date.parse('2026-10-30T12:00:00-04:00'),
+   });
+   const r = await cron.ejecutarCiclo();
+   assert.equal(r.estado, 'COMPLETADO');
+diff --git a/tests/notificaciones.test.js b/tests/notificaciones.test.js
+index 4c1c0db..e223d7b 100644
+--- a/tests/notificaciones.test.js
++++ b/tests/notificaciones.test.js
+@@ -2,7 +2,7 @@
+ const { db } = require('./helpers/entorno');
+ const test = require('node:test');
+ const assert = require('node:assert/strict');
+-const { generarAlerta } = require('../services/notificaciones.service');
++const { generarAlerta, MODO_PREVENTIVA } = require('../services/notificaciones.service');
+ const { AppError } = require('../errors/AppError');
+ 
+ const AHORA = () => Date.parse('2026-10-21T20:00:00-04:00'); // hoy en Caracas = 2026-10-21
+@@ -14,6 +14,7 @@ function programar({ estado = 'Activo', cuotaProxima, vencidas = [] }) {
+     if (/FROM vw_estudiantes_estado v JOIN representantes/.test(texto)) {
+       return rs({ id: 1, nombres: 'Luis', apellidos: 'Pérez', estado_dinamico: estado, rep_nombres: 'Ana', rep_apellidos: 'Pérez', telefono: '584141234567' });
+     }
++    if (/fecha_vencimiento BETWEEN \$2::date AND \$3::date/.test(texto)) return cuotaProxima ? rs(cuotaProxima) : rs(); // modo MES_ENTRANTE (ventana de pago)
+     if (/FROM cuotas WHERE estudiante_id = \$1 AND estado = 'Pendiente' AND fecha_vencimiento >= \$2/.test(texto)) return cuotaProxima ? rs(cuotaProxima) : rs();
+     if (/fecha_vencimiento < \$2 ORDER BY/.test(texto)) return rs(...vencidas);
+     if (/FROM cuentas_pago/.test(texto)) return rs({ id: 1, metodo: 'ZELLE', titular: 'BMA LLC', detalle: 'pagos@bma.example' });
+@@ -106,3 +107,65 @@ test('morosidad: solo para Morosos; suma las cuotas vencidas, incluye cuentas y
+   programar({ estado: 'Moroso', vencidas: [] }); // todas sus cuotas vencidas ya tienen referencia en revisión
+   await assert.rejects(generarAlerta({ tipo: 'MOROSIDAD', estudianteId: 1 }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora: AHORA }), (e) => e.codigo === 'PAGO_EN_REVISION');
+ });
++
++// ───────────────────────── Modo MES_ENTRANTE (regla de los 10 días, bot de cobranza) ─────────────────────────
++
++const AHORA_FIN_MES = () => Date.parse('2026-10-30T20:00:00-04:00'); // hoy en Caracas = 2026-10-30: faltan 2 días para noviembre
++const CUOTA_VENTANA = { id: 8, concepto: 'Mensualidad noviembre', monto_usd: '50.00', fecha_vencimiento: '2026-11-10' };
++
++test('MES_ENTRANTE: 2 días antes del mes entrante toma la cuota de la ventana de pago (días 1–10), con tasa fresca y enlace único del portal', async () => {
++  programar({ cuotaProxima: CUOTA_VENTANA });
++  const bcv = bcvFresca();
++  const r = await generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1, enviar: false, usuarioId: null, modoPreventiva: MODO_PREVENTIVA.MES_ENTRANTE }, { bcvSvc: bcv, waSvc: wa(), ahora: AHORA_FIN_MES });
++  assert.equal(r.estado, 'GENERADA');
++  assert.equal(r.monto_usd, 50);
++  assert.match(r.mensaje, /vence en 11 días/); // 2026-10-30 → 2026-11-10
++  assert.match(r.mensaje, /Vence: 10\/11\/2026/);
++  assert.match(r.mensaje, /http:\/\/localhost:3000\/portal\/[a-f0-9]{48}/, 'lleva el enlace seguro con token del portal');
++  assert.deepEqual(bcv.llamadas, [{ fresca: true }]);
++  const consulta = db.llamadas.find((l) => /fecha_vencimiento BETWEEN \$2::date AND \$3::date/.test(l.texto));
++  assert.deepEqual(consulta.params, [1, '2026-11-01', '2026-11-10'], 'parámetros posicionales: estudiante y ventana de pago del mes entrante');
++  assert.ok(!/\b(TOP|GETDATE|DATEADD|ISNULL|dbo\.|@\w+)\b/i.test(consulta.texto), 'sin residuos de T-SQL');
++});
++
++test('MES_ENTRANTE: el último día del mes también vale (1 día antes) y también cuando el mes entrante es del año siguiente', async () => {
++  for (const [ahora, venc] of [['2026-10-31T09:00:00-04:00', '2026-11-10'], ['2026-12-31T09:00:00-04:00', '2027-01-10']]) {
++    programar({ cuotaProxima: { ...CUOTA_VENTANA, fecha_vencimiento: venc } });
++    const r = await generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1, modoPreventiva: MODO_PREVENTIVA.MES_ENTRANTE }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora: () => Date.parse(ahora) });
++    assert.equal(r.estado, 'GENERADA', ahora);
++  }
++});
++
++test('MES_ENTRANTE: fuera de los 2 últimos días del mes → 422 FUERA_DE_VENTANA_PREVENTIVA, sin consultar cuotas ni crear nada (aunque la cuota esté a 3–5 días)', async () => {
++  // 2026-10-21 y vencimiento 2026-10-25 = 4 días: en modo MANUAL sería válida; en MES_ENTRANTE no lo es.
++  programar({ cuotaProxima: { id: 7, concepto: 'M', monto_usd: '50.00', fecha_vencimiento: '2026-10-25' } });
++  await assert.rejects(
++    generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1, modoPreventiva: MODO_PREVENTIVA.MES_ENTRANTE }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora: AHORA }),
++    (e) => e.status === 422 && e.codigo === 'FUERA_DE_VENTANA_PREVENTIVA' && e.detalles.dias_para_mes_entrante === 11,
++  );
++  assert.ok(!sqlUsado(/INSERT INTO notificaciones_whatsapp/));
++  assert.ok(!sqlUsado(/fecha_vencimiento BETWEEN/), 'la fecha se rechaza antes de tocar las cuotas');
++});
++
++test('MES_ENTRANTE: sin cuota pendiente en la ventana → SIN_CUOTA_PROXIMA; estudiante no Activo → ESTADO_NO_APLICA (el bot los omite)', async () => {
++  programar({ cuotaProxima: null });
++  await assert.rejects(generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1, modoPreventiva: MODO_PREVENTIVA.MES_ENTRANTE }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora: AHORA_FIN_MES }), (e) => e.codigo === 'SIN_CUOTA_PROXIMA');
++  programar({ estado: 'Moroso', cuotaProxima: CUOTA_VENTANA });
++  await assert.rejects(generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1, modoPreventiva: MODO_PREVENTIVA.MES_ENTRANTE }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora: AHORA_FIN_MES }), (e) => e.codigo === 'ESTADO_NO_APLICA');
++});
++
++test('el modo por defecto sigue siendo MANUAL (3–5 días del panel) y un modo desconocido es un error de programación, no un modo silencioso', async () => {
++  // 2026-10-30 con vencimiento 2026-11-10 = 11 días: el botón manual lo rechaza por la ventana de 3–5 días, como siempre.
++  programar({ cuotaProxima: CUOTA_VENTANA });
++  await assert.rejects(generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1 }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora: AHORA_FIN_MES }), (e) => e.codigo === 'FUERA_DE_VENTANA_PREVENTIVA' && e.detalles.dias_restantes === 11);
++  assert.equal(MODO_PREVENTIVA.MANUAL, 'MANUAL');
++  await assert.rejects(generarAlerta({ tipo: 'PREVENTIVA', estudianteId: 1, modoPreventiva: 'CUALQUIERA' }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora: AHORA_FIN_MES }), TypeError);
++});
++
++test('la morosidad no depende del modo preventivo: mismas reglas con el bot que desde el panel', async () => {
++  programar({ estado: 'Moroso', vencidas: [{ id: 4, monto_usd: '40.00', fecha_vencimiento: '2026-11-10' }] });
++  const ahora = () => Date.parse('2026-11-11T08:00:00-04:00'); // día 11: primer día de mora
++  const r = await generarAlerta({ tipo: 'MOROSIDAD', estudianteId: 1, modoPreventiva: MODO_PREVENTIVA.MES_ENTRANTE }, { bcvSvc: bcvFresca(), waSvc: wa(), ahora });
++  assert.equal(r.monto_usd, 40);
++  assert.match(r.mensaje, /vencida desde hace 1 día\b/); // vencimiento el 10; el día 11 lleva 1 día de mora
++});
+diff --git a/tests/whatsapp-cron.test.js b/tests/whatsapp-cron.test.js
+index 2c4b119..d6053da 100644
+--- a/tests/whatsapp-cron.test.js
++++ b/tests/whatsapp-cron.test.js
+@@ -7,8 +7,11 @@ const path = require('node:path');
+ const { AppError, e } = require('../errors/AppError');
+ const { crearCronWhatsapp, msHastaProximaEjecucion, bcvDelCiclo } = require('../cron/whatsappCron');
+ const { crearWhatsappService } = require('../services/whatsapp.service');
++const { MODO_PREVENTIVA } = require('../services/notificaciones.service');
+ 
+-const HORA = Date.parse('2026-10-23T12:00:00-04:00');
++// 30-oct-2026: faltan 2 días para el mes entrante (toca PREVENTIVA) y ya pasó el día 11 (toca MOROSIDAD): el ciclo corre ambos bloques.
++const HORA = Date.parse('2026-10-30T12:00:00-04:00');
++const en = (dia) => Date.parse(`${dia}T12:00:00-04:00`);
+ const CONFIG = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: 400, morosidadCadaDias: 7, maxFallosSeguidos: 5, arrendamientoMin: 120 };
+ const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
+ 
+@@ -17,9 +20,11 @@ const rs = (...filas) => ({ rows: filas, rowCount: filas.length });
+  * junto con las pausas (`esperar`), para comprobar el orden secuencial y el delay.
+  * `leasePerdido` = el UPDATE de renovación no encuentra nuestra fila (otra instancia tomó el lease); `renovarFalla` = ese UPDATE lanza.
+  */
+-function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { habilitado: true }, configurado = true, lease = true, leasePerdido = false, renovarFalla = false, config = {} } = {}) {
++function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { habilitado: true }, configurado = true, lease = true, leasePerdido = false, renovarFalla = false, config = {}, hora = HORA } = {}) {
+   const eventos = [];
+   const sql = [];
++  const alertas = [];
++  let consultasGuard = 0;
+   const db = {
+     ejecutar: async (texto, params) => {
+       sql.push({ texto, params });
+@@ -32,10 +37,12 @@ function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { hab
+       return rs();
+     },
+   };
+-  const guard = { evaluar: async () => modulo };
++  const guard = { evaluar: async () => { consultasGuard += 1; return modulo; } };
+   const notificaciones = {
+     VENTANA_PREVENTIVA: { min: 3, max: 5 },
+-    generarAlerta: async ({ tipo, estudianteId, enviar, usuarioId }) => {
++    generarAlerta: async (args) => {
++      const { tipo, estudianteId, enviar, usuarioId } = args;
++      alertas.push(args);
+       eventos.push(`envio:${tipo}:${estudianteId}`);
+       assert.equal(enviar, true);
+       assert.equal(usuarioId, null, 'el bot no se atribuye a ningún usuario del panel');
+@@ -50,12 +57,12 @@ function armar({ preventivas = [], morosos = [], resultados = {}, modulo = { hab
+     whatsapp: { configurado: () => configurado },
+     config: { ...CONFIG, ...config },
+     esperar: async (ms) => { pausas.push(ms); eventos.push(`pausa:${ms}`); },
+-    ahora: () => HORA, log: () => {}, logError: () => {},
++    ahora: () => hora, log: () => {}, logError: () => {},
+   });
+-  return { bot, eventos, pausas, sql };
++  return { bot, eventos, pausas, sql, alertas, guardConsultado: () => consultasGuard };
+ }
+ 
+-const prev = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, cuota_id: estudiante_id * 10, fecha_vencimiento: '2026-10-27' }));
++const prev = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, cuota_id: estudiante_id * 10, fecha_vencimiento: '2026-11-10' }));
+ const mor = (...ids) => ids.map((estudiante_id) => ({ estudiante_id, vencida_desde: '2026-10-01' }));
+ // Falla de Meta NO clasificada como del destinatario ni sistémica (131000 = «error desconocido»): cuenta para el cortafuegos, como siempre.
+ const metaFalla = () => new AppError(502, 'WHATSAPP_ENVIO_FALLIDO', 'Meta rechazó', { motivo: 'Meta 131000: error desconocido', meta_codigo: 131000, http_status: 500, clase: 'DESCONOCIDA' });
+@@ -180,9 +187,11 @@ test('las consultas masivas son PostgreSQL con parámetros posicionales y reglas
+   const p = sql.find((s) => /DISTINCT ON/.test(s.texto));
+   const m = sql.find((s) => /GROUP BY v\.id/.test(s.texto));
+   // null = ámbito «sin sede» (no hay sedes en este doble). Los 4 últimos de cada consulta: estado «en vuelo» (H4), estado a enfriar y umbrales (H1).
+-  assert.deepEqual(p.params, ['2026-10-23', 3, 5, 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
+-  assert.deepEqual(m.params, ['2026-10-23', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
+-  assert.match(p.texto, /BETWEEN \(\$1::date \+ \$2::int\) AND \(\$1::date \+ \$3::int\)/);
++  // Preventiva: $2/$3 son las fechas de la ventana de pago del mes entrante (1 y 10 de noviembre), no desplazamientos en días.
++  assert.deepEqual(p.params, ['2026-10-30', '2026-11-01', '2026-11-10', 400, 'Pendiente', 'Activo', 'PREVENTIVA', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
++  assert.deepEqual(m.params, ['2026-10-30', 7, 400, 'Pendiente', 'Moroso', 'MOROSIDAD', 'ENVIADA', null, 'GENERADA', 'FALLIDA', 7, 3]);
++  assert.match(p.texto, /c\.fecha_vencimiento >= \$1::date AND c\.fecha_vencimiento BETWEEN \$2::date AND \$3::date/);
++  assert.doesNotMatch(p.texto, /\$1::date \+ \$\d::int/, 'la ventana ya no es «hoy + N días»');
+   assert.match(p.texto, /NOT EXISTS[\s\S]*n\.cuota_id = p\.cuota_id/, 'una PREVENTIVA por cuota');
+   assert.match(m.texto, /c\.estado = \$4::text AND c\.fecha_vencimiento < \$1::date/, 'solo cuotas vencidas en Pendiente (no En Revisión)');
+   assert.match(m.texto, /n\.creado_en > NOW\(\) - \(\$2::int \* INTERVAL '1 day'\)/);
+@@ -312,3 +321,69 @@ test('el bot usa el servicio de notificaciones real (cero lógica de envío dupl
+   assert.match(server, /cronWhatsapp\.iniciar\(\)/);
+   assert.match(server, /cronWhatsapp\.detener\(\)/);
+ });
++
++// ───────────────────────── Regla de los 10 días (calendario de cobranza) ─────────────────────────
++
++test('regla de los 10 días: en la ventana de pago (días 1–10) el ciclo se omite sin tocar la base, el candado premium ni WhatsApp', async () => {
++  for (const dia of ['2026-11-01', '2026-11-05', '2026-11-10']) {
++    const { bot, eventos, sql, guardConsultado } = armar({ preventivas: prev(1), morosos: mor(2), hora: en(dia) });
++    const r = await bot.ejecutarCiclo();
++    assert.deepEqual([r.estado, r.motivo], ['OMITIDO', 'FUERA_DE_CALENDARIO_COBRANZA'], dia);
++    assert.deepEqual(r.calendario, { preventiva: false, morosidad: false }, dia);
++    assert.equal(eventos.length, 0, `${dia}: nada se envía`);
++    assert.equal(sql.length, 0, `${dia}: ni siquiera toma el arrendamiento`);
++    assert.equal(guardConsultado(), 0, `${dia}: ni consulta el módulo premium`);
++  }
++});
++
++test('morosidad: arranca el día 11 (no el 10) y dura hasta fin de mes; esos días NO hay preventiva ni se consulta', async () => {
++  for (const dia of ['2026-11-11', '2026-11-18', '2026-11-28']) {
++    const { bot, eventos, sql } = armar({ preventivas: prev(1), morosos: mor(2), hora: en(dia) });
++    const r = await bot.ejecutarCiclo();
++    assert.equal(r.estado, 'COMPLETADO', dia);
++    assert.deepEqual(r.calendario, { preventiva: false, morosidad: true }, dia);
++    assert.deepEqual(eventos, ['envio:MOROSIDAD:2'], dia);
++    assert.deepEqual([r.preventiva.candidatos, r.morosidad.candidatos], [0, 1], dia);
++    assert.ok(!sql.some((q) => /DISTINCT ON/.test(q.texto)), `${dia}: no se ejecuta la consulta de preventivas`);
++  }
++});
++
++test('preventiva: solo 1 o 2 días antes del inicio del mes entrante (29–30 en noviembre, 30–31 en octubre, 27–28 en febrero)', async () => {
++  const casos = [
++    ['2026-11-28', false], ['2026-11-29', true], ['2026-11-30', true],
++    ['2026-10-29', false], ['2026-10-30', true], ['2026-10-31', true],
++    ['2027-02-26', false], ['2027-02-27', true], ['2027-02-28', true],
++    ['2026-12-30', true], ['2026-12-31', true], // el mes entrante es enero del año siguiente
++  ];
++  for (const [dia, toca] of casos) {
++    const { bot, eventos, sql } = armar({ preventivas: prev(1), hora: en(dia) });
++    const r = await bot.ejecutarCiclo();
++    assert.equal(r.calendario.preventiva, toca, dia);
++    assert.deepEqual(eventos, toca ? ['envio:PREVENTIVA:1'] : [], dia);
++    assert.equal(sql.some((q) => /DISTINCT ON/.test(q.texto)), toca, `${dia}: la consulta de preventivas solo corre los días que tocan`);
++  }
++});
++
++test('la ventana que recibe la consulta preventiva es la de pago del mes entrante (días 1 a 10), también al cruzar de año', async () => {
++  for (const [dia, desde, hasta] of [['2026-11-30', '2026-12-01', '2026-12-10'], ['2026-12-31', '2027-01-01', '2027-01-10'], ['2027-02-28', '2027-03-01', '2027-03-10']]) {
++    const { bot, sql } = armar({ preventivas: prev(1), hora: en(dia) });
++    await bot.ejecutarCiclo();
++    const p = sql.find((q) => /DISTINCT ON/.test(q.texto));
++    assert.deepEqual(p.params.slice(0, 3), [dia, desde, hasta]);
++  }
++});
++
++test('el bot pide al servicio el modo MES_ENTRANTE: la preventiva se valida con la regla de los 10 días, no con la ventana manual de 3–5 días', async () => {
++  const { bot, alertas } = armar({ preventivas: prev(1), morosos: mor(2) });
++  await bot.ejecutarCiclo();
++  assert.equal(alertas.length, 2);
++  assert.ok(alertas.every((a) => a.modoPreventiva === MODO_PREVENTIVA.MES_ENTRANTE));
++  assert.equal(MODO_PREVENTIVA.MES_ENTRANTE, 'MES_ENTRANTE');
++});
++
++test('los dos últimos días del mes corren ambos bloques: preventivas primero y luego morosidad, sin mezclar ámbitos', async () => {
++  const { bot, eventos } = armar({ preventivas: prev(1), morosos: mor(2), hora: en('2026-11-30') });
++  const r = await bot.ejecutarCiclo();
++  assert.deepEqual(eventos.filter((x) => x.startsWith('envio')), ['envio:PREVENTIVA:1', 'envio:MOROSIDAD:2']);
++  assert.deepEqual(r.calendario, { preventiva: true, morosidad: true });
++});
+diff --git a/utils/calendario-cobranza.js b/utils/calendario-cobranza.js
+new file mode 100644
+index 0000000..b476653
+--- /dev/null
++++ b/utils/calendario-cobranza.js
+@@ -0,0 +1,80 @@
++'use strict';
++
++/**
++ * Calendario de cobranza — «regla de los 10 días».
++ *
++ * Las mensualidades regulares de la academia se pagan EXCLUSIVAMENTE durante los primeros 10 días de cada mes. De ahí salen
++ * los dos disparadores automáticos del bot de WhatsApp (cron/whatsappCron.js):
++ *
++ *   · PREVENTIVA: 1 o 2 días antes del inicio del mes entrante (los dos últimos días del mes, hora de Caracas). Es el único momento
++ *     en que se avisa, con el enlace seguro del portal, de la cuota que vencerá dentro de la ventana de pago del mes que llega.
++ *   · MOROSIDAD:  a partir del día 11. Durante la ventana de pago (días 1 a 10) NO se declara ni se cobra mora.
++ *
++ * Todo es aritmética de fechas sobre cadenas 'YYYY-MM-DD' (ya en hora de Caracas: ver utils/fechas.hoyCaracas), sin `Date` locales ni
++ * consultas a la base: así es determinista y se prueba sin infraestructura. Los límites son constantes de negocio, no variables de entorno.
++ *
++ * «1 o 2 días antes del inicio del mes entrante» es relativo al último día REAL del mes: en meses de 30 días son los días 29 y 30; en los de
++ * 31, los días 30 y 31; en febrero, los días 27 y 28 (28 y 29 si es bisiesto).
++ */
++const { esFechaValida, diasEntre } = require('./fechas');
++
++/** Último día de cada mes en que se aceptan pagos de la mensualidad. */
++const DIA_FIN_VENTANA_PAGO = 10;
++/** Primer día del mes en que una cuota sin pagar se declara en mora. */
++const DIA_INICIO_MOROSIDAD = DIA_FIN_VENTANA_PAGO + 1;
++/** Días de antelación (respecto al día 1 del mes entrante) en que corre la alerta preventiva. */
++const DIAS_ANTES_PREVENTIVA = Object.freeze({ min: 1, max: 2 });
++
++const dosDigitos = (n) => String(n).padStart(2, '0');
++
++function exigirFecha(hoy) {
++  if (!esFechaValida(hoy)) throw new TypeError(`[calendario-cobranza] Fecha inválida: ${hoy}`);
++}
++
++/** 'YYYY-MM-DD' → primer día del mes siguiente ('YYYY-MM-01'). Diciembre salta al enero del año siguiente. */
++function inicioMesEntrante(hoy) {
++  exigirFecha(hoy);
++  const [anio, mes] = hoy.split('-').map(Number);
++  const [a, m] = mes === 12 ? [anio + 1, 1] : [anio, mes + 1];
++  return `${a}-${dosDigitos(m)}-01`;
++}
++
++/** Días calendario que faltan para el 1.º del mes entrante (el último día del mes devuelve 1). */
++function diasParaMesEntrante(hoy) {
++  return diasEntre(hoy, inicioMesEntrante(hoy));
++}
++
++/** Ventana de pago del mes entrante: del día 1 al día 10, ambos inclusive ('YYYY-MM-DD'). */
++function ventanaPagoMesEntrante(hoy) {
++  const desde = inicioMesEntrante(hoy);
++  return { desde, hasta: `${desde.slice(0, 7)}-${dosDigitos(DIA_FIN_VENTANA_PAGO)}` };
++}
++
++/** ¿Hoy corre la alerta preventiva? (1 o 2 días antes del inicio del mes entrante.) */
++function esDiaPreventivo(hoy) {
++  const dias = diasParaMesEntrante(hoy);
++  return dias >= DIAS_ANTES_PREVENTIVA.min && dias <= DIAS_ANTES_PREVENTIVA.max;
++}
++
++/** ¿Hoy corre la declaración de morosidad? (a partir del día 11 del mes en curso.) */
++function esDiaMorosidad(hoy) {
++  exigirFecha(hoy);
++  return Number(hoy.slice(8, 10)) >= DIA_INICIO_MOROSIDAD;
++}
++
++/** Qué bloques de cobranza toca ejecutar hoy y cuál es la ventana de pago del mes entrante. */
++function calendarioCobranza(hoy) {
++  return { preventiva: esDiaPreventivo(hoy), morosidad: esDiaMorosidad(hoy), ventana: ventanaPagoMesEntrante(hoy) };
++}
++
++module.exports = {
++  DIA_FIN_VENTANA_PAGO,
++  DIA_INICIO_MOROSIDAD,
++  DIAS_ANTES_PREVENTIVA,
++  inicioMesEntrante,
++  diasParaMesEntrante,
++  ventanaPagoMesEntrante,
++  esDiaPreventivo,
++  esDiaMorosidad,
++  calendarioCobranza,
++};
+-- 
+2.43.0
+

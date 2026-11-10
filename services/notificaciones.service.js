@@ -3,6 +3,7 @@ const { ejecutar } = require('../config/db');
 const cfg = require('../config/env');
 const { e } = require('../errors/AppError');
 const { hoyCaracas, diasEntre, aFechaSql } = require('../utils/fechas');
+const { DIAS_ANTES_PREVENTIVA, diasParaMesEntrante, esDiaPreventivo, ventanaPagoMesEntrante } = require('../utils/calendario-cobranza');
 const { usdABs, sumar } = require('../utils/dinero');
 const { bcv } = require('./bcv.service');
 const { whatsapp } = require('./whatsapp.service');
@@ -11,7 +12,15 @@ const portal = require('./portal.service');
 const { plantillaPreventiva, plantillaMorosidad } = require('./plantillas.whatsapp');
 
 const ACADEMIA = process.env.ACADEMIA_NOMBRE || 'Brilliant Minds Academy';
+/** Envío MANUAL desde el panel: la preventiva solo se acepta de 3 a 5 días antes del vencimiento de la próxima cuota. */
 const VENTANA_PREVENTIVA = { min: 3, max: 5 };
+/**
+ * Regla de la alerta PREVENTIVA.
+ *   · MANUAL        (por defecto): ventana de 3 a 5 días antes del vencimiento. Es la del botón del panel; no cambia.
+ *   · MES_ENTRANTE  : «regla de los 10 días» del bot de cobranza. Solo vale 1 o 2 días antes del inicio del mes entrante y se refiere a la
+ *                     cuota Pendiente que vence dentro de su ventana de pago (días 1 a 10). Ver utils/calendario-cobranza.js.
+ */
+const MODO_PREVENTIVA = Object.freeze({ MANUAL: 'MANUAL', MES_ENTRANTE: 'MES_ENTRANTE' });
 
 async function cargarEstudiante(id, sedeId = null) {
   const r = await ejecutar(
@@ -43,6 +52,31 @@ async function prepararPreventiva(est, hoy) {
   return { cuotaId: c.id, concepto: c.concepto, montoUsd: Number(c.monto_usd), fechaVencimiento: c.fecha_vencimiento, diasRestantes: dias };
 }
 
+/**
+ * Alerta preventiva del bot (modo MES_ENTRANTE): solo 1 o 2 días antes del inicio del mes entrante, y sobre la primera cuota Pendiente cuyo
+ * vencimiento cae en la ventana de pago de ese mes (días 1 a 10). Misma consulta de «próxima cuota» que usa el cron para elegir candidatos.
+ */
+async function prepararPreventivaMesEntrante(est, hoy) {
+  if (est.estado_dinamico !== 'Activo') {
+    throw e.reglaNegocio('ESTADO_NO_APLICA', `La alerta preventiva solo aplica a estudiantes Activos (estado actual: ${est.estado_dinamico}).`);
+  }
+  if (!esDiaPreventivo(hoy)) {
+    const faltan = diasParaMesEntrante(hoy);
+    throw e.reglaNegocio('FUERA_DE_VENTANA_PREVENTIVA',
+      `La alerta preventiva automática se envía ${DIAS_ANTES_PREVENTIVA.min} o ${DIAS_ANTES_PREVENTIVA.max} días antes del inicio del mes entrante (faltan ${faltan}).`,
+      { dias_para_mes_entrante: faltan });
+  }
+  const { desde, hasta } = ventanaPagoMesEntrante(hoy);
+  const r = await ejecutar(
+    `SELECT id, concepto, monto_usd, fecha_vencimiento
+     FROM cuotas WHERE estudiante_id = $1 AND estado = 'Pendiente' AND fecha_vencimiento BETWEEN $2::date AND $3::date
+     ORDER BY fecha_vencimiento, id LIMIT 1`,
+    [est.id, aFechaSql(desde), aFechaSql(hasta)]);
+  if (!r.rowCount) throw e.reglaNegocio('SIN_CUOTA_PROXIMA', 'El estudiante no tiene una cuota pendiente en la ventana de pago del mes entrante.');
+  const c = r.rows[0];
+  return { cuotaId: c.id, concepto: c.concepto, montoUsd: Number(c.monto_usd), fechaVencimiento: c.fecha_vencimiento, diasRestantes: diasEntre(hoy, c.fecha_vencimiento) };
+}
+
 /** Alerta por morosidad: solo si el estudiante está Moroso y tiene deuda vencida sin referencia en revisión. */
 async function prepararMorosidad(est, hoy) {
   if (est.estado_dinamico !== 'Moroso') {
@@ -60,13 +94,16 @@ async function prepararMorosidad(est, hoy) {
 }
 
 /**
- * Genera (y opcionalmente envía) una alerta MANUAL-INDIVIDUAL. La tasa BCV se consulta en ese instante
+ * Genera (y opcionalmente envía) una alerta INDIVIDUAL: la del panel (`modoPreventiva` MANUAL) o la que despacha el bot (MES_ENTRANTE para
+ * la preventiva; la morosidad no depende del modo). La tasa BCV se consulta en ese instante
  * (`fresca: true`); si no se logra obtener, NO se genera nada (503) para no cobrar con una tasa vieja.
  */
-async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId, sedeId = null }, { bcvSvc = bcv, waSvc = whatsapp, ahora = Date.now } = {}) {
+async function generarAlerta({ tipo, estudianteId, enviar = false, usuarioId, sedeId = null, modoPreventiva = MODO_PREVENTIVA.MANUAL }, { bcvSvc = bcv, waSvc = whatsapp, ahora = Date.now } = {}) {
+  if (!Object.values(MODO_PREVENTIVA).includes(modoPreventiva)) throw new TypeError(`[notificaciones] modoPreventiva desconocido: ${modoPreventiva}`);
   const hoy = hoyCaracas(ahora());
   const est = await cargarEstudiante(estudianteId, sedeId);
-  const datos = tipo === 'PREVENTIVA' ? await prepararPreventiva(est, hoy) : await prepararMorosidad(est, hoy);
+  const prepararPreventivaSegunModo = modoPreventiva === MODO_PREVENTIVA.MES_ENTRANTE ? prepararPreventivaMesEntrante : prepararPreventiva;
+  const datos = tipo === 'PREVENTIVA' ? await prepararPreventivaSegunModo(est, hoy) : await prepararMorosidad(est, hoy);
 
   const tasa = await bcvSvc.obtenerTasa({ fresca: true });
   if (tasa.desactualizada) {
@@ -122,4 +159,4 @@ async function historial({ estudianteId, offset, limite, sedeId = null }) {
   return { items: items.rows, total: total.rows[0].n };
 }
 
-module.exports = { generarAlerta, historial, VENTANA_PREVENTIVA };
+module.exports = { generarAlerta, historial, VENTANA_PREVENTIVA, MODO_PREVENTIVA };

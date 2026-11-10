@@ -31,6 +31,17 @@ let db; let svc; let admin;
 const t = (nombre, fn) => test(nombre, { skip: omitir }, fn);
 
 // ── utilidades ──────────────────────────────────────────────────────────────────────────────────
+/**
+ * Reloj del bot de cobranza en los tests: el ÚLTIMO día del mes en curso (siempre es día preventivo y de morosidad) y, como mes entrante,
+ * el siguiente. La vista vw_estudiantes_estado usa el día real, así que las cuotas del mes entrante siguen siendo futuras para ella y
+ * las morosas se siembran respecto al día real (svc.hoy()), no a este reloj.
+ */
+function relojCobranza() {
+  const [anio, mes] = svc.hoy().split('-').map(Number);
+  const hoy = new Date(Date.UTC(anio, mes, 0)).toISOString().slice(0, 10);
+  const ventana = require('../utils/calendario-cobranza').ventanaPagoMesEntrante(hoy);
+  return { hoy, ahora: () => Date.parse(`${hoy}T12:00:00-04:00`), ventana, dia: (n) => `${ventana.desde.slice(0, 8)}${String(n).padStart(2, '0')}` };
+}
 const sumarDias = (f, n) => { const d = new Date(`${f}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return d.toISOString().slice(0, 10); };
 const bcvFalso = { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false, capturadaEn: new Date() }) };
 const filas = async (texto, p = []) => (await db.ejecutar(texto, p)).rows;
@@ -1033,34 +1044,37 @@ t('bloquearVencidas() (catálogo del panel) converge la base y deja intactos los
 });
 
 // ── Bot de WhatsApp automático (ciclo completo contra la base real) ─────────────────────────────
-t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en revisión), envío secuencial con pausa, ENVIADA/FALLIDA reales, idempotencia y arrendamiento', async () => {
+t('cron WhatsApp: selección masiva (ventana de pago del mes entrante, días 1–10, morosos sin pago en revisión), envío secuencial con pausa, ENVIADA/FALLIDA reales, idempotencia y arrendamiento', async () => {
   const { crearCronWhatsapp, candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
   const { activarPrueba } = require('../modules/premium/prueba.service');
-  const hoy = svc.hoy();
+  const reloj = relojCobranza();
+  const { hoy } = reloj;
+  const real = svc.hoy(); // la vista de morosidad usa el día real
   const extraCuota = (estId, concepto, vence, estado) => db.ejecutar(
     `INSERT INTO cuotas (estudiante_id, tipo, concepto, monto_usd, fecha_vencimiento, estado) VALUES ($1, 'OTRO', $2, 10, $3, $4)`, [estId, concepto, vence, estado]);
 
-  const d3 = await sembrar({ vence: sumarDias(hoy, 3), nombres: 'CronD3', apellidos: 'Borde' });
-  const d5 = await sembrar({ vence: sumarDias(hoy, 5), nombres: 'CronD5', apellidos: 'Borde' });
-  const d2 = await sembrar({ vence: sumarDias(hoy, 2), nombres: 'CronD2', apellidos: 'Cerca' });
-  const d6 = await sembrar({ vence: sumarDias(hoy, 6), nombres: 'CronD6', apellidos: 'Lejos' });
-  const proxima = await sembrar({ vence: sumarDias(hoy, 1), nombres: 'CronProxima', apellidos: 'Uno' }); // su próxima cuota vence mañana…
-  await extraCuota(proxima.estId, 'Otra cuota +4', sumarDias(hoy, 4), 'Pendiente'); // …así que la de +4 NO cuenta (misma regla que el envío manual)
-  const pendVal = await sembrar({ estatus: 'Pendiente por Validación Administrativa', vence: sumarDias(hoy, 4), nombres: 'CronPendVal', apellidos: 'X' });
-  const fuera = await sembrar({ estatus: 'Fuera de la Academia', vence: sumarDias(hoy, 4), nombres: 'CronFuera', apellidos: 'X' });
-  const moroso = await sembrar({ vence: sumarDias(hoy, -6), monto: 30, nombres: 'CronMoroso', apellidos: 'Normal' });
-  const fallida = await sembrar({ vence: sumarDias(hoy, -2), monto: 12, nombres: 'CronFallona', apellidos: 'Meta' });
-  const soloRevision = await sembrar({ vence: sumarDias(hoy, -9), estadoCuota: 'En Revisión', nombres: 'CronRevision', apellidos: 'Total' });
-  const mixto = await sembrar({ vence: sumarDias(hoy, -9), monto: 20, nombres: 'CronMixto', apellidos: 'Parcial' });
-  await extraCuota(mixto.estId, 'Vencida en revisión', sumarDias(hoy, -3), 'En Revisión');
+  const d3 = await sembrar({ vence: reloj.dia(1), nombres: 'CronD3', apellidos: 'Borde' }); // primer día de la ventana (inclusive)
+  const d5 = await sembrar({ vence: reloj.dia(10), nombres: 'CronD5', apellidos: 'Borde' }); // último día de la ventana (inclusive)
+  const d2 = await sembrar({ vence: hoy, nombres: 'CronD2', apellidos: 'Cerca' }); // todavía es el mes en curso: no es del mes entrante
+  const d6 = await sembrar({ vence: reloj.dia(11), nombres: 'CronD6', apellidos: 'Lejos' }); // día 11: ya fuera de la ventana de pago
+  const proxima = await sembrar({ vence: hoy, nombres: 'CronProxima', apellidos: 'Uno' }); // una cuota del mes en curso…
+  await extraCuota(proxima.estId, 'Mensualidad mes entrante', reloj.dia(4), 'Pendiente'); // …y la del mes entrante: esa es la que se avisa (una sola vez)
+  const pendVal = await sembrar({ estatus: 'Pendiente por Validación Administrativa', vence: reloj.dia(3), nombres: 'CronPendVal', apellidos: 'X' });
+  const fuera = await sembrar({ estatus: 'Fuera de la Academia', vence: reloj.dia(3), nombres: 'CronFuera', apellidos: 'X' });
+  const moroso = await sembrar({ vence: sumarDias(real, -6), monto: 30, nombres: 'CronMoroso', apellidos: 'Normal' });
+  const fallida = await sembrar({ vence: sumarDias(real, -2), monto: 12, nombres: 'CronFallona', apellidos: 'Meta' });
+  const soloRevision = await sembrar({ vence: sumarDias(real, -9), estadoCuota: 'En Revisión', nombres: 'CronRevision', apellidos: 'Total' });
+  const mixto = await sembrar({ vence: sumarDias(real, -9), monto: 20, nombres: 'CronMixto', apellidos: 'Parcial' });
+  await extraCuota(mixto.estId, 'Vencida en revisión', sumarDias(real, -3), 'En Revisión');
 
   const lim = 1000;
   const ids = (rows) => rows.map((r) => r.estudiante_id);
-  const ventana = svc.notif.VENTANA_PREVENTIVA;
+  const ventana = reloj.ventana;
   const prev = ids(await candidatosPreventiva({ hoy, ventana, limite: lim }));
-  for (const incluido of [d3, d5]) assert.ok(prev.includes(incluido.estId), 'bordes 3 y 5 días incluidos');
-  for (const excluido of [d2, d6, proxima, pendVal, fuera, moroso, soloRevision]) assert.ok(!prev.includes(excluido.estId));
-  assert.ok(prev.indexOf(d3.estId) < prev.indexOf(d5.estId), 'orden por vencimiento');
+  for (const incluido of [d3, d5, proxima]) assert.ok(prev.includes(incluido.estId), 'bordes día 1 y día 10 incluidos; con varias cuotas cuenta la de la ventana');
+  for (const excluido of [d2, d6, pendVal, fuera, moroso, soloRevision]) assert.ok(!prev.includes(excluido.estId));
+  assert.equal(prev.filter((id) => id === proxima.estId).length, 1, 'un candidato por estudiante');
+  assert.ok(prev.indexOf(d3.estId) < prev.indexOf(proxima.estId) && prev.indexOf(proxima.estId) < prev.indexOf(d5.estId), 'orden por vencimiento');
 
   const mor = ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim }));
   for (const incluido of [moroso, fallida, mixto]) assert.ok(mor.includes(incluido.estId));
@@ -1077,11 +1091,10 @@ t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en re
   } };
   const bcvFresco = { obtenerTasa: async () => ({ tasa: 36.5, desactualizada: false, capturadaEn: new Date() }) };
   const notificaciones = {
-    VENTANA_PREVENTIVA: ventana,
-    generarAlerta: (a, deps) => svc.notif.generarAlerta(a, { bcvSvc: deps.bcvSvc, waSvc: waFalso }),
+    generarAlerta: (a, deps) => svc.notif.generarAlerta(a, { bcvSvc: deps.bcvSvc, waSvc: waFalso, ahora: reloj.ahora }),
   };
   const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: lim, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
-  const armar = () => crearCronWhatsapp({ db, guard: guardReal, notificaciones, bcv: bcvFresco, whatsapp: waFalso, config,
+  const armar = () => crearCronWhatsapp({ db, guard: guardReal, notificaciones, bcv: bcvFresco, whatsapp: waFalso, config, ahora: reloj.ahora,
     esperar: async (ms) => { pausas.push(ms); }, log: () => {}, logError: () => {} });
 
   // 1) Módulo bloqueado → no envía nada
@@ -1095,12 +1108,12 @@ t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en re
   assert.ok(pausas.length > 0 && pausas.every((ms) => ms === 1500));
   assert.equal(pausas.length, r.preventiva.enviadas + r.morosidad.enviadas + r.morosidad.fallidas + r.preventiva.fallidas - 1, 'una pausa entre cada par de envíos consecutivos');
   const estado = async (est) => filas(`SELECT tipo, estado, error, creado_por FROM notificaciones_whatsapp WHERE estudiante_id = $1 ORDER BY id`, [est.estId]);
-  for (const e of [d3, d5]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado, x.creado_por]), [['PREVENTIVA', 'ENVIADA', null]]);
+  for (const e of [d3, d5, proxima]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado, x.creado_por]), [['PREVENTIVA', 'ENVIADA', null]]);
   for (const e of [moroso, mixto]) assert.deepEqual((await estado(e)).map((x) => [x.tipo, x.estado]), [['MOROSIDAD', 'ENVIADA']]);
   const filaFallida = await estado(fallida);
   assert.deepEqual(filaFallida.map((x) => [x.tipo, x.estado]), [['MOROSIDAD', 'FALLIDA']]);
   assert.match(filaFallida[0].error, /131047/);
-  for (const e of [d2, d6, proxima, pendVal, fuera, soloRevision]) assert.equal((await estado(e)).length, 0, 'no candidatos → ninguna notificación');
+  for (const e of [d2, d6, pendVal, fuera, soloRevision]) assert.equal((await estado(e)).length, 0, 'no candidatos → ninguna notificación');
   assert.match(enviados.find((x) => /CronMixto/.test(x)), /US\$ 20\.00/, 'solo se cobra la cuota Pendiente, no la que está en revisión');
 
   // 3) Idempotencia: relanzar el mismo día no duplica (la FALLIDA sí se reintenta)
@@ -1133,19 +1146,20 @@ t('cron WhatsApp: selección masiva (ventana 3–5 días, morosos sin pago en re
 
 t('cron WhatsApp por sede: cada sede activa se despacha por separado (Preventiva → Morosidad), después los estudiantes sin sede; una sede desactivada no recibe nada', async () => {
   const { crearCronWhatsapp, candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
-  const hoy = svc.hoy();
-  const ventana = svc.notif.VENTANA_PREVENTIVA;
-  const pA = await sembrar({ sedeId: sedeA, nombres: 'SdPrevA', vence: sumarDias(hoy, 4) });
-  const mA = await sembrar({ sedeId: sedeA, nombres: 'SdMorA', vence: sumarDias(hoy, -3) });
-  const pB = await sembrar({ sedeId: sedeB, nombres: 'SdPrevB', vence: sumarDias(hoy, 5) });
-  const mB = await sembrar({ sedeId: sedeB, nombres: 'SdMorB', vence: sumarDias(hoy, -1) });
-  const lejos = await sembrar({ sedeId: sedeA, nombres: 'SdLejos', vence: sumarDias(hoy, 20) });
-  const libre = await sembrar({ nombres: 'SdSinSede', vence: sumarDias(hoy, 4) });
+  const reloj = relojCobranza();
+  const { hoy, ventana } = reloj;
+  const real = svc.hoy();
+  const pA = await sembrar({ sedeId: sedeA, nombres: 'SdPrevA', vence: reloj.dia(3) });
+  const mA = await sembrar({ sedeId: sedeA, nombres: 'SdMorA', vence: sumarDias(real, -3) });
+  const pB = await sembrar({ sedeId: sedeB, nombres: 'SdPrevB', vence: reloj.dia(4) });
+  const mB = await sembrar({ sedeId: sedeB, nombres: 'SdMorB', vence: sumarDias(real, -1) });
+  const lejos = await sembrar({ sedeId: sedeA, nombres: 'SdLejos', vence: sumarDias(ventana.hasta, 5) });
+  const libre = await sembrar({ nombres: 'SdSinSede', vence: reloj.dia(3) });
   // Esta es una sede más allá de las 2 del Core Base: la migración 008 exige MULTI_SEDE_PREMIUM (se restablece justo después).
   await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
   const cerrada = (await svc.sedes.crear({ nombre: 'Sede Cerrada Cron' })).id;
   await db.ejecutar(`UPDATE modulos_premium SET habilitado = FALSE, habilitado_en = NULL, actualizado_en = NOW() WHERE codigo = 'MULTI_SEDE_PREMIUM'`);
-  const enCerrada = await sembrar({ sedeId: cerrada, nombres: 'SdCerrada', vence: sumarDias(hoy, 4) });
+  const enCerrada = await sembrar({ sedeId: cerrada, nombres: 'SdCerrada', vence: reloj.dia(3) });
   await svc.sedes.cambiarActiva(cerrada, false);
 
   // Consultas masivas: el ámbito es exacto (sede entera, o solo "sin sede" con NULL).
@@ -1161,10 +1175,10 @@ t('cron WhatsApp por sede: cada sede activa se despacha por separado (Preventiva
   // Ciclo completo con el candado real (módulo contratado) y servicios dobles que registran el orden.
   await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
   const llamadas = []; const pausas = [];
-  const notificaciones = { VENTANA_PREVENTIVA: ventana, generarAlerta: async (a) => { llamadas.push([a.tipo, a.estudianteId]); return { notificacion_id: 0 }; } };
+  const notificaciones = { generarAlerta: async (a) => { llamadas.push([a.tipo, a.estudianteId]); return { notificacion_id: 0 }; } };
   const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: lim, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
   const cron = crearCronWhatsapp({ db, guard: svc.guard.crearGuard({ ttlMs: 0 }), notificaciones, whatsapp: { configurado: () => true }, bcv: { obtenerTasa: async () => ({}) },
-    config, esperar: async (ms) => { pausas.push(ms); }, log: () => {}, logError: () => {} });
+    config, ahora: reloj.ahora, esperar: async (ms) => { pausas.push(ms); }, log: () => {}, logError: () => {} });
   const r = await cron.ejecutarCiclo();
   assert.equal(r.estado, 'COMPLETADO');
   const mios = new Map([[pA.estId, 'pA'], [mA.estId, 'mA'], [pB.estId, 'pB'], [mB.estId, 'mB'], [lejos.estId, 'lejos'], [libre.estId, 'libre'], [enCerrada.estId, 'cerrada']]);
@@ -1272,8 +1286,9 @@ t('migración 010: es idempotente (reaplicarla no falla ni duplica restricciones
 // ── Bot de WhatsApp: de-duplicación con GENERADA «en vuelo» (H4) y enfriamiento por FALLIDA (H1), con el SQL real ──
 t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo», la del panel no; y 3 FALLIDA del mismo tipo en 7 días enfrían al estudiante', async () => {
   const { candidatosPreventiva, candidatosMorosidad } = require('../cron/whatsappCron');
-  const hoy = svc.hoy();
-  const ventana = svc.notif.VENTANA_PREVENTIVA;
+  const reloj = relojCobranza();
+  const { hoy, ventana } = reloj;
+  const real = svc.hoy();
   const lim = 100000;
   const adminId = (await uno('SELECT id FROM usuarios_admin LIMIT 1')).id;
   // Inserta una notificación con la antigüedad pedida; `creadoPor` null = la creó el bot.
@@ -1283,8 +1298,8 @@ t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo»,
   const ids = (rows) => rows.map((r) => r.estudiante_id);
   const preventivas = async () => ids(await candidatosPreventiva({ hoy, ventana, limite: lim }));
   const morosos = async () => ids(await candidatosMorosidad({ hoy, cadaDias: 7, limite: lim }));
-  const moroso = (n) => sembrar({ vence: sumarDias(hoy, -6), nombres: `H4Mor${n}`, apellidos: 'Cron' });
-  const prev = (n) => sembrar({ vence: sumarDias(hoy, 4), nombres: `H4Prev${n}`, apellidos: 'Cron' });
+  const moroso = (n) => sembrar({ vence: sumarDias(real, -6), nombres: `H4Mor${n}`, apellidos: 'Cron' });
+  const prev = (n) => sembrar({ vence: reloj.dia(3), nombres: `H4Prev${n}`, apellidos: 'Cron' });
 
   // ── H4 · MOROSIDAD ──
   const [m1, m2, m3, m4, m5] = [await moroso(1), await moroso(2), await moroso(3), await moroso(4), await moroso(5)];
@@ -1295,7 +1310,7 @@ t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo»,
   const mor = await morosos();
   assert.deepEqual([m1, m2, m3, m4, m5].map((m) => mor.includes(m.estId)), [true, false, true, true, false]);
 
-  // ── H4 · PREVENTIVA (una por cuota, sin ventana temporal) ──
+  // ── H4 · PREVENTIVA (una por cuota, dentro de la ventana de pago del mes entrante) ──
   const [p1, p2, p3, p4] = [await prev(1), await prev(2), await prev(3), await prev(4)];
   await nota(p2, 'PREVENTIVA', 'GENERADA', { dias: 1, cuota: p2.cuotaId });                      // bot, el ciclo de ayer: huérfana tras una caída → bloquea el reenvío
   await nota(p3, 'PREVENTIVA', 'GENERADA', { creadoPor: adminId, cuota: p3.cuotaId });           // panel → NO bloquea
@@ -1326,12 +1341,12 @@ t('cron WhatsApp H4/H1 (SQL real): la GENERADA del bot cuenta como «en vuelo»,
 
 t('cron WhatsApp H3 (BD real): si otra instancia toma el arrendamiento a mitad del ciclo, la renovación lo detecta y el ciclo se aborta sin enviar más; el lease ajeno no se borra', async () => {
   const { crearCronWhatsapp, CLAVE_LEASE } = require('../cron/whatsappCron');
-  const hoy = svc.hoy();
-  for (let i = 0; i < 30; i += 1) await sembrar({ vence: sumarDias(hoy, -3), nombres: `H3Lease${i}`, apellidos: 'Congelado' });
+  const reloj = relojCobranza();
+  const real = svc.hoy();
+  for (let i = 0; i < 30; i += 1) await sembrar({ vence: sumarDias(real, -3), nombres: `H3Lease${i}`, apellidos: 'Congelado' });
   await db.ejecutar(`UPDATE modulos_premium SET habilitado = TRUE, habilitado_en = NOW(), prueba_iniciada_en = NULL, expira_prueba_en = NULL WHERE codigo = 'WHATSAPP_AUTOMATICO'`);
   const llamadas = [];
   const notificaciones = {
-    VENTANA_PREVENTIVA: svc.notif.VENTANA_PREVENTIVA,
     generarAlerta: async (a) => {
       llamadas.push(a.estudianteId);
       // Tras el 5.º envío «otra instancia» toma el lease: es lo que ocurre si este proceso se congela más que `arrendamientoMin`.
@@ -1341,7 +1356,7 @@ t('cron WhatsApp H3 (BD real): si otra instancia toma el arrendamiento a mitad d
   };
   const config = { activo: true, hora: '08:00', delayMs: 1500, maxEnviosPorCiclo: 100000, morosidadCadaDias: 7, maxFallosSeguidos: 50, arrendamientoMin: 120 };
   const cron = crearCronWhatsapp({ db, guard: svc.guard.crearGuard({ ttlMs: 0 }), notificaciones, whatsapp: { configurado: () => true }, bcv: { obtenerTasa: async () => ({}) },
-    config, esperar: async () => {}, log: () => {}, logError: () => {} });
+    config, ahora: reloj.ahora, esperar: async () => {}, log: () => {}, logError: () => {} });
   try {
     const r = await cron.ejecutarCiclo();
     assert.deepEqual([r.estado, r.abortado], ['ABORTADO', 'LEASE_PERDIDO']);

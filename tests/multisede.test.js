@@ -50,6 +50,9 @@ test('cron por sede: SQL posicional ($n) con alcance de sede; recorre cada sede 
     db, notificaciones, guard: { evaluar: async () => ({ habilitado: true }) }, whatsapp: { configurado: () => true },
     bcv: { obtenerTasa: async () => ({}) }, config: { delayMs: 0, maxEnviosPorCiclo: 50, morosidadCadaDias: 7, maxFallosSeguidos: 5, arrendamientoMin: 120, hora: '08:00' },
     esperar: async () => undefined, log: () => undefined, logError: () => undefined,
+    // Reloj fijo: con la «regla de los 10 días» el ciclo solo corre la preventiva en los 2 últimos días del mes y la mora desde el día 11.
+    // 30-oct-2026 activa ambos bloques; sin fijarlo, este test dependería del día en que se ejecuta.
+    ahora: () => Date.parse('2026-10-30T12:00:00-04:00'),
   });
   const r = await cron.ejecutarCiclo();
   assert.equal(r.estado, 'COMPLETADO');

@@ -13,9 +13,39 @@ test('el login usa el logotipo BMA sobre tarjeta de cristal; Astra solo aparece 
   assert.match(admin, /logoCompletoHtml\(/);
   assert.match(admin, /bg-bma-azul/);
   assert.match(leer('frontend', 'src', 'lib', 'ui.ts'), /bg-white\/90[^']*shadow-2xl[^']*backdrop-blur-md|backdrop-blur-md/);
-  assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'src', 'login-animation.ts')), false);
-  assert.doesNotMatch(admin, /login-animation|montarAnimacionLogin/);
-  for (const f of ['admin.ts', 'lib/marca.ts', 'lib/ui.ts']) assert.doesNotMatch(leer('frontend', 'src', f), /astra/i);
+  // La intro de marca (isotipo + texto) vive en su propio módulo y el login solo la orquesta: ver el test «intro de marca del login».
+  assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'src', 'login-animation.ts')), true);
+  assert.match(admin, /from '\.\/login-animation'/);
+  assert.match(admin, /iniciarIntroLogin\(/);
+  for (const f of ['admin.ts', 'lib/marca.ts', 'lib/ui.ts', 'login-animation.ts']) assert.doesNotMatch(leer('frontend', 'src', f), /astra/i);
+});
+
+test('intro de marca del login: isotipo desde el centro, texto con clip-path, tarjeta de cristal al final y accesible', () => {
+  const ts = leer('frontend', 'src', 'login-animation.ts');
+  const css = leer('frontend', 'src', 'styles', 'main.css');
+  // Activos oficiales, importados para que Vite los emita con hash.
+  assert.match(ts, /from '\.\/assets\/bma-isotipo\.png'/);
+  assert.match(ts, /from '\.\/assets\/bma-texto\.png'/);
+  for (const f of ['bma-isotipo.png', 'bma-texto.png']) assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'src', 'assets', f)), true, f);
+  // Orden de la secuencia: isotipo → texto → salida (la tarjeta se revela al final).
+  assert.match(ts, /fase: 'isotipo'[\s\S]*fase: 'texto'/);
+  assert.match(ts, /poner\('salida'\)/);
+  // CSS: escala 0 → 1 con desaceleración, texto con máscara clip-path desde el centro y la tarjeta oculta hasta la revelación.
+  assert.match(css, /\.intro-login__isotipo \{[^}]*scale\(0\)/);
+  assert.match(css, /\.intro-login\[data-fase='isotipo'\] \.intro-login__isotipo \{[^}]*scale\(1\)[^}]*cubic-bezier/);
+  assert.match(css, /\.intro-login__texto \{[^}]*clip-path: inset\(0 50% 0 50%\)/);
+  assert.match(css, /clip-path: inset\(0 0 0 0\)/);
+  assert.match(css, /\[data-intro='activa'\] \[data-intro-revelar\] \{[^}]*opacity: 0/);
+  assert.match(css, /@keyframes intro-tarjeta-revelar/);
+  assert.match(leer('frontend', 'src', 'admin.ts'), /<section data-intro-revelar class="\$\{CLS\.loginTarjeta\}/); // la tarjeta glassmorphic es lo que se revela
+  // Accesibilidad y robustez: reducir movimiento, formulario inerte durante la intro, velo decorativo, omitible y una sola vez por página.
+  assert.match(ts, /prefers-reduced-motion: reduce/);
+  assert.match(ts, /pantalla\.inert = true/);
+  assert.match(ts, /setAttribute\('aria-hidden', 'true'\)/);
+  assert.match(ts, /'Escape'/);
+  assert.match(ts, /let yaMostrada = false/);
+  // Sin `any` ni supresiones de tipos en el módulo.
+  assert.doesNotMatch(ts, /:\s*any\b|\bas any\b|<any>|@ts-ignore|@ts-expect-error/);
 });
 
 test('el lienzo azul solo aplica al panel admin y las cabeceras de tabla son moradas', () => {
@@ -62,7 +92,7 @@ test('login: red neuronal y firma Astra; niveles fijos de la Sede Este y «Nivel
   assert.match(leer('frontend', 'tailwind.config.js'), /Outfit/);
 });
 
-test('marca unificada: asset de Astra, cabecera dual, encabezados púrpura y pie de autoría en las vistas públicas', () => {
+test('marca unificada: cabecera dual solo en el portal, planilla con solo el isotipo BMA, encabezados púrpura y pie con Astra en ambas', () => {
   assert.equal(fs.existsSync(path.join(raiz, 'frontend', 'src', 'assets', 'astra-logo.png')), true);
   assert.match(leer('frontend', 'src', 'types', 'assets.d.ts'), /declare module '\*\.png'/);
   const firma = leer('frontend', 'src', 'lib', 'firma.ts');
@@ -72,8 +102,19 @@ test('marca unificada: asset de Astra, cabecera dual, encabezados púrpura y pie
   assert.match(firma, /group-data-\[collapsed=true\]\/sb:h-10/); // el isotipo crece en el rail contraído del sidebar
 
   const planilla = leer('frontend', 'src', 'admisiones.ts');
-  assert.match(planilla, /cabeceraDualHtml\(\)/);
+  // La planilla ya NO usa la cabecera dual: su cabecera lleva solo el isotipo circular de BMA y Astra queda únicamente en el pie.
+  assert.doesNotMatch(planilla, /cabeceraDualHtml/);
+  assert.match(planilla, /cabeceraIsotipoHtml\(\)/);
   assert.match(planilla, /firmaPublica\(\)/);
+  const cabeceraPlanilla = /<header class="flex flex-col gap-4">[\s\S]*?<\/header>/.exec(planilla)?.[0] ?? '';
+  assert.match(cabeceraPlanilla, /cabeceraIsotipoHtml\(\)/);
+  assert.doesNotMatch(cabeceraPlanilla, /astra|firma|cabeceraDual|logoCompletoHtml/i);
+  assert.doesNotMatch(planilla, /astra-logo/); // el metal de Astra solo se importa desde lib/firma.ts
+  assert.ok(planilla.indexOf('${firmaPublica()}') > planilla.indexOf('<form id="planilla"'), 'el pie con Astra va después de la planilla');
+  const marcaTs = leer('frontend', 'src', 'lib', 'marca.ts');
+  assert.match(marcaTs, /export function cabeceraIsotipoHtml\(/);
+  assert.match(marcaTs, /from '\.\.\/assets\/bma-isotipo\.png'/);
+  assert.equal((marcaTs.match(/<img /g) ?? []).length, 3, 'logo completo, isotipo del sidebar e isotipo grande de la planilla: ningún otro logotipo en marca.ts');
   const encabezado = /function encabezadoSeccion[\s\S]*?\n}/.exec(planilla)?.[0] ?? '';
   assert.match(encabezado, /bg-bma-purpura[ "]/);
   assert.match(encabezado, /text-white/);
